@@ -553,7 +553,11 @@ class Trainer:
                     self.cache is not None
                     and self.cache.mode == "partition_lru"
                 )
+
+                size_mb = (out.numel() * out.element_size()) / (1024 ** 2)
+
                 if use_bypass:
+                    print(f"[Layer {layer_id} | PID {pid}] Writing {size_mb:.2f} MB to Storage (NVMe bypass)...")
                     self.host_features[layer_id + 1].async_bypass_to_storage(
                         pid, out, self.streams.d2h[pool_idx]
                     )
