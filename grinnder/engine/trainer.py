@@ -562,6 +562,7 @@ class Trainer:
                         pid, out, self.streams.d2h[pool_idx]
                     )
                 else:
+                    print(f"[Layer {layer_id} | PID {pid}] Writing {size_mb:.2f} MB to Host RAM...")
                     self.host_features[layer_id + 1].async_fill(
                         pid, out, self.streams.d2h[pool_idx]
                     )
