@@ -176,9 +176,9 @@ class Trainer:
         reserved = torch.cuda.memory_reserved(self.device) / float(1024**3)
         device_resident = self._device_buffer_resident_bytes() / float(1024**3)
         return (
-            f" gpu_alloc_gb={alloc:.2f}"
-            f" gpu_reserved_gb={reserved:.2f}"
-            f" device_buffers_gb={device_resident:.2f}"
+            f"\n GPU memory in use = {alloc:.2f}"
+            f"\n Total GPU memory reserved [In use + cached] = {reserved:.2f}"
+            f"\n device_buffers_gb = {device_resident:.2f}"
         )
 
     def _device_buffer_resident_bytes(self) -> int:
