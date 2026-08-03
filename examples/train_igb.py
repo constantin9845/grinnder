@@ -83,7 +83,7 @@ def main():
     device = args.device
 
     # ---- Load dataset ----
-    print(f"Loading IGB-{args.igb_size} dataset from {args.igb_root}...")
+    print(f"\n\nLoading IGB-{args.igb_size} dataset from {args.igb_root}...")
     t0 = time.time()
     data = load_igb(
         args.igb_root,
@@ -128,7 +128,7 @@ def main():
     )
 
     # ---- Partition graph ----
-    print("Partitioning...")
+    print("\n\n\nPartitioning...")
     cache_path = None
     if args.partition_cache_dir:
         from pathlib import Path
@@ -154,7 +154,7 @@ def main():
     print(f"  Partition sizes: min={min(graph.partition_sizes):,}, "
           f"max={max(graph.partition_sizes):,}, "
           f"avg={sum(graph.partition_sizes)//len(graph.partition_sizes):,}")
-    print(f"  {report_memory('After partition')}")
+    print(f"  {report_memory('After partition')}\n\n")
 
     # Free original metadata container; graph keeps an mmap-backed feature source.
     del data
@@ -164,8 +164,8 @@ def main():
     model = build_model(args, graph).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     print(
-        f"Model: {args.model.upper()} "
-        f"({args.num_layers} layers, {args.hidden} hidden, {n_params:,} params)"
+        f"\n\nModel: {args.model.upper()} "
+        f"({args.num_layers} layers, {args.hidden} hidden, {n_params:,} params) \n\n"
     )
 
     # ---- Train ----
@@ -174,13 +174,13 @@ def main():
         plan = trainer.cache.memory_plan
         to_gb = lambda nbytes: nbytes / float(1024**3)
         print(
-            "Cache plan: "
-            f"mode={trainer.cache.mode}, "
-            f"remaining={to_gb(plan.remaining_cache_bytes):.2f}GB, "
-            f"activation_budget={to_gb(trainer.cache.activation_cache_budget_bytes):.2f}GB, "
-            f"all_layer_residency={to_gb(plan.all_layer_residency_bytes):.2f}GB, "
-            f"layer_working_set={to_gb(plan.layer_working_set_bytes):.2f}GB, "
-            f"safety_margin={to_gb(plan.safety_margin_bytes):.2f}GB"
+            "Cache plan: \n"
+            f"mode={trainer.cache.mode}, \n"
+            f"remaining={to_gb(plan.remaining_cache_bytes):.2f}GB, \n"
+            f"activation_budget={to_gb(trainer.cache.activation_cache_budget_bytes):.2f}GB, \n"
+            f"all_layer_residency={to_gb(plan.all_layer_residency_bytes):.2f}GB, \n"
+            f"layer_working_set={to_gb(plan.layer_working_set_bytes):.2f}GB, \n"
+            f"safety_margin={to_gb(plan.safety_margin_bytes):.2f}GB\n\n"
         )
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=5e-4)
     criterion = torch.nn.CrossEntropyLoss()
