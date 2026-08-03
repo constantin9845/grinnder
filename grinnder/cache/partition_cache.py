@@ -279,11 +279,11 @@ class PartitionCache:
         demand_bytes = sum(self._partition_bytes(layer_id, pid) for pid in deps)
         if demand_bytes > self._activation_cache_budget:
             raise MemoryError(
-                f" {50*"*"}"
+                f"*****************************************"
                 f"Layer {layer_id}, partition {target_pid} dependencies require "
                 f"{demand_bytes/1024/1024} MB, but only {self._activation_cache_budget/1024/1024} "
                 "activation-cache MB remain"
-                f" {50*"*"}"
+                f"*****************************************"
             )
 
         missing = []
