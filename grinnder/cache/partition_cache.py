@@ -279,9 +279,11 @@ class PartitionCache:
         demand_bytes = sum(self._partition_bytes(layer_id, pid) for pid in deps)
         if demand_bytes > self._activation_cache_budget:
             raise MemoryError(
+                f" {50*"*"}"
                 f"Layer {layer_id}, partition {target_pid} dependencies require "
-                f"{demand_bytes} bytes, but only {self._activation_cache_budget} "
-                "activation-cache bytes remain"
+                f"{demand_bytes/1024/1024} MB, but only {self._activation_cache_budget/1024/1024} "
+                "activation-cache MB remain"
+                f" {50*"*"}"
             )
 
         missing = []
@@ -310,6 +312,7 @@ class PartitionCache:
         for key in missing:
             _, pid = key
             self.host_buffers[layer_id].storage_to_cpu(pid=pid)
+            print(f"Loaded required partitions to CPU\n")
             self._cached_partitions[key] = True
             self._resident_activation_bytes += self._partition_bytes(layer_id, pid)
 
@@ -357,6 +360,8 @@ class PartitionCache:
                 for pid in self.grad_buffers[layer_id].allocated_pids():
                     self.grad_buffers[layer_id].cpu_to_storage(pid)
                     self.grad_buffers[layer_id].release(pid)
+                
+                print(f"Flushing gradients to SSD [Layer = {layer_id} | Partition = {pid}]\n")
                 return
             self.grad_buffers[layer_id].cpu_to_storage()
 

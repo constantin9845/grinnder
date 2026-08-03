@@ -267,8 +267,10 @@ class Trainer:
         """Load a gradient partition from storage, or materialize zero if absent."""
         grad = self.host_gradients[layer_id]
         if grad is None or grad.is_allocated(pid):
+            print("Gradients already allocated")
             return
         if grad.storage_exists(pid):
+            print("Gradients move SSD --> CPU")
             grad.storage_to_cpu(pid)
         else:
             grad.zero_partition(pid)
@@ -349,13 +351,9 @@ class Trainer:
 
         # Phase 1: Layer-wise forward
         for layer_id in range(self.model.num_layers):
-            self._progress(
-                f"forward layer {layer_id + 1}/{self.model.num_layers} start"
-            )
+            self._progress(f"forward layer {layer_id + 1}/{self.model.num_layers} start")
             self._forward_layer(layer_id)
-            self._progress(
-                f"forward layer {layer_id + 1}/{self.model.num_layers} done"
-            )
+            self._progress(f"forward layer {layer_id + 1}/{self.model.num_layers} done")
 
         # Phase 2: compute per-partition losses. In bypass modes the final
         # activations are loaded from storage one partition at a time.
@@ -557,7 +555,7 @@ class Trainer:
                 size_mb = (out.numel() * out.element_size()) / (1024 ** 2)
 
                 if use_bypass:
-                    print(f"[Layer {layer_id} | PID {pid}] Writing {size_mb:.2f} MB to Storage (NVMe bypass)...")
+                    print(f"[Layer {layer_id} | PID {pid}] Writing {size_mb:.2f} MB of output activations to Storage (NVMe bypass)...")
                     self.host_features[layer_id + 1].async_bypass_to_storage(
                         pid, out, self.streams.d2h[pool_idx]
                     )
@@ -673,12 +671,15 @@ class Trainer:
         # Prologue: upload first assigned partition's activation
         first_pid = pids[0]
         if use_bypass:
+            print(f"LOSS : load partition [{0}] [SSD --> CPU]")
             self.host_features[-1].storage_to_cpu(first_pid)
         act_first = self.activations[last_layer][first_pid]
         if act_first is not None:
             act_first.untyped_storage().resize_(
                 act_first.numel() * act_first.element_size()
             )
+
+        print("LOSS : load partition [{0}] [CPU --> GPU]")
         self.host_features[-1].async_upload(
             first_pid, act_first, self.streams.h2d[0]
         )
@@ -693,12 +694,14 @@ class Trainer:
             if i < len(pids) - 1 and pool_size > 1:
                 next_pid = pids[i + 1]
                 if use_bypass:
+                    print(f"LOSS : load partition [{next_pid}] [SSD --> CPU]")
                     self.host_features[-1].storage_to_cpu(next_pid)
                 act_next = self.activations[last_layer][next_pid]
                 if act_next is not None:
                     act_next.untyped_storage().resize_(
                         act_next.numel() * act_next.element_size()
                     )
+                print("LOSS : load partition [{next_pid}] [CPU --> GPU]")
                 self.host_features[-1].async_upload(
                     next_pid, act_next,
                     self.streams.h2d[(i + 1) % pool_size],
@@ -879,6 +882,7 @@ class Trainer:
         # GradOffload scatters ∇A^{L-1} into the host write-back buffer during
         # the checkpoint recompute. The next backward phase uploads that buffer,
         # so all scatters from this phase must be visible first.
+        print("Flush all gradients to write back buffer (GPU --> CPU)")
         if layer_id > 0 and self.host_gradients[layer_id] is not None:
             for i, _ in enumerate(pids):
                 pool_idx = i % pool_size
