@@ -356,6 +356,7 @@ class PartitionCache:
 
         # Partition-wise mode still bypasses outputs to storage and loads only
         # demanded partitions on the next gather/regather.
+        self.cached_partitions()
 
     def on_backward_layer_complete(self, layer_id: int) -> None:
         """Called after backward layer completes. Flush gradients to storage."""
@@ -394,11 +395,6 @@ class PartitionCache:
     def cached_partitions(self):
 
         total = 0
-        temp = [
-                [],
-                [],
-                []
-             ]
         gb = [
                 [],
                 [],
@@ -408,16 +404,15 @@ class PartitionCache:
             for p in range(self.host_buffers[i].num_parts):
                 gb[i].append(round(self.host_buffers[i].partition_nbytes(p)/(1024**3),2))
                 total += round(self.host_buffers[i].partition_nbytes(p)/(1024**3),2)
-                temp[i].append("|")
 
 
         print(f"\n[Cache Status] Partitions in cache: {self.host_buffers[0].num_parts+self.host_buffers[1].num_parts+self.host_buffers[2].num_parts}")
         print(f"\nTotal size of partitions in DRAM =  {round(total,2)}GB")
         print("Partitions:")
-        print(temp)
+        print(f"\t[L0] : {len(gb[0])}")
+        print(f"\t[L1] : {len(gb[1])}")
+        print(f"\t[L2] : {len(gb[2])}")
         
-     
-
     def _evict_partition(self, layer_id: int, pid: int) -> None:
         """Evict a single partition's activations from host cache.
 
