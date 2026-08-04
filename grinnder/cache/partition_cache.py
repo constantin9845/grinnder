@@ -395,9 +395,13 @@ class PartitionCache:
     def cached_partitions(self):
 
         seen_partitions = set()
+        gb = []
         print(f"\n[Cache Status] Total entries in cache: {self.host_buffers[0].num_parts}")
         for p in range(self.host_buffers[0].num_parts):
-            print(f"\n\tPartition {p} size = {round(self.host_buffers[0].partition_nbytes(p)/(1024**3),2)}GB")
+            gb[p] = round(self.host_buffers[0].partition_nbytes(p)/(1024**3),2)
+
+
+        print(f"\nTotal size of partitions in DRAM =  {sum(gb)}GB")
 
         layers = sorted(set(layer for layer, _ in self._cached_partitions.keys()))
         
@@ -408,10 +412,7 @@ class PartitionCache:
             if new_partitions:
                 print(f"  Layer {layer:2d}: {len(new_partitions)} new partition(s) -> {new_partitions}")
                 seen_partitions.update(new_partitions)
-
-
-        print(f"Cache status = {round((self._budget - (self._activation_cache_budget))/(1024**3),2)}GB/{round(self._budget/(1024**3),2)}GB")
-        print("\n")       
+     
 
     def _evict_partition(self, layer_id: int, pid: int) -> None:
         """Evict a single partition's activations from host cache.
