@@ -474,7 +474,7 @@ class PartitionCache:
             if key not in protected:
                 redundant += 1
 
-        print(f"Redundant partitions = {redundant}/{total} | All cached partitions = {round(bytes/(1024**3),2)}GB")
+        #print(f"Redundant partitions = {redundant}/{total} | All cached partitions = {round(bytes/(1024**3),2)}GB")
 
     def reset(self) -> None:
         """Reset cache state for new epoch."""
