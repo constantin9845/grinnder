@@ -450,7 +450,7 @@ class PartitionCache:
 
         Ensure a storage copy exists before freeing host memory.
         """
-        self._cache_tracker.remove_partition(layer_id, pid, self._partition_bytes(layer_id, pid))
+        self._cache_tracker.remove_partition(layer_id, pid)
         key = (layer_id, pid)
         buf = self.host_buffers[layer_id]
         buf.ensure_storage_copy(pid)

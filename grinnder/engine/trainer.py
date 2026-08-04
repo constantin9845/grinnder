@@ -270,7 +270,7 @@ class Trainer:
             print("Gradients already allocated")
             return
         if grad.storage_exists(pid):
-            print("Gradients move SSD --> CPU")
+            print(f"[Layer = {layer_id} | PID = {pid}]Gradients move SSD --> CPU")
             grad.storage_to_cpu(pid)
             self.cache.add_gradient_relay(layer_id, pid)
         else:
@@ -381,7 +381,7 @@ class Trainer:
             )
 
         self.cache.cache_tracker_print()
-        
+
         # Scale gradients by 1/total_train_nodes for mean reduction
         # (equivalent to CrossEntropyLoss(reduction='mean') over all nodes)
         n_total_train = metrics.get("_n_train", 1)
