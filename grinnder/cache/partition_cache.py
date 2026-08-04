@@ -28,26 +28,32 @@ class PartitionCacheTracker:
     num_grads: int
 
     def add_partition(self, layer, pid, size):
-        self.partitions[layer][pid] = size
-        self.num_parts += 1
+        if self.partitions[layer][pid] != 0:
+            self.partitions[layer][pid] = size/(1024**3)
+            self.num_parts += 1
 
     def remove_partition(self, layer, pid):
-        self.partitions[layer][pid] = 0
-        self.num_parts -= 1
+        if self.partitions[layer][pid] != 0:
+            self.partitions[layer][pid] = 0
+            self.num_parts -= 1
 
     def add_gradient(self, layer, pid, size):
-        self.gradients[layer][pid] = size
-        self.num_grads += 1
+        if self.gradients[layer][pid] != 0:
+            self.gradients[layer][pid] = size/(1024**3)
+            self.num_grads += 1
 
     def remove_gradient(self, layer, pid):
-        self.gradients[layer][pid] = 0
-        self.num_grads -= 1
+        if self.gradients[layer][pid] != 0:
+            self.gradients[layer][pid] = 0
+            self.num_grads -= 1
 
     def print_cache(self):
         total_part = sum(self.partitions[0]) + sum(self.partitions[1]) + sum(self.partitions[2])
+        total_part = total_part/(1024**3)
         total_part = round(total_part,2)
 
         total_grad = sum(self.gradients[0]) + sum(self.gradients[1]) + sum(self.gradients[2])
+        total_grad = total_grad/(1024**3)
         total_grad = round(total_grad,2)
 
 
