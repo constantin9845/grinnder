@@ -401,9 +401,9 @@ class PartitionCache:
             partitions = grouped[layer]
             print(f"  Layer {layer:2d}: {len(partitions)} partitions cached -> {partitions}")
 
-            print(f"\nPartitions in cache = {len(self._cached_partitions.values())}")
-            print(f"Cache status = {round((self._budget - (self._activation_cache_budget))/(1024**3),2)}GB/{round(self._budget/(1024**3),2)}GB")
-            print("\n")
+
+        print(f"Cache status = {round((self._budget - (self._activation_cache_budget))/(1024**3),2)}GB/{round(self._budget/(1024**3),2)}GB")
+        print("\n")
                 
 
     def _evict_partition(self, layer_id: int, pid: int) -> None:
