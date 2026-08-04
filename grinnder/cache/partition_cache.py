@@ -394,7 +394,6 @@ class PartitionCache:
             if i == True:
                 cnt += 1
         print(f"\nPartition cache status = {cnt}/{32}")
-        print(self._cached_partitions.values())
         print("\n")
                 
 
