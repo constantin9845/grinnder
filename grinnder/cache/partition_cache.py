@@ -508,7 +508,9 @@ class PartitionCache:
 
         return PartitionCacheTracker(
             partitions,
-            gradients
+            gradients,
+            0,
+            0
         )
     
     def reset(self) -> None:
