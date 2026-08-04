@@ -671,7 +671,7 @@ class Trainer:
         # Prologue: upload first assigned partition's activation
         first_pid = pids[0]
         if use_bypass:
-            print(f"LOSS : load partition [{0}] [SSD --> CPU]")
+            print(f"LOSS : load partition [0] [SSD --> CPU]")
             self.host_features[-1].storage_to_cpu(first_pid)
         act_first = self.activations[last_layer][first_pid]
         if act_first is not None:
@@ -679,7 +679,7 @@ class Trainer:
                 act_first.numel() * act_first.element_size()
             )
 
-        print("LOSS : load partition [{0}] [CPU --> GPU]")
+        print("LOSS : load partition [0] [CPU --> GPU]")
         self.host_features[-1].async_upload(
             first_pid, act_first, self.streams.h2d[0]
         )
@@ -701,11 +701,13 @@ class Trainer:
                     act_next.untyped_storage().resize_(
                         act_next.numel() * act_next.element_size()
                     )
-                print("LOSS : load partition [{next_pid}] [CPU --> GPU]")
+                
                 self.host_features[-1].async_upload(
                     next_pid, act_next,
                     self.streams.h2d[(i + 1) % pool_size],
                 )
+
+                print(f"LOSS : load partition [{next_pid}] [CPU --> GPU]")
 
             # Get masks and labels
             y = self.graph.partition_labels(pid).to(self.device)
