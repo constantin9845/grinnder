@@ -492,13 +492,13 @@ class PartitionCache:
                 return key
         return None
     
-    def _build_cache_tracker(self, partitions) -> PartitionCacheTracker:
+    def _build_cache_tracker(self, parts) -> PartitionCacheTracker:
 
         partitions=[[],[],[]]
         gradients=[[],[],[]]
 
-        print(len(partitions))
-        for i in range(len(partitions)):
+
+        for i in range(parts):
             partitions[0].append(0)
             partitions[1].append(0)
             partitions[2].append(0)
