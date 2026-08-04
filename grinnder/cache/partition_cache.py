@@ -463,13 +463,14 @@ class PartitionCache:
         return None
     
     def print_evicatable_partitions(self, protected: Set[Tuple[int, int]]) -> Optional[Tuple[int, int]]:
-        total = redundant = 0
+        total = redundant = bytes = 0
         for key in list(self._cached_partitions.keys()):
             total += 1
+            bytes += self._partition_bytes(key[0],key[1])
             if key not in protected:
                 redundant += 1
 
-        print(f"Redundant partitions = {redundant}/{total}")
+        print(f"Redundant partitions = {redundant}/{total} | All cached partitions = {bytes/(1024**3)}")
 
     def reset(self) -> None:
         """Reset cache state for new epoch."""
