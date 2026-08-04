@@ -316,6 +316,7 @@ class PartitionCache:
             self._resident_activation_bytes += self._partition_bytes(layer_id, pid)
 
         print(f"Loaded required partitions to CPU\n")
+        self.print_evicatable_partitions(keys)
         self.cached_partitions()
 
     def on_layer_complete(self, layer_id: int) -> None:
@@ -406,8 +407,7 @@ class PartitionCache:
 
 
         print(f"Cache status = {round((self._budget - (self._activation_cache_budget))/(1024**3),2)}GB/{round(self._budget/(1024**3),2)}GB")
-        print("\n")
-                
+        print("\n")       
 
     def _evict_partition(self, layer_id: int, pid: int) -> None:
         """Evict a single partition's activations from host cache.
@@ -455,14 +455,21 @@ class PartitionCache:
             return set(self.dependency_sets[target_pid])
         return {target_pid}
 
-    def _pop_evictable_partition(
-        self, protected: Set[Tuple[int, int]]
-    ) -> Optional[Tuple[int, int]]:
+    def _pop_evictable_partition(self, protected: Set[Tuple[int, int]]) -> Optional[Tuple[int, int]]:
         for key in list(self._cached_partitions.keys()):
             if key not in protected:
                 self._cached_partitions.pop(key)
                 return key
         return None
+    
+    def print_evicatable_partitions(self, protected: Set[Tuple[int, int]]) -> Optional[Tuple[int, int]]:
+        total = redundant = 0
+        for key in list(self._cached_partitions.keys()):
+            total += 1
+            if key not in protected:
+                redundant += 1
+
+        print(f"Redundant partitions = {redundant}/{total}")
 
     def reset(self) -> None:
         """Reset cache state for new epoch."""
