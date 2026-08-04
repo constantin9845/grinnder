@@ -398,7 +398,7 @@ class PartitionCache:
         gb = []
         print(f"\n[Cache Status] Total entries in cache: {self.host_buffers[0].num_parts}")
         for p in range(self.host_buffers[0].num_parts):
-            gb[p] = round(self.host_buffers[0].partition_nbytes(p)/(1024**3),2)
+            gb.append(round(self.host_buffers[0].partition_nbytes(p)/(1024**3),2))
 
 
         print(f"\nTotal size of partitions in DRAM =  {sum(gb)}GB")
