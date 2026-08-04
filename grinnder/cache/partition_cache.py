@@ -497,7 +497,7 @@ class PartitionCache:
         partitions=[[],[],[]]
         gradients=[[],[],[]]
 
-        for i in range(partitions):
+        for i in range(len(partitions)):
             partitions[0].append(0)
             partitions[1].append(0)
             partitions[2].append(0)
@@ -511,7 +511,6 @@ class PartitionCache:
             gradients
         )
     
-
     def reset(self) -> None:
         """Reset cache state for new epoch."""
         if self._mode == "lru_layer":
@@ -525,7 +524,6 @@ class PartitionCache:
         self._hits = 0
         self._misses = 0
         self._resident_activation_bytes = 0
-
 
     def add_gradient_relay(self, layer, pid):
         self._cache_tracker.add_gradient(layer,pid,self._partition_bytes(layer,pid))
