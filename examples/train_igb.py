@@ -67,7 +67,7 @@ def main():
     parser.add_argument("--lr", type=float, default=0.01)
     parser.add_argument("--dropout", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--storage_dir", type=str, default="/pci5_nvme/grinnder")
+    parser.add_argument("--storage_dir", type=str, default="/mnt/nvme")
     parser.add_argument("--runtime_safety_margin_gb", type=float, default=8.0)
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--pool_size", type=int, default=2)
