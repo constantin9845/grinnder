@@ -380,9 +380,20 @@ class PartitionCache:
         for pid in range(self.num_parts):
             buf.ensure_storage_copy(pid)
             buf.release(pid)
+            print(f"Evict partition {pid} from CPU cache")
         self._resident_activation_bytes = max(
             0, self._resident_activation_bytes - self._layer_bytes(layer_id)
         )
+
+    def cached_partitions(self):
+        cnt = 0
+        for i in self.cached_partitions:
+            if i == True:
+                cnt += 1
+        print(f"\nPartition cache status = {cnt}/{len(self.cached_partitions)}")
+        print(self.cached_partitions)
+        print("\n")
+                
 
     def _evict_partition(self, layer_id: int, pid: int) -> None:
         """Evict a single partition's activations from host cache.
