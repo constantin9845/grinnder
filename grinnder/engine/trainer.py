@@ -272,6 +272,7 @@ class Trainer:
         if grad.storage_exists(pid):
             print("Gradients move SSD --> CPU")
             grad.storage_to_cpu(pid)
+            self.cache.add_gradient_relay(layer_id, pid)
         else:
             grad.zero_partition(pid)
 
@@ -352,29 +353,35 @@ class Trainer:
         # Phase 1: Layer-wise forward
         for layer_id in range(self.model.num_layers):
             self._progress(f"FORWARD LAYER {layer_id + 1}/{self.model.num_layers} START")
+            self.cache.cache_tracker_print()
             self._forward_layer(layer_id)
             self._progress(f"FORWARD LAYER {layer_id + 1}/{self.model.num_layers} DONE")
 
         # Phase 2: compute per-partition losses. In bypass modes the final
         # activations are loaded from storage one partition at a time.
         self._progress("LOSS START")
+        self.cache.cache_tracker_print()
         losses, metrics = self._compute_losses(criterion)
         self._progress("LOSS DONE")
 
         # Phase 3: Layer-wise backward (reverse)
         # Losses are sum-reduced per partition. Backward accumulates gradients.
         self._progress(f"BACKWARD LAYER {self.model.num_layers}/{self.model.num_layers} START")
+        self.cache.cache_tracker_print()
         self._backward_last_layer(losses)
         self._progress(f"BACKWARD LAYER {self.model.num_layers}/{self.model.num_layers} DONE")
         for layer_id in reversed(range(self.model.num_layers - 1)):
             self._progress(
                 f"backward layer {layer_id + 1}/{self.model.num_layers} start"
             )
+            self.cache.cache_tracker_print()
             self._backward_layer(layer_id)
             self._progress(
                 f"backward layer {layer_id + 1}/{self.model.num_layers} done"
             )
 
+        self.cache.cache_tracker_print()
+        
         # Scale gradients by 1/total_train_nodes for mean reduction
         # (equivalent to CrossEntropyLoss(reduction='mean') over all nodes)
         n_total_train = metrics.get("_n_train", 1)
@@ -671,7 +678,7 @@ class Trainer:
         # Prologue: upload first assigned partition's activation
         first_pid = pids[0]
         if use_bypass:
-            print(f"LOSS : load partition [0] [SSD --> CPU]")
+            print(f"LOSS : load partition [-1] [SSD --> CPU]")
             self.host_features[-1].storage_to_cpu(first_pid)
         act_first = self.activations[last_layer][first_pid]
         if act_first is not None:
@@ -679,7 +686,7 @@ class Trainer:
                 act_first.numel() * act_first.element_size()
             )
 
-        print("LOSS : load partition [0] [CPU --> GPU]")
+        print("LOSS : load partition [-1] [CPU --> GPU]")
         self.host_features[-1].async_upload(
             first_pid, act_first, self.streams.h2d[0]
         )
@@ -891,6 +898,9 @@ class Trainer:
                 self.host_gradients[layer_id].d2h_synchronize(
                     self.streams.d2h[pool_idx]
                 )
+
+                self.cache.add_gradient_relay(layer_id, pid)
+                
 
         if pool_size > 1:
             last_pid = pids[-1]

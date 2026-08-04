@@ -19,6 +19,50 @@ from grinnder.buffer.host import HostBuffer
 from grinnder.storage.backend import StorageBackend
 from grinnder.utils import get_available_host_memory
 
+@dataclass(frozen=False)
+class PartitionCacheTracker:
+    """Track partition and gradient cache status"""
+    partitions: List[List[int],List[int],List[int]]
+    gradients: List[List[int],List[int],List[int]]
+    num_parts: int
+    num_grads: int
+
+    def add_partition(self, layer, pid, size):
+        self.partitions[layer][pid] = size
+        self.num_parts += 1
+
+    def remove_partition(self, layer, pid):
+        self.partitions[layer][pid] = 0
+        self.num_parts -= 1
+
+    def add_gradient(self, layer, pid, size):
+        self.gradients[layer][pid] = size
+        self.num_grads += 1
+
+    def remove_gradient(self, layer, pid):
+        self.gradients[layer][pid] = 0
+        self.num_grads -= 1
+
+    def print_cache(self):
+        total_part = sum(self.partitions[0]) + sum(self.partitions[1]) + sum(self.partitions[2])
+        total_part = round(total_part,2)
+
+        total_grad = sum(self.gradients[0]) + sum(self.gradients[1]) + sum(self.gradients[2])
+        total_grad = round(total_grad,2)
+
+
+        print('\n*******************')
+        print(f'[Cache] : Partitions[{total_part}GB] + Gradients[{total_grad}GB] = [{total_part+total_grad}GB]')
+        print(f'\t[Partitions] [{self.num_parts}]')
+        print('---------------------------------')
+        print(f'|{self.partitions[0]}|\n|{self.partitions[1]}|\n|{self.partitions[2]}|')
+        print('---------------------------------')
+        print(f'\t[Gradients] [{self.num_grads}]')
+        print('---------------------------------')
+        print(f'|{self.gradients[0]}|\n|{self.gradients[1]}|\n|{self.gradients[2]}|')
+        print('---------------------------------')
+
+
 
 @dataclass(frozen=True)
 class CacheMemoryPlan:
@@ -92,6 +136,7 @@ class PartitionCache:
         self._fixed_resident_bytes = max(0, int(fixed_resident_bytes))
         self._safety_margin_bytes = max(0, int(safety_margin_bytes))
         self._memory_plan = self._build_memory_plan()
+        self._cache_tracker = self._build_cache_tracker(num_parts)
         self._layer_activation_cache_budget = max(
             0,
             self._memory_plan.remaining_cache_bytes
@@ -276,8 +321,6 @@ class PartitionCache:
         deps = self._dependency_set(target_pid, boundaries, dependencies)
         keys = {(layer_id, pid) for pid in deps}
 
-        #print(f"\nPartition {target_pid} requires partitions : {deps}\n")
-
         demand_bytes = sum(self._partition_bytes(layer_id, pid) for pid in deps)
         if demand_bytes > self._activation_cache_budget:
             raise MemoryError(
@@ -311,13 +354,16 @@ class PartitionCache:
                 )
             self._evict_partition(evict_key[0], evict_key[1])
 
+        # target partition first
+        self._cache_tracker.add_partition(layer_id, target_pid, self._partition_bytes(layer_id, target_pid))
+
         for key in missing:
             _, pid = key
             self.host_buffers[layer_id].storage_to_cpu(pid=pid)
             self._cached_partitions[key] = True
             self._resident_activation_bytes += self._partition_bytes(layer_id, pid)
+            self._cache_tracker.add_partition(layer_id, pid, self._partition_bytes(layer_id, pid))
             print(f"Loaded partition [Layer = {layer_id} | PID = {pid}]")
-
 
     def on_layer_complete(self, layer_id: int) -> None:
         """Called after forward layer completes. Decide what to flush."""
@@ -356,7 +402,6 @@ class PartitionCache:
         # Partition-wise mode still bypasses outputs to storage and loads only
         # demanded partitions on the next gather/regather.
         print("LAYER COMPLETE")
-        self.cached_partitions()
 
     def on_backward_layer_complete(self, layer_id: int) -> None:
         """Called after backward layer completes. Flush gradients to storage."""
@@ -366,7 +411,8 @@ class PartitionCache:
                     self.grad_buffers[layer_id].cpu_to_storage(pid)
                     self.grad_buffers[layer_id].release(pid)
                 
-                print(f"Flushing gradients to SSD [Layer = {layer_id} | Partition = {pid}]\n")
+                    print(f"Flushing gradients to SSD [Layer = {layer_id} | Partition = {pid}]\n")
+                    self._cache_tracker.remove_gradient(layer_id, pid)
                 return
             self.grad_buffers[layer_id].cpu_to_storage()
 
@@ -392,33 +438,13 @@ class PartitionCache:
 
         print("LAYER EVICTED")
         self.cached_partitions()
-
-    def cached_partitions(self):
-
-        total = 0
-        gb = [
-                [],
-                [],
-                []
-             ]
-        for i in range(3):
-            for p in range(self.host_buffers[i].num_parts):
-                gb[i].append(round(self.host_buffers[i].partition_nbytes(p)/(1024**3),2))
-                total += round(self.host_buffers[i].partition_nbytes(p)/(1024**3),2)
-
-
-        print(f"\n[Cache Status] Partitions in cache: {self.host_buffers[0].num_parts+self.host_buffers[1].num_parts+self.host_buffers[2].num_parts}")
-        print(f"\nTotal size of partitions in DRAM =  {round(total,2)}GB")
-        print("Partitions:")
-        print(f"\t[L0] : {len(gb[0])}")
-        print(f"\t[L1] : {len(gb[1])}")
-        print(f"\t[L2] : {len(gb[2])}")
         
     def _evict_partition(self, layer_id: int, pid: int) -> None:
         """Evict a single partition's activations from host cache.
 
         Ensure a storage copy exists before freeing host memory.
         """
+        self._cache_tracker.remove_partition(layer_id, pid, self._partition_bytes(layer_id, pid))
         key = (layer_id, pid)
         buf = self.host_buffers[layer_id]
         buf.ensure_storage_copy(pid)
@@ -429,7 +455,6 @@ class PartitionCache:
         self._cached_partitions.pop(key, None)
 
         print(f"PARTITION EVICTED [Layer = {layer_id} | PID = {pid}]")
-        self.cached_partitions()
 
     def _layer_bytes(self, layer_id: int) -> int:
         """Estimate bytes for one layer's activations."""
@@ -467,15 +492,25 @@ class PartitionCache:
                 return key
         return None
     
-    def print_evicatable_partitions(self, protected: Set[Tuple[int, int]]) -> Optional[Tuple[int, int]]:
-        total = redundant = bytes = 0
-        for key in list(self._cached_partitions.keys()):
-            total += 1
-            bytes += self._partition_bytes(key[0],key[1])
-            if key not in protected:
-                redundant += 1
+    def _build_cache_tracker(self, partitions) -> PartitionCacheTracker:
 
-        #print(f"Redundant partitions = {redundant}/{total} | All cached partitions = {round(bytes/(1024**3),2)}GB")
+        partitions=[[],[],[]]
+        gradients=[[],[],[]]
+
+        for i in range(partitions):
+            partitions[0].append(0)
+            partitions[1].append(0)
+            partitions[2].append(0)
+
+            gradients[0].append(0)
+            gradients[1].append(0)
+            gradients[2].append(0)
+
+        return PartitionCacheTracker(
+            partitions,
+            gradients
+        )
+    
 
     def reset(self) -> None:
         """Reset cache state for new epoch."""
@@ -490,3 +525,10 @@ class PartitionCache:
         self._hits = 0
         self._misses = 0
         self._resident_activation_bytes = 0
+
+
+    def add_gradient_relay(self, layer, pid):
+        self._cache_tracker.add_gradient(layer,pid,self._partition_bytes(layer,pid))
+
+    def cache_tracker_print(self):
+        self._cache_tracker.print_cache()
