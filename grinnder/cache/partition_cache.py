@@ -394,7 +394,12 @@ class PartitionCache:
     def cached_partitions(self):
 
         total = 0
-        gb = temp = [
+        temp = [
+                [],
+                [],
+                []
+             ]
+        gb = [
                 [],
                 [],
                 []
@@ -407,7 +412,7 @@ class PartitionCache:
 
 
         print(f"\n[Cache Status] Partitions in cache: {self.host_buffers[0].num_parts+self.host_buffers[1].num_parts+self.host_buffers[2].num_parts}")
-        print(f"\nTotal size of partitions in DRAM =  {total}GB")
+        print(f"\nTotal size of partitions in DRAM =  {round(total,2)}GB")
         print("Partitions:")
         print(temp)
         
