@@ -390,11 +390,11 @@ class PartitionCache:
 
     def cached_partitions(self):
         cnt = 0
-        for i in self._cached_partitions:
-            if i == True:
+        for i in self._cached_partitions.values():
+            if i[1] == True:
                 cnt += 1
         print(f"\nPartition cache status = {cnt}/{len(self._cached_partitions)}")
-        print(self._cached_partitions)
+        print(self._cached_partitions.values())
         print("\n")
                 
 
