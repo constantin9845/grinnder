@@ -270,7 +270,7 @@ class Trainer:
             print("Gradients already allocated")
             return
         if grad.storage_exists(pid):
-            print(f"[Layer = {layer_id} | PID = {pid}]Gradients move SSD --> CPU")
+            print(f"[Layer = {layer_id} | PID = {pid}] Gradients move SSD --> CPU")
             grad.storage_to_cpu(pid)
             self.cache.add_gradient_relay(layer_id, pid)
         else:
