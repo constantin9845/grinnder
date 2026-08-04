@@ -497,6 +497,7 @@ class PartitionCache:
         partitions=[[],[],[]]
         gradients=[[],[],[]]
 
+        print(len(partitions))
         for i in range(len(partitions)):
             partitions[0].append(0)
             partitions[1].append(0)
