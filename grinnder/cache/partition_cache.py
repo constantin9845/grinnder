@@ -394,6 +394,7 @@ class PartitionCache:
             if i == True:
                 cnt += 1
         print(f"\nPartition cache status = {cnt}/{32}")
+        print(f"Cache status = {self._budget - (self._activation_cache_budget/1024/1024/1024)}GB/{self._budget}GB")
         print("\n")
                 
 
