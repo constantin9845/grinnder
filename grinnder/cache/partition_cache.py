@@ -391,15 +391,18 @@ class PartitionCache:
 
     def cached_partitions(self):
 
-        from collections import defaultdict
-        grouped = defaultdict(list)
-        for layer, partition in self._cached_partitions.keys():
-            grouped[layer].append(partition)
+        seen_partitions = set()
+        print(f"\n[Cache Status] Total entries in cache: {len(self._cached_partitions)}")
+
+        layers = sorted(set(layer for layer, _ in self._cached_partitions.keys()))
         
-        print(f"\n[Cache Status] Total entries: {len(self._cached_partitions)}")
-        for layer in sorted(grouped.keys()):
-            partitions = grouped[layer]
-            print(f"  Layer {layer:2d}: {len(partitions)} partitions cached -> {partitions}")
+        for layer in layers:
+            layer_partitions = [p for l, p in self._cached_partitions.keys() if l == layer]
+            new_partitions = [p for p in layer_partitions if p not in seen_partitions]
+            
+            if new_partitions:
+                print(f"  Layer {layer:2d}: {len(new_partitions)} new partition(s) -> {new_partitions}")
+                seen_partitions.update(new_partitions)
 
 
         print(f"Cache status = {round((self._budget - (self._activation_cache_budget))/(1024**3),2)}GB/{round(self._budget/(1024**3),2)}GB")
