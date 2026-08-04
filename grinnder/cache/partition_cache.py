@@ -394,8 +394,8 @@ class PartitionCache:
         for i in self._cached_partitions.values():
             if i == True:
                 cnt += 1
-        print(f"\nPartition cache status = {cnt}/{32}")
-        print(f"Cache status = {(self._budget - (self._activation_cache_budget))/(1024**3)}GB/{self._budget/(1024**3)}GB")
+        print(f"\nPartitions in cache = {cnt}")
+        print(f"Cache status = {round((self._budget - (self._activation_cache_budget))/(1024**3),2)}GB/{round(self._budget/(1024**3),2)}GB")
         print("\n")
                 
 
