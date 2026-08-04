@@ -396,6 +396,8 @@ class PartitionCache:
 
         seen_partitions = set()
         print(f"\n[Cache Status] Total entries in cache: {self.host_buffers[0].num_parts}")
+        print(f"\n[Cache Status] Total entries in cache: {self.host_buffers[1].num_parts}")
+        print(f"\n[Cache Status] Total entries in cache: {self.host_buffers[2].num_parts}")
 
         layers = sorted(set(layer for layer, _ in self._cached_partitions.keys()))
         
