@@ -313,6 +313,7 @@ class PartitionCache:
             _, pid = key
             self.host_buffers[layer_id].storage_to_cpu(pid=pid)
             print(f"Loaded required partitions to CPU\n")
+            self.cached_partitions()
             self._cached_partitions[key] = True
             self._resident_activation_bytes += self._partition_bytes(layer_id, pid)
 
@@ -385,6 +386,8 @@ class PartitionCache:
             0, self._resident_activation_bytes - self._layer_bytes(layer_id)
         )
 
+        self.cached_partitions()
+
     def cached_partitions(self):
         cnt = 0
         for i in self.cached_partitions:
@@ -408,6 +411,8 @@ class PartitionCache:
             0, self._resident_activation_bytes - self._partition_bytes(layer_id, pid)
         )
         self._cached_partitions.pop(key, None)
+
+        self.cached_partitions()
 
     def _layer_bytes(self, layer_id: int) -> int:
         """Estimate bytes for one layer's activations."""
