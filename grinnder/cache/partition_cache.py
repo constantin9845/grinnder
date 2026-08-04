@@ -404,8 +404,9 @@ class PartitionCache:
                 temp[i].append("|")
 
 
+        total = sum(sum(row) for row in gb)
         print(f"\n[Cache Status] Partitions in cache: {self.host_buffers[0].num_parts+self.host_buffers[1].num_parts+self.host_buffers[2].num_parts}")
-        print(f"\nTotal size of partitions in DRAM =  {sum(map(sum, gb))}GB")
+        print(f"\nTotal size of partitions in DRAM =  {total}GB")
         print("Partitions:")
         print(temp)
         
