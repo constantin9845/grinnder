@@ -312,10 +312,11 @@ class PartitionCache:
         for key in missing:
             _, pid = key
             self.host_buffers[layer_id].storage_to_cpu(pid=pid)
-            print(f"Loaded required partitions to CPU\n")
-            self.cached_partitions()
             self._cached_partitions[key] = True
             self._resident_activation_bytes += self._partition_bytes(layer_id, pid)
+
+        print(f"Loaded required partitions to CPU\n")
+        self.cached_partitions()
 
     def on_layer_complete(self, layer_id: int) -> None:
         """Called after forward layer completes. Decide what to flush."""
@@ -394,7 +395,7 @@ class PartitionCache:
             if i == True:
                 cnt += 1
         print(f"\nPartition cache status = {cnt}/{32}")
-        print(f"Cache status = {self._budget - (self._activation_cache_budget/1024/1024/1024)}GB/{self._budget}GB")
+        print(f"Cache status = {(self._budget - (self._activation_cache_budget))/(1024**3)}GB/{self._budget/(1024**3)}GB")
         print("\n")
                 
 
@@ -412,6 +413,7 @@ class PartitionCache:
         )
         self._cached_partitions.pop(key, None)
 
+        print("Evicted single partition from cache")
         self.cached_partitions()
 
     def _layer_bytes(self, layer_id: int) -> int:
