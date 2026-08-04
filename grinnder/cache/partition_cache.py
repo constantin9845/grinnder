@@ -390,13 +390,20 @@ class PartitionCache:
         self.cached_partitions()
 
     def cached_partitions(self):
-        cnt = 0
-        for i in self._cached_partitions.values():
-            if i == True:
-                cnt += 1
-        print(f"\nPartitions in cache = {cnt}")
-        print(f"Cache status = {round((self._budget - (self._activation_cache_budget))/(1024**3),2)}GB/{round(self._budget/(1024**3),2)}GB")
-        print("\n")
+
+        from collections import defaultdict
+        grouped = defaultdict(list)
+        for layer, partition in self._cached_partitions.keys():
+            grouped[layer].append(partition)
+        
+        print(f"\n[Cache Status] Total entries: {len(self._cached_partitions)}")
+        for layer in sorted(grouped.keys()):
+            partitions = grouped[layer]
+            print(f"  Layer {layer:2d}: {len(partitions)} partitions cached -> {partitions}")
+
+            print(f"\nPartitions in cache = {len(self._cached_partitions.values())}")
+            print(f"Cache status = {round((self._budget - (self._activation_cache_budget))/(1024**3),2)}GB/{round(self._budget/(1024**3),2)}GB")
+            print("\n")
                 
 
     def _evict_partition(self, layer_id: int, pid: int) -> None:
