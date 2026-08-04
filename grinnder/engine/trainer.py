@@ -351,21 +351,21 @@ class Trainer:
 
         # Phase 1: Layer-wise forward
         for layer_id in range(self.model.num_layers):
-            self._progress(f"forward layer {layer_id + 1}/{self.model.num_layers} start")
+            self._progress(f"FORWARD LAYER {layer_id + 1}/{self.model.num_layers} START")
             self._forward_layer(layer_id)
-            self._progress(f"forward layer {layer_id + 1}/{self.model.num_layers} done")
+            self._progress(f"FORWARD LAYER {layer_id + 1}/{self.model.num_layers} DONE")
 
         # Phase 2: compute per-partition losses. In bypass modes the final
         # activations are loaded from storage one partition at a time.
-        self._progress("loss start")
+        self._progress("LOSS START")
         losses, metrics = self._compute_losses(criterion)
-        self._progress("loss done")
+        self._progress("LOSS DONE")
 
         # Phase 3: Layer-wise backward (reverse)
         # Losses are sum-reduced per partition. Backward accumulates gradients.
-        self._progress(f"backward layer {self.model.num_layers}/{self.model.num_layers} start")
+        self._progress(f"BACKWARD LAYER {self.model.num_layers}/{self.model.num_layers} START")
         self._backward_last_layer(losses)
-        self._progress(f"backward layer {self.model.num_layers}/{self.model.num_layers} done")
+        self._progress(f"BACKWARD LAYER {self.model.num_layers}/{self.model.num_layers} DONE")
         for layer_id in reversed(range(self.model.num_layers - 1)):
             self._progress(
                 f"backward layer {layer_id + 1}/{self.model.num_layers} start"

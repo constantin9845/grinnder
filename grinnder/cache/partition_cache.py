@@ -318,7 +318,6 @@ class PartitionCache:
             self._resident_activation_bytes += self._partition_bytes(layer_id, pid)
             print(f"Loaded partition [Layer = {layer_id} | PID = {pid}]")
 
-        self.cached_partitions()
 
     def on_layer_complete(self, layer_id: int) -> None:
         """Called after forward layer completes. Decide what to flush."""
@@ -356,6 +355,7 @@ class PartitionCache:
 
         # Partition-wise mode still bypasses outputs to storage and loads only
         # demanded partitions on the next gather/regather.
+        print("LAYER COMPLETE")
         self.cached_partitions()
 
     def on_backward_layer_complete(self, layer_id: int) -> None:
@@ -390,6 +390,7 @@ class PartitionCache:
             0, self._resident_activation_bytes - self._layer_bytes(layer_id)
         )
 
+        print("LAYER EVICTED")
         self.cached_partitions()
 
     def cached_partitions(self):
@@ -427,7 +428,7 @@ class PartitionCache:
         )
         self._cached_partitions.pop(key, None)
 
-        print(f"Evicted partition [Layer = {layer_id} | PID = {pid}]")
+        print(f"PARTITION EVICTED [Layer = {layer_id} | PID = {pid}]")
         self.cached_partitions()
 
     def _layer_bytes(self, layer_id: int) -> int:
