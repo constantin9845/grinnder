@@ -276,7 +276,7 @@ class PartitionCache:
         deps = self._dependency_set(target_pid, boundaries, dependencies)
         keys = {(layer_id, pid) for pid in deps}
 
-        print(f"\nPartition {target_pid} requires partitions : {deps}\n")
+        #print(f"\nPartition {target_pid} requires partitions : {deps}\n")
 
         demand_bytes = sum(self._partition_bytes(layer_id, pid) for pid in deps)
         if demand_bytes > self._activation_cache_budget:
@@ -316,9 +316,8 @@ class PartitionCache:
             self.host_buffers[layer_id].storage_to_cpu(pid=pid)
             self._cached_partitions[key] = True
             self._resident_activation_bytes += self._partition_bytes(layer_id, pid)
+            print(f"Loaded partition [Layer = {layer_id} | PID = {pid}]")
 
-        print(f"Loaded required partitions to CPU\n")
-        self.print_evicatable_partitions(keys)
         self.cached_partitions()
 
     def on_layer_complete(self, layer_id: int) -> None:
@@ -394,24 +393,20 @@ class PartitionCache:
 
     def cached_partitions(self):
 
-        seen_partitions = set()
-        gb = []
-        print(f"\n[Cache Status] Total entries in cache: {self.host_buffers[0].num_parts}")
-        for p in range(self.host_buffers[0].num_parts):
-            gb.append(round(self.host_buffers[0].partition_nbytes(p)/(1024**3),2))
+        gb = [
+                [],
+                [],
+                []
+             ]
+        for i in range(3):
+            for p in range(self.host_buffers[i].num_parts):
+                gb[i].append(round(self.host_buffers[i].partition_nbytes(p)/(1024**3),2))
 
 
-        print(f"\nTotal size of partitions in DRAM =  {sum(gb)}GB")
-
-        layers = sorted(set(layer for layer, _ in self._cached_partitions.keys()))
+        print(f"\n[Cache Status] Partitions in cache: {self.host_buffers[0].num_parts+self.host_buffers[1].num_parts+self.host_buffers[2].num_parts}")
+        print(f"\nTotal size of partitions in DRAM =  {sum(map(sum, gb))}GB")
+        print(gb)
         
-        for layer in layers:
-            layer_partitions = [p for l, p in self._cached_partitions.keys() if l == layer]
-            new_partitions = [p for p in layer_partitions if p not in seen_partitions]
-            
-            if new_partitions:
-                print(f"  Layer {layer:2d}: {len(new_partitions)} new partition(s) -> {new_partitions}")
-                seen_partitions.update(new_partitions)
      
 
     def _evict_partition(self, layer_id: int, pid: int) -> None:
@@ -428,7 +423,7 @@ class PartitionCache:
         )
         self._cached_partitions.pop(key, None)
 
-        print("Evicted single partition from cache")
+        print(f"Evicted partition [Layer = {layer_id} | PID = {pid}]")
         self.cached_partitions()
 
     def _layer_bytes(self, layer_id: int) -> int:
