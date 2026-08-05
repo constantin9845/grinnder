@@ -49,13 +49,9 @@ class PartitionCacheTracker:
 
     def print_cache(self):
         total_part = sum(self.partitions[0]) + sum(self.partitions[1]) + sum(self.partitions[2])
-        print(total_part)
-        total_part = total_part/(1024**3)
         total_part = round(total_part,2)
 
         total_grad = sum(self.gradients[0]) + sum(self.gradients[1]) + sum(self.gradients[2])
-        print(total_grad)
-        total_grad = total_grad/(1024**3)
         total_grad = round(total_grad,2)
 
 
