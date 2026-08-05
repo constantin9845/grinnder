@@ -325,6 +325,8 @@ class PartitionCache:
         deps = self._dependency_set(target_pid, boundaries, dependencies)
         keys = {(layer_id, pid) for pid in deps}
 
+        print(f"Partition {pid} requires {len(keys)} other partitions")
+
         demand_bytes = sum(self._partition_bytes(layer_id, pid) for pid in deps)
         if demand_bytes > self._activation_cache_budget:
             raise MemoryError(
