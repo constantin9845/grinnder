@@ -105,8 +105,7 @@ def main():
     config = GriNNderConfig(
         mode=args.mode,
         num_parts=args.num_parts,
-        #partitioner="grinnder",
-        partitioner="spinner",
+        partitioner="grinnder",
         partitioner_kwargs={
             "capacity": 1.1,
             "beta": 1.0,
