@@ -422,6 +422,7 @@ class HostBuffer:
             file_id = f"{self._file_prefix}_p{pid}"
             h = self._backend.host_read(file_id, self._tensors[pid])
             self._backend.wait(h)
+            exit(0)
             self._zero_initialized[pid] = True
         else:
             handles = []
@@ -435,7 +436,6 @@ class HostBuffer:
                     loaded.append(i)
             for h in handles:
                 self._backend.wait(h)
-                exit(0)
             for i in loaded:
                 self._zero_initialized[i] = True
 
