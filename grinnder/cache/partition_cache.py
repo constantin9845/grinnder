@@ -49,11 +49,9 @@ class PartitionCacheTracker:
 
     def print_cache(self):
         total_part = sum(self.partitions[0]) + sum(self.partitions[1]) + sum(self.partitions[2])
-        total_part = total_part/(1024**3)
         total_part = round(total_part,2)
 
         total_grad = sum(self.gradients[0]) + sum(self.gradients[1]) + sum(self.gradients[2])
-        total_grad = total_grad/(1024**3)
         total_grad = round(total_grad,2)
 
 
@@ -326,6 +324,8 @@ class PartitionCache:
         """
         deps = self._dependency_set(target_pid, boundaries, dependencies)
         keys = {(layer_id, pid) for pid in deps}
+
+        print(f"Partition {target_pid} requires {len(keys)} other partitions")
 
         demand_bytes = sum(self._partition_bytes(layer_id, pid) for pid in deps)
         if demand_bytes > self._activation_cache_budget:
