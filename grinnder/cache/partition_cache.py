@@ -370,6 +370,7 @@ class PartitionCache:
             self._resident_activation_bytes += self._partition_bytes(layer_id, pid)
             self._cache_tracker.add_partition(layer_id, pid, self._partition_bytes(layer_id, pid))
             print(f"Loaded partition [Layer = {layer_id} | PID = {pid}]")
+            exit(0)
 
     def on_layer_complete(self, layer_id: int) -> None:
         """Called after forward layer completes. Decide what to flush."""
