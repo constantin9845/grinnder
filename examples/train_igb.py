@@ -57,7 +57,7 @@ def main():
     parser.add_argument("--num_classes", type=int, default=19, choices=[19, 2983])
     parser.add_argument("--mode", type=str, default="grinnder", choices=["hongtu", "grinnder"])
     parser.add_argument("--num_parts", type=int, default=64)
-    parser.add_argument("--cache_mode", type=str, default="auto",
+    parser.add_argument("--cache_mode", type=str, default="partition_lru",
                         choices=["auto", "lru_layer", "partition_lru"])
     parser.add_argument("--model", type=str, default="gcn", choices=["gcn", "gat"])
     parser.add_argument("--hidden", type=int, default=256)

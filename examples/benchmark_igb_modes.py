@@ -117,7 +117,7 @@ def build_graph(data, args, num_parts: int):
             "num_threads": args.partitioner_threads,
         },
         preprocess_workers=args.preprocess_workers,
-        cache_mode="auto",
+        cache_mode="partition_lru",
         device=args.device,
         storage_dir=tempfile.mkdtemp(prefix=f"grinnder_igb_graph_{num_parts}p_"),
     )

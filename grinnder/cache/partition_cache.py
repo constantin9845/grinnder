@@ -113,7 +113,7 @@ class PartitionCache:
         host_buffers: List[HostBuffer],
         grad_buffers: List[Optional[HostBuffer]],
         backend: StorageBackend,
-        mode: Literal["auto", "lru_layer", "partition_lru"] = "auto",
+        mode: Literal["auto", "lru_layer", "partition_lru"] = "partition_lru",
         host_memory_budget_gb: float = 0,
         fixed_resident_bytes: int = 0,
         safety_margin_bytes: int = 0,
