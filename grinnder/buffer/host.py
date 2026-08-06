@@ -435,6 +435,7 @@ class HostBuffer:
                     loaded.append(i)
             for h in handles:
                 self._backend.wait(h)
+                exit(0)
             for i in loaded:
                 self._zero_initialized[i] = True
 
