@@ -363,6 +363,7 @@ class PartitionCache:
         # target partition first
         self._cache_tracker.add_partition(layer_id, target_pid, self._partition_bytes(layer_id, target_pid))
 
+        cnt = 0
 
         for key in missing:
             _, pid = key
@@ -371,7 +372,11 @@ class PartitionCache:
             self._resident_activation_bytes += self._partition_bytes(layer_id, pid)
             self._cache_tracker.add_partition(layer_id, pid, self._partition_bytes(layer_id, pid))
             print(f"Loaded partition [Layer = {layer_id} | PID = {pid}]")
-            break
+            if cnt == 1:
+                break
+
+            cnt += 1
+            
 
         
 
