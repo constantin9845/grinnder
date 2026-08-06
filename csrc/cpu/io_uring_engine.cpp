@@ -27,7 +27,7 @@ public:
     io_uring_queue_exit(&ring_);
   }
 
-  bool has_io_uring() const { return true; }
+  bool has_io_uring() const { return false; }
 
   int64_t submit_read(const std::string &path, void *buf, int64_t file_offset,
                       int64_t nbytes) {
