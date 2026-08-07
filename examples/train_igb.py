@@ -150,6 +150,115 @@ def main():
         save_cache=not args.no_save_partition_cache,
     )
 
+    print("\n" + "="*80)
+    print("      DETAILED METIS PARTITION DEPENDENCY ANALYSIS")
+    print("="*80)
+    
+    print(f"Partitioning graph into {args.num_parts} parts...")
+    t_metis_start = time.time()
+    
+    cluster_data = ClusterData(
+        data, 
+        num_parts=args.num_parts, 
+        recursive=False, 
+        save_dir="/tmp/metis_test"
+    )
+    print(f"METIS finished in {time.time() - t_metis_start:.1f}s\n")
+    
+    # Safely retrieve partition mapping
+    partition = cluster_data.partition
+    partptr, perm = None, None
+    for attr in ["partptr", "partition_ptr", "node_perm_ptr", "_ptr", "ptr"]:
+        if hasattr(partition, attr):
+            partptr = getattr(partition, attr)
+            break
+            
+    for attr in ["node_perm", "perm", "_perm"]:
+        if hasattr(partition, attr):
+            perm = getattr(partition, attr)
+            break
+
+    # Reconstruct node -> partition mapping
+    num_nodes = data.num_nodes
+    node_to_part = torch.empty(num_nodes, dtype=torch.long)
+    
+    if partptr is not None and perm is not None:
+        for p_id in range(args.num_parts):
+            start, end = partptr[p_id], partptr[p_id + 1]
+            nodes_in_part = perm[start:end]
+            node_to_part[nodes_in_part] = p_id
+    else:
+        for p_id in range(args.num_parts):
+            part_data = cluster_data[p_id]
+            node_ids = part_data.n_id if hasattr(part_data, "n_id") else part_data.input_id
+            node_to_part[node_ids] = p_id
+
+    # Compute boundary node counts across partitions
+    src, dst = data.edge_index[0], data.edge_index[1]
+    src_part = node_to_part[src]
+    dst_part = node_to_part[dst]
+
+    # Filter cross-partition edges
+    cross_mask = src_part != dst_part
+    cross_src_part = src_part[cross_mask]
+    cross_dst_part = dst_part[cross_mask]
+    cross_dst_nodes = dst[cross_mask]
+
+    # Build dependency matrix: size_matrix[target_part, source_part]
+    dep_matrix = torch.zeros((args.num_parts, args.num_parts), dtype=torch.long)
+
+    for p_id in range(args.num_parts):
+        p_mask = cross_dst_part == p_id
+        if not p_mask.any():
+            continue
+        
+        p_src_parts = cross_src_part[p_mask]
+        p_dst_nodes = cross_dst_nodes[p_mask]
+        
+        for neighbor_pid in range(args.num_parts):
+            if p_id == neighbor_pid:
+                continue
+            n_mask = p_src_parts == neighbor_pid
+            if n_mask.any():
+                # Unique nodes needed from neighbor_pid by partition p_id
+                unique_nodes = torch.unique(p_dst_nodes[n_mask]).numel()
+                dep_matrix[p_id, neighbor_pid] = unique_nodes
+
+    # Format and display output per partition
+    print("="*80)
+    for pid in range(args.num_parts):
+        row = dep_matrix[pid]
+        total_ext_nodes = row.sum().item()
+        
+        # Get non-zero dependencies
+        valid_indices = (row > 0).nonzero(as_tuple=True)[0]
+        valid_counts = row[valid_indices]
+        
+        # Sort dependencies in descending order
+        sorted_counts, sort_order = torch.sort(valid_counts, descending=True)
+        sorted_neighbors = valid_indices[sort_order]
+        
+        num_neighbors = len(sorted_counts)
+        print(f"PARTITION {pid:02d} | Own Nodes: {(node_to_part == pid).sum().item():,d} | Total Ext Boundary Nodes Required: {total_ext_nodes:,d}")
+        print(f"Connected to {num_neighbors}/{args.num_parts-1} partitions.")
+        print("-" * 80)
+        
+        # List exact counts and percentages for each dependent neighbor partition
+        dep_strings = []
+        for neighbor_pid, count in zip(sorted_neighbors, sorted_counts):
+            c_val = count.item()
+            pct = (c_val / total_ext_nodes * 100) if total_ext_nodes > 0 else 0.0
+            dep_strings.append(f"P{neighbor_pid.item():02d}: {c_val:6,d} ({pct:5.1f}%)")
+        
+        # Print in formatted rows of 4 dependencies per line for readability
+        for i in range(0, len(dep_strings), 4):
+            print("   " + "  |  ".join(dep_strings[i:i+4]))
+            
+        print("="*80)
+
+    exit(1)
+
+    '''
     # ---- Fast METIS Diagnostic Test ----
     print("\n" + "="*60)
     print("      RUNNING FAST METIS DEPENDENCY DIAGNOSTIC TEST")
@@ -275,81 +384,7 @@ def main():
     import sys
     print("Fast METIS test complete. Exiting...")
     sys.exit(0)
-
-    # analyze graph 
-    path = Path(cache_path)
-    if not path.is_file():
-        print(f"Error: Cache file not found at {path}")
-        return
-
-    print(f"Loading cache file: {path} ...")
-    try:
-        cache = torch.load(path, map_location="cpu", weights_only=False)
-    except TypeError:
-        cache = torch.load(path, map_location="cpu")
-
-    boundaries = cache.get("boundaries")
-    if not boundaries:
-        print("Error: 'boundaries' key not found in cache.")
-        return
-
-    num_parts = len(boundaries)
-    size_matrix = torch.zeros((num_parts, num_parts), dtype=torch.long)
-
-    # Build matrix of boundary node counts
-    for pid, b_list in enumerate(boundaries):
-        if b_list is None:
-            continue
-        for src_pid, tensor in enumerate(b_list):
-            if tensor is not None:
-                size_matrix[pid, src_pid] = tensor.numel()
-
-    print("\n" + "="*60)
-    print("      PARTITION DEPENDENCY DISTRIBUTION ANALYSIS")
-    print("="*60)
-
-    total_dense_pairs = 0
-    total_possible_pairs = num_parts * (num_parts - 1)
-
-    for pid in range(num_parts):
-        counts = size_matrix[pid].clone()
-        counts[pid] = 0  # Ignore self
-        
-        connected = (counts > 0).sum().item()
-        total_dense_pairs += connected
-
-        valid_counts = counts[counts > 0].sort(descending=True).values.float()
-        total_boundary_nodes = valid_counts.sum().item()
-
-        if len(valid_counts) > 0:
-            # Check top 20% most connected neighbor partitions
-            top_20_percent_k = max(1, int(len(valid_counts) * 0.2))
-            top_nodes = valid_counts[:top_20_percent_k].sum().item()
-            ratio = (top_nodes / total_boundary_nodes * 100) if total_boundary_nodes > 0 else 0
-            
-            max_nodes = int(valid_counts[0].item())
-            min_nodes = int(valid_counts[-1].item())
-
-            print(
-                f"Partition {pid:02d} | Connected to {connected:02d}/{num_parts-1} parts | "
-                f"Top 20% parts account for {ratio:5.1f}% of nodes | "
-                f"Max boundary: {max_nodes:6d} | Min boundary: {min_nodes:4d}"
-            )
-
-    overall_density = (total_dense_pairs / total_possible_pairs) * 100
-    print("-" * 60)
-    print(f"Overall Boolean Dependency Matrix Density: {overall_density:.2f}%")
-    print("=" * 60 + "\n")
-
-    print("=== RESULT ===")
-
-    if overall_density > 90:
-        print("• Your boolean matrix is ~100% dense (every partition connects to almost every other).")
-        print("• Check the 'Top 20%' ratios above:")
-        print("  - If ratios are HIGH (70-90%+): The power-law distribution EXISTS in boundary node counts!")
-        print("    --> Fix: Filter out tiny min_nodes dependencies in your runtime dependency loader.")
-        print("  - If ratios are LOW (20-40%): Node counts are flat/uniform across partitions.")
-        print("    --> Fix: Re-partition your graph with a different partitioner/METIS settings.")
+    '''
 
     
 
