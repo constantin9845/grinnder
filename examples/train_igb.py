@@ -150,6 +150,101 @@ def main():
         save_cache=not args.no_save_partition_cache,
     )
 
+    print("\n" + "="*60)
+    print("      RUNNING FAST METIS DEPENDENCY DIAGNOSTIC TEST")
+    print("="*60)
+
+    from torch_geometric.loader import ClusterData
+
+    print(f"Partitioning graph with METIS into {args.num_parts} parts...")
+    t_metis_start = time.time()
+
+    cluster_data = ClusterData(
+        data, 
+        num_parts=args.num_parts, 
+        recursive=False, 
+        save_dir="/tmp/metis_test"
+    )
+    print(f"METIS finished in {time.time() - t_metis_start:.1f}s")
+
+    partptr = cluster_data.ptr  # Partition boundaries in permuted node space
+    perm = cluster_data.perm
+
+    num_nodes = data.num_nodes
+    node_to_part = torch.empty(num_nodes, dtype=torch.long)
+    for p_id in range(args.num_parts):
+        start, end = partptr[p_id], partptr[p_id + 1]
+        nodes_in_part = perm[start:end]
+        node_to_part[nodes_in_part] = p_id
+
+    src, dst = data.edge_index[0], data.edge_index[1]
+    src_part = node_to_part[src]
+    dst_part = node_to_part[dst]
+
+    cross_mask = src_part != dst_part
+    cross_src_part = src_part[cross_mask]
+    cross_dst_part = dst_part[cross_mask]
+    cross_dst_nodes = dst[cross_mask]
+
+    metis_size_matrix = torch.zeros((args.num_parts, args.num_parts), dtype=torch.long)
+
+    for p_id in range(args.num_parts):
+        p_mask = cross_dst_part == p_id
+        if not p_mask.any():
+            continue
+        
+        p_src_parts = cross_src_part[p_mask]
+        p_dst_nodes = cross_dst_nodes[p_mask]
+        
+        for neighbor_pid in range(args.num_parts):
+            if p_id == neighbor_pid:
+                continue
+            n_mask = p_src_parts == neighbor_pid
+            if n_mask.any():
+                # Count unique required boundary nodes from neighbor_pid
+                unique_nodes = torch.unique(p_dst_nodes[n_mask]).numel()
+                metis_size_matrix[p_id, neighbor_pid] = unique_nodes
+
+    print("\n" + "="*60)
+    print("      METIS PARTITION DEPENDENCY DISTRIBUTION")
+    print("="*60)
+
+    total_dense_pairs = 0
+    total_possible_pairs = args.num_parts * (args.num_parts - 1)
+
+    for pid in range(args.num_parts):
+        counts = metis_size_matrix[pid].clone().float()
+        counts[pid] = 0  # Ignore self
+        
+        connected = (counts > 0).sum().item()
+        total_dense_pairs += connected
+
+        valid_counts = counts[counts > 0].sort(descending=True).values
+        total_boundary_nodes = valid_counts.sum().item()
+
+        if len(valid_counts) > 0:
+            top_20_percent_k = max(1, int(len(valid_counts) * 0.2))
+            top_nodes = valid_counts[:top_20_percent_k].sum().item()
+            ratio = (top_nodes / total_boundary_nodes * 100) if total_boundary_nodes > 0 else 0
+            
+            max_nodes = int(valid_counts[0].item())
+            min_nodes = int(valid_counts[-1].item())
+
+            print(
+                f"Partition {pid:02d} | Connected to {connected:02d}/{args.num_parts-1} parts | "
+                f"Top 20% parts account for {ratio:5.1f}% of nodes | "
+                f"Max boundary: {max_nodes:6d} | Min boundary: {min_nodes:4d}"
+            )
+
+    overall_density = (total_dense_pairs / total_possible_pairs) * 100
+    print("-" * 60)
+    print(f"METIS Boolean Dependency Matrix Density: {overall_density:.2f}%")
+    print("=" * 60 + "\n")
+
+    import sys
+    print("Fast METIS test complete. Exiting...")
+    sys.exit(0)
+
     # analyze graph 
     path = Path(cache_path)
     if not path.is_file():
