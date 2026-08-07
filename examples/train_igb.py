@@ -153,6 +153,8 @@ def main():
     print("\n" + "="*80)
     print("      DETAILED METIS PARTITION DEPENDENCY ANALYSIS")
     print("="*80)
+
+    from torch_geometric.loader import ClusterData
     
     print(f"Partitioning graph into {args.num_parts} parts...")
     t_metis_start = time.time()
