@@ -167,7 +167,7 @@ def main():
     )
     print(f"METIS finished in {time.time() - t_metis_start:.1f}s")
 
-    partptr = cluster_data.ptr  # Partition boundaries in permuted node space
+    partptr = cluster_data.partptr if hasattr(cluster_data, "partptr") else cluster_data.ptr
     perm = cluster_data.perm
 
     num_nodes = data.num_nodes
