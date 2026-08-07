@@ -258,7 +258,7 @@ def main():
             
         print("="*80)
 
-    exit(1)
+
 
     '''
     # ---- Fast METIS Diagnostic Test ----
