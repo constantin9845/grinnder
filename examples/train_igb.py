@@ -149,6 +149,84 @@ def main():
         cache_path=cache_path,
         save_cache=not args.no_save_partition_cache,
     )
+
+    # analyze graph 
+    path = Path(cache_path)
+    if not path.is_file():
+        print(f"Error: Cache file not found at {path}")
+        return
+
+    print(f"Loading cache file: {path} ...")
+    try:
+        cache = torch.load(path, map_location="cpu", weights_only=False)
+    except TypeError:
+        cache = torch.load(path, map_location="cpu")
+
+    boundaries = cache.get("boundaries")
+    if not boundaries:
+        print("Error: 'boundaries' key not found in cache.")
+        return
+
+    num_parts = len(boundaries)
+    size_matrix = torch.zeros((num_parts, num_parts), dtype=torch.long)
+
+    # Build matrix of boundary node counts
+    for pid, b_list in enumerate(boundaries):
+        if b_list is None:
+            continue
+        for src_pid, tensor in enumerate(b_list):
+            if tensor is not None:
+                size_matrix[pid, src_pid] = tensor.numel()
+
+    print("\n" + "="*60)
+    print("      PARTITION DEPENDENCY DISTRIBUTION ANALYSIS")
+    print("="*60)
+
+    total_dense_pairs = 0
+    total_possible_pairs = num_parts * (num_parts - 1)
+
+    for pid in range(num_parts):
+        counts = size_matrix[pid].clone()
+        counts[pid] = 0  # Ignore self
+        
+        connected = (counts > 0).sum().item()
+        total_dense_pairs += connected
+
+        valid_counts = counts[counts > 0].sort(descending=True).values.float()
+        total_boundary_nodes = valid_counts.sum().item()
+
+        if len(valid_counts) > 0:
+            # Check top 20% most connected neighbor partitions
+            top_20_percent_k = max(1, int(len(valid_counts) * 0.2))
+            top_nodes = valid_counts[:top_20_percent_k].sum().item()
+            ratio = (top_nodes / total_boundary_nodes * 100) if total_boundary_nodes > 0 else 0
+            
+            max_nodes = int(valid_counts[0].item())
+            min_nodes = int(valid_counts[-1].item())
+
+            print(
+                f"Partition {pid:02d} | Connected to {connected:02d}/{num_parts-1} parts | "
+                f"Top 20% parts account for {ratio:5.1f}% of nodes | "
+                f"Max boundary: {max_nodes:6d} | Min boundary: {min_nodes:4d}"
+            )
+
+    overall_density = (total_dense_pairs / total_possible_pairs) * 100
+    print("-" * 60)
+    print(f"Overall Boolean Dependency Matrix Density: {overall_density:.2f}%")
+    print("=" * 60 + "\n")
+
+    print("=== RESULT ===")
+
+    if overall_density > 90:
+        print("• Your boolean matrix is ~100% dense (every partition connects to almost every other).")
+        print("• Check the 'Top 20%' ratios above:")
+        print("  - If ratios are HIGH (70-90%+): The power-law distribution EXISTS in boundary node counts!")
+        print("    --> Fix: Filter out tiny min_nodes dependencies in your runtime dependency loader.")
+        print("  - If ratios are LOW (20-40%): Node counts are flat/uniform across partitions.")
+        print("    --> Fix: Re-partition your graph with a different partitioner/METIS settings.")
+
+    
+
     t_part = time.time() - t0
     print(f"  Partitioning: {t_part:.1f}s")
     print(f"  Partition sizes: min={min(graph.partition_sizes):,}, "
