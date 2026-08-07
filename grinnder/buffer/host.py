@@ -323,6 +323,11 @@ class HostBuffer:
                     gpu_target[offset : offset + n].copy_(selected)
                     offset += n
 
+        bt = gpu_target.numel() * gpu_target.element_size()
+        gb = round(bt / (1024**3),3)
+
+        print(f"\tPartition {pid} loads {gb} GB from other partitions")
+
     # ------------------------------------------------------------------
     # Scatter: one GPU tensor -> multiple host partitions (with accumulation)
     # ------------------------------------------------------------------

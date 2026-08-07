@@ -369,7 +369,7 @@ class PartitionCache:
             self._cached_partitions[key] = True
             self._resident_activation_bytes += self._partition_bytes(layer_id, pid)
             self._cache_tracker.add_partition(layer_id, pid, self._partition_bytes(layer_id, pid))
-            print(f"Loaded partition [Layer = {layer_id} | PID = {pid}]")
+            print(f"Loaded partition [Layer = {layer_id} | PID = {pid}] | Partition Size = {self._partition_bytes(layer_id, pid)}")
             
 
         
