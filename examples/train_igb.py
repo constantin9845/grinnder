@@ -153,12 +153,13 @@ def main():
     print("\n" + "="*60)
     print("      RUNNING FAST METIS DEPENDENCY DIAGNOSTIC TEST")
     print("="*60)
-
+    
     from torch_geometric.loader import ClusterData
-
+    
     print(f"Partitioning graph with METIS into {args.num_parts} parts...")
     t_metis_start = time.time()
-
+    
+    # Run METIS partitioning
     cluster_data = ClusterData(
         data, 
         num_parts=args.num_parts, 
@@ -166,10 +167,19 @@ def main():
         save_dir="/tmp/metis_test"
     )
     print(f"METIS finished in {time.time() - t_metis_start:.1f}s")
+    
+    # Extract partition metadata safely from cluster_data.partition
+    partition = cluster_data.partition
+    if hasattr(partition, "partition_ptr"):
+        partptr = partition.partition_ptr
+    elif hasattr(partition, "node_perm_ptr"):
+        partptr = partition.node_perm_ptr
+    else:
+        partptr = partition.ptr
 
-    partptr = cluster_data.partptr if hasattr(cluster_data, "partptr") else cluster_data.ptr
-    perm = cluster_data.perm
-
+    perm = partition.node_perm if hasattr(partition, "node_perm") else partition.perm
+    
+    # Build node_id -> partition_id mapping
     num_nodes = data.num_nodes
     node_to_part = torch.empty(num_nodes, dtype=torch.long)
     for p_id in range(args.num_parts):
@@ -177,10 +187,12 @@ def main():
         nodes_in_part = perm[start:end]
         node_to_part[nodes_in_part] = p_id
 
+    # Compute boundary node counts across partitions
     src, dst = data.edge_index[0], data.edge_index[1]
     src_part = node_to_part[src]
     dst_part = node_to_part[dst]
 
+    # Filter cross-partition boundary edges
     cross_mask = src_part != dst_part
     cross_src_part = src_part[cross_mask]
     cross_dst_part = dst_part[cross_mask]
@@ -188,6 +200,7 @@ def main():
 
     metis_size_matrix = torch.zeros((args.num_parts, args.num_parts), dtype=torch.long)
 
+    # Count unique target nodes requested by target partition from source partition
     for p_id in range(args.num_parts):
         p_mask = cross_dst_part == p_id
         if not p_mask.any():
