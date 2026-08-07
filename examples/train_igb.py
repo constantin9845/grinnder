@@ -150,6 +150,7 @@ def main():
         save_cache=not args.no_save_partition_cache,
     )
 
+    # ---- Fast METIS Diagnostic Test ----
     print("\n" + "="*60)
     print("      RUNNING FAST METIS DEPENDENCY DIAGNOSTIC TEST")
     print("="*60)
@@ -168,24 +169,41 @@ def main():
     )
     print(f"METIS finished in {time.time() - t_metis_start:.1f}s")
     
-    # Extract partition metadata safely from cluster_data.partition
+    # Safely retrieve partition mapping
     partition = cluster_data.partition
-    if hasattr(partition, "partition_ptr"):
-        partptr = partition.partition_ptr
-    elif hasattr(partition, "node_perm_ptr"):
-        partptr = partition.node_perm_ptr
-    else:
-        partptr = partition.ptr
-
-    perm = partition.node_perm if hasattr(partition, "node_perm") else partition.perm
     
-    # Build node_id -> partition_id mapping
-    num_nodes = data.num_nodes
-    node_to_part = torch.empty(num_nodes, dtype=torch.long)
-    for p_id in range(args.num_parts):
-        start, end = partptr[p_id], partptr[p_id + 1]
-        nodes_in_part = perm[start:end]
-        node_to_part[nodes_in_part] = p_id
+    # Find partptr attribute
+    partptr = None
+    for attr in ["partptr", "partition_ptr", "node_perm_ptr", "_ptr", "ptr"]:
+        if hasattr(partition, attr):
+            partptr = getattr(partition, attr)
+            break
+            
+    # Find perm attribute
+    perm = None
+    for attr in ["node_perm", "perm", "_perm"]:
+        if hasattr(partition, attr):
+            perm = getattr(partition, attr)
+            break
+
+    # Direct fallback for PyG ClusterData internals
+    if partptr is None or perm is None:
+        # Reconstruct node_to_part directly using ClusterData's __getitem__ or internal tensor
+        node_to_part = torch.empty(data.num_nodes, dtype=torch.long)
+        for p_id in range(args.num_parts):
+            part_data = cluster_data[p_id]
+            if hasattr(part_data, "n_id"):
+                node_to_part[part_data.n_id] = p_id
+            elif hasattr(part_data, "input_id"):
+                node_to_part[part_data.input_id] = p_id
+    else:
+        # Build node_id -> partition_id mapping from pointers
+        num_nodes = data.num_nodes
+        node_to_part = torch.empty(num_nodes, dtype=torch.long)
+        for p_id in range(args.num_parts):
+            start, end = partptr[p_id], partptr[p_id + 1]
+            nodes_in_part = perm[start:end]
+            node_to_part[nodes_in_part] = p_id
 
     # Compute boundary node counts across partitions
     src, dst = data.edge_index[0], data.edge_index[1]
