@@ -48,9 +48,19 @@ class Stat:
     def print_timeline(self):
         print(f'========== TIMELINE ==========')
         print(f'Start = {self.start_time}\n')
-        print(f'SSD --> CPU : \n{self.partition_load_CPU_timesteps}\n')
-        print(f'CPU --> GPU : \n{self.partition_load_GPU_timesteps}\n')
-        print(f'Compute: \n {self.compute_start} | {self.compute_timesteps}\n')
+
+        print(f'SSD --> CPU :')
+        for i in self.partition_load_CPU_timesteps:
+            print(f'\t{i}')
+
+        print(f'CPU --> GPU :')
+        for i in self.partition_load_GPU_timesteps:
+            print(f'\t{i}')
+
+        print(f'Compute: start = {self.compute_start}')
+        for i in self.compute_timesteps:
+            print(f'\t{i}')
+            
         print(f'==============================')
 
 stat = Stat()
