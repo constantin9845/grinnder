@@ -29,6 +29,9 @@ def __getattr__(name):
     if name == "build_partitioned_graph":
         from grinnder.data.partition import build_partitioned_graph
         return build_partitioned_graph
+    if name == "build_partitioned_graph_metis":
+        from grinnder.data.partition import build_partitioned_graph_metis
+        return build_partitioned_graph_metis
     if name == "load_dataset":
         from grinnder.data.datasets import load_dataset
         return load_dataset
@@ -46,6 +49,7 @@ __all__ = [
     "Trainer",
     "PartitionedGraph",
     "build_partitioned_graph",
+    "build_partitioned_graph_metis",
     "load_dataset",
     "load_igb",
 ]
