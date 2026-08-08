@@ -204,8 +204,9 @@ def main():
         t_epoch = time.time() - t0
         epoch_times.append(t_epoch)
 
-        print(f"Epoch Time = {t_epoch}")
         stat.print_timeline()
+        print(f"Epoch Time = {t_epoch}")
+        
 
         if metrics["val_acc"] > best_val:
             best_val = metrics["val_acc"]

@@ -76,7 +76,7 @@ class Stat:
         for i in self.compute_timesteps:
             print(f'\t{i}')
 
-        print(f'\t Start = {self.start_time} \n\tforward done = {self.forward_time} \n\t loss done = {self.loss_time} \n\t backward done = {self.backward_time}')
+        print(f'\n\n\tStart = {self.start_time} \n\tforward done = {self.forward_time} \n\tloss done = {self.loss_time} \n\tbackward done = {self.backward_time} \n\t weights done = {self.weights_time}')
 
         print(f'==============================')
 
