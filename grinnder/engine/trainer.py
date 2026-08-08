@@ -361,6 +361,7 @@ class Trainer:
             if cnt == 1:
                 stat.print_timeline()
                 exit(1)
+            cnt +=1
             stat.reset()
             self._progress(f"FORWARD LAYER {layer_id + 1}/{self.model.num_layers} DONE")
 
