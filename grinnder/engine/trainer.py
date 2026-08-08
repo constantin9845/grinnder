@@ -487,6 +487,8 @@ class Trainer:
         if not pids:
             return
 
+
+        t0 = time.time()
         # Storage_to_Host: load layer activations into cache
         self._prepare_cache_layer(layer_id)
 
@@ -509,6 +511,9 @@ class Trainer:
             self.streams.compute.wait_stream(self.streams.h2d[pool_idx])
             if self.config.mode == "grinnder":
                 self.streams.compute.wait_stream(self.streams.act_h2d[pool_idx])
+
+            t_load = time.time() - t0
+            print(f"Time to load partitions + gather to GPU = {t_load}")
 
             with torch.cuda.stream(self.streams.compute):
                 # Prefetch next partition (overlap I/O with compute)
