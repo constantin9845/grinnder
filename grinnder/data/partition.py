@@ -452,6 +452,7 @@ def build_partitioned_graph_metis(
     
 
     # Step 1: Partition using METIS via ClusterData
+    # Step 1: Partition using METIS via ClusterData
     from torch_geometric.loader import ClusterData
     from torch_geometric.data import Data
 
@@ -463,9 +464,9 @@ def build_partitioned_graph_metis(
         log=False,
     )
 
-    # ClusterData automatically computes node permutation and partition pointers
-    perm = cluster_data.perm.to(edge_index.device)
-    ptr = cluster_data.ptr.to(edge_index.device)
+    # Access partition attributes from the internal partition object
+    perm = cluster_data.partition.node_perm.to(edge_index.device)
+    ptr = cluster_data.partition.partptr.to(edge_index.device)
 
     # Step 2: Reorder nodes by partition
     inv_perm = torch.empty_like(perm)
