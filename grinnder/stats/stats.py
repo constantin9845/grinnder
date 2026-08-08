@@ -21,9 +21,11 @@ class Stat:
         self.start_time = time.perf_counter_ns()
 
     def load_CPU_timestamp(self):
+        print("Loaded SSD --> CPU")
         self.partition_load_CPU_timesteps.append(time.perf_counter_ns())
 
     def load_GPU_timestamp(self):
+        print("Loaded CPU --> GPU")
         self.partition_load_GPU_timesteps.append(time.perf_counter_ns())
 
     def begin_compute(self):
@@ -31,6 +33,7 @@ class Stat:
             self.compute_start = time.perf_counter_ns()
 
     def compute_timestamp(self):
+        print("Computed forward step for partition")
         t = time.perf_counter_ns()
         self.compute_timesteps.append(t)
 
