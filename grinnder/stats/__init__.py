@@ -1,5 +1,5 @@
 """Statistics module for emasureing/tracing latency"""
 
-from grinnder.stats.stats import Stat
+from grinnder.stats.stats import stat
 
-__all__ = ["Stat"]
+__all__ = ["stat"]
