@@ -351,14 +351,17 @@ class Trainer:
         self.reset_epoch()
         optimizer.zero_grad()
 
+        cnt = 0
         # Phase 1: Layer-wise forward
         for layer_id in range(self.model.num_layers):
             self._progress(f"FORWARD LAYER {layer_id + 1}/{self.model.num_layers} START")
             self.cache.cache_tracker_print()
             self._forward_layer(layer_id)
 
-            stat.print_timeline()
-            exit(1)
+            if cnt == 1:
+                stat.print_timeline()
+                exit(1)
+            stat.reset()
             self._progress(f"FORWARD LAYER {layer_id + 1}/{self.model.num_layers} DONE")
 
         # Phase 2: compute per-partition losses. In bypass modes the final
