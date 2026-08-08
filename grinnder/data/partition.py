@@ -451,8 +451,6 @@ def build_partitioned_graph_metis(
 
     
 
-    # Step 1: Partition using METIS via ClusterData
-    # Step 1: Partition using METIS via ClusterData
     from torch_geometric.loader import ClusterData
     from torch_geometric.data import Data
 
@@ -464,11 +462,10 @@ def build_partitioned_graph_metis(
         log=False,
     )
 
-    # Access partition attributes from the internal partition object
     perm = cluster_data.partition.node_perm.to(edge_index.device)
     ptr = cluster_data.partition.partptr.to(edge_index.device)
 
-    # Step 2: Reorder nodes by partition
+    # Reorder nodes by partition
     inv_perm = torch.empty_like(perm)
     inv_perm[perm] = torch.arange(num_nodes, dtype=torch.long, device=perm.device)
 
@@ -479,7 +476,7 @@ def build_partitioned_graph_metis(
     # Remap edge_index through inverse permutation
     edge_index = inv_perm[edge_index]
 
-    # Step 3: GCN normalization on FULL reordered graph
+    # GCN normalization on FULL reordered graph
     edge_weight = compute_gcn_norm(edge_index, num_nodes, add_self_loops=True)
 
     # Add self-loops to edge_index (matching compute_gcn_norm)
@@ -490,7 +487,7 @@ def build_partitioned_graph_metis(
     rowptr, col, sort_perm = _edge_index_to_csr(edge_index, num_nodes)
     edge_weight = edge_weight[sort_perm]
 
-    # Step 4-6: Per-partition subgraph extraction
+    # Per-partition subgraph extraction
     build_subgraph = _load_subgraph_fn()
 
     adj_csr_list: List[Optional[Tuple[Tensor, Tensor, Optional[Tensor]]]] = [
@@ -537,7 +534,7 @@ def build_partitioned_graph_metis(
     ]
 
 
-    # Step 7: Optionally store adjacencies on NVMe
+    # Optionally store adjacencies on NVMe
     if backend is not None:
         for pid in range(config.num_parts):
             rp, c, v = adj_csr_list_final[pid]

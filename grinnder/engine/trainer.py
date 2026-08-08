@@ -27,6 +27,7 @@ from grinnder.cache.partition_cache import PartitionCache
 from grinnder.engine.streams import StreamManager
 from grinnder.storage.backend import StorageBackend
 from grinnder.utils import compute_micro_f1
+from grinnder.stats import stat
 
 
 class Trainer:
@@ -357,6 +358,10 @@ class Trainer:
             self._forward_layer(layer_id)
             self._progress(f"FORWARD LAYER {layer_id + 1}/{self.model.num_layers} DONE")
 
+
+        stat.print_timeline()
+        exit(1)
+
         # Phase 2: compute per-partition losses. In bypass modes the final
         # activations are loaded from storage one partition at a time.
         self._progress("LOSS START")
@@ -489,6 +494,7 @@ class Trainer:
 
 
         t0 = time.time()
+        stat.start()
         # Storage_to_Host: load layer activations into cache
         self._prepare_cache_layer(layer_id)
 
@@ -533,6 +539,7 @@ class Trainer:
 
                 # saved_tensors_hooks wraps checkpoint(fn, x).
                 # checkpoint only saves x. adj loaded inside fn (not passed).
+                stat.begin_compute()
                 if self.config.mode == "hongtu":
                     with HongtuCheckpoint(pid, self.device_features[layer_id]):
                         out = checkpoint(
@@ -644,6 +651,8 @@ class Trainer:
         adj = self._get_adj(pid)
         out = self.model.forward_layer(layer_id, x, adj)
         del adj
+
+        stat.compute_timestamp()
         return out
 
     # ==================================================================

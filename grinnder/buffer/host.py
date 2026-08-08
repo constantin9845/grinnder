@@ -13,6 +13,7 @@ import torch
 from torch import Tensor
 
 from grinnder.storage.backend import StorageBackend
+from grinnder.stats import stat
 
 
 def _load_ops():
@@ -323,6 +324,8 @@ class HostBuffer:
                     gpu_target[offset : offset + n].copy_(selected)
                     offset += n
 
+        stat.load_GPU_timestamp()
+
         bt = gpu_target.numel() * gpu_target.element_size()
         gb = round(bt / (1024**3),3)
 
@@ -427,6 +430,7 @@ class HostBuffer:
             file_id = f"{self._file_prefix}_p{pid}"
             h = self._backend.host_read(file_id, self._tensors[pid])
             self._backend.wait(h)
+            stat.load_CPU_timestamp()
             self._zero_initialized[pid] = True
         else:
             handles = []
