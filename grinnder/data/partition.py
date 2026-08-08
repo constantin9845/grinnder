@@ -414,3 +414,165 @@ def build_partitioned_graph(
         perm=perm,
         ptr=ptr,
     )
+
+def build_partitioned_graph_metis(
+    edge_index: Tensor,
+    x: Any,
+    y: Tensor,
+    train_mask: Tensor,
+    val_mask: Tensor,
+    test_mask: Tensor,
+    config: GriNNderConfig,
+    backend: Optional[StorageBackend] = None,
+    cache_path: Optional[Union[str, Path]] = None,
+    save_cache: bool = True,
+) -> PartitionedGraph:
+    
+    import torch_geometric.transforms as T
+    from torch_geometric.data import Data
+
+    num_nodes = x.size(0)
+    input_num_edges = int(edge_index.size(1))
+
+    if cache_path is not None and Path(cache_path).is_file():
+        cache = _load_partition_cache(cache_path)
+        if _partition_cache_matches(
+            cache,
+            num_nodes=num_nodes,
+            num_edges=input_num_edges,
+            num_parts=config.num_parts,
+            partitioner=config.partitioner,
+        ):
+            print(f"Loading partitioned graph cache from {cache_path}")
+            return _graph_from_partition_cache(
+                cache, x, y, train_mask, val_mask, test_mask, backend
+            )
+        print(f"Ignoring incompatible partitioned graph cache at {cache_path}")
+
+    data = Data(edge_index=edge_index, num_nodes=num_nodes)
+    partition_transform = T.MetisPartitioning(
+        num_parts=config.num_parts, **config.partitioner_kwargs
+    )
+    data = partition_transform(data)
+    node_parts = data.node_type  # Tensor [num_nodes] with partition IDs
+
+    # Convert partition assignments into reordering permutation (perm) and offsets (ptr)
+    sorted_parts, perm = torch.sort(node_parts)
+    counts = torch.bincount(sorted_parts, minlength=config.num_parts)
+    ptr = torch.zeros(config.num_parts + 1, dtype=torch.long, device=edge_index.device)
+    torch.cumsum(counts, dim=0, out=ptr[1:])
+
+    # Step 2: Reorder nodes by partition
+    inv_perm = torch.empty_like(perm)
+    inv_perm[perm] = torch.arange(num_nodes, dtype=torch.long, device=perm.device)
+
+    x, y, train_mask, val_mask, test_mask = _reorder_graph_payload(
+        x, y, train_mask, val_mask, test_mask, perm
+    )
+
+    # Remap edge_index through inverse permutation
+    edge_index = inv_perm[edge_index]
+
+    # Step 3: GCN normalization on FULL reordered graph
+    edge_weight = compute_gcn_norm(edge_index, num_nodes, add_self_loops=True)
+
+    # Add self-loops to edge_index (matching compute_gcn_norm)
+    from torch_geometric.utils import add_self_loops
+    edge_index, _ = add_self_loops(edge_index, num_nodes=num_nodes)
+
+    # Convert to CSR
+    rowptr, col, sort_perm = _edge_index_to_csr(edge_index, num_nodes)
+    edge_weight = edge_weight[sort_perm]
+
+    # Step 4-6: Per-partition subgraph extraction
+    build_subgraph = _load_subgraph_fn()
+
+    adj_csr_list: List[Optional[Tuple[Tensor, Tensor, Optional[Tensor]]]] = [
+        None
+    ] * config.num_parts
+    boundaries_list: List[Optional[List[Optional[Tensor]]]] = [None] * config.num_parts
+    expanded_sizes = [0] * config.num_parts
+    partition_sizes = [0] * config.num_parts
+    preprocess_workers = max(1, int(config.preprocess_workers))
+    worker_args = (
+        ptr,
+        rowptr,
+        col,
+        edge_weight,
+        config.num_parts,
+        build_subgraph,
+    )
+
+    if preprocess_workers == 1 or config.num_parts == 1:
+        results = [
+            _build_partition_subgraph(pid, *worker_args)
+            for pid in range(config.num_parts)
+        ]
+    else:
+        max_workers = min(preprocess_workers, config.num_parts)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(_build_partition_subgraph, pid, *worker_args)
+                for pid in range(config.num_parts)
+            ]
+            results = [future.result() for future in futures]
+
+    for pid, adj_csr, boundaries, expanded_size, batch_size in results:
+        adj_csr_list[pid] = adj_csr
+        boundaries_list[pid] = boundaries
+        expanded_sizes[pid] = expanded_size
+        partition_sizes[pid] = batch_size
+
+    adj_csr_list_final = [
+        adj for adj in adj_csr_list if adj is not None
+    ]
+    boundaries_list_final = [
+        boundaries for boundaries in boundaries_list if boundaries is not None
+    ]
+
+
+    # Step 7: Optionally store adjacencies on NVMe
+    if backend is not None:
+        for pid in range(config.num_parts):
+            rp, c, v = adj_csr_list_final[pid]
+            backend.host_write(rp, f"adj_rowptr_p{pid}", async_=False)
+            backend.host_write(c, f"adj_col_p{pid}", async_=False)
+            if v is not None:
+                backend.host_write(v, f"adj_val_p{pid}", async_=False)
+
+    graph_num_edges = int(edge_index.size(1))
+    if cache_path is not None and save_cache:
+        _write_partition_cache(
+            cache_path,
+            {
+                "version": PARTITION_CACHE_VERSION,
+                "num_nodes": num_nodes,
+                "input_num_edges": input_num_edges,
+                "num_edges": graph_num_edges,
+                "num_parts": config.num_parts,
+                "partitioner": config.partitioner,
+                "partition_sizes": partition_sizes,
+                "adj_csr": adj_csr_list_final,
+                "boundaries": boundaries_list_final,
+                "expanded_sizes": expanded_sizes,
+                "perm": perm,
+                "ptr": ptr,
+            },
+        )
+
+    return PartitionedGraph(
+        num_nodes=num_nodes,
+        num_edges=graph_num_edges,
+        num_parts=config.num_parts,
+        partition_sizes=partition_sizes,
+        adj_csr=adj_csr_list_final,
+        boundaries=boundaries_list_final,
+        expanded_sizes=expanded_sizes,
+        features=x,
+        labels=y,
+        train_mask=train_mask,
+        val_mask=val_mask,
+        test_mask=test_mask,
+        perm=perm,
+        ptr=ptr,
+    )
