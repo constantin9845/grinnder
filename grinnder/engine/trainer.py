@@ -351,19 +351,22 @@ class Trainer:
         self.reset_epoch()
         optimizer.zero_grad()
 
-        cnt = 0
+        #cnt = 0
         # Phase 1: Layer-wise forward
         for layer_id in range(self.model.num_layers):
             self._progress(f"FORWARD LAYER {layer_id + 1}/{self.model.num_layers} START")
             self.cache.cache_tracker_print()
             self._forward_layer(layer_id)
 
-            if cnt == 2:
-                stat.print_timeline()
-                exit(1)
-            cnt +=2
-            stat.reset()
+            #if cnt == 2:
+            #    stat.print_timeline()
+            #    exit(1)
+            #cnt +=2
+            #stat.reset()
+            
             self._progress(f"FORWARD LAYER {layer_id + 1}/{self.model.num_layers} DONE")
+
+        stat.forward_done()
 
         # Phase 2: compute per-partition losses. In bypass modes the final
         # activations are loaded from storage one partition at a time.
@@ -371,6 +374,8 @@ class Trainer:
         self.cache.cache_tracker_print()
         losses, metrics = self._compute_losses(criterion)
         self._progress("LOSS DONE")
+
+        stat.loss_done()
 
         # Phase 3: Layer-wise backward (reverse)
         # Losses are sum-reduced per partition. Backward accumulates gradients.
@@ -388,6 +393,7 @@ class Trainer:
                 f"backward layer {layer_id + 1}/{self.model.num_layers} done"
             )
 
+        stat.backward_done()
         self.cache.cache_tracker_print()
 
         # Scale gradients by 1/total_train_nodes for mean reduction
@@ -402,6 +408,11 @@ class Trainer:
         self._progress("optimizer step start")
         optimizer.step()
         self._progress("optimizer step done")
+
+        stat.weights_done()
+
+        stat.print_timeline()
+        exit(123)
 
         return metrics
 

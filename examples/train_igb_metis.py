@@ -19,6 +19,7 @@ import torch
 from grinnder import GAT, GCN, GriNNderConfig, Trainer, build_partitioned_graph, build_partitioned_graph_metis
 from grinnder.data.datasets import load_igb
 from grinnder.utils import fix_seed, get_default_partitioner_threads, report_memory
+from grinnder.stats import stat
 
 
 def build_model(args, graph):
@@ -202,6 +203,9 @@ def main():
         metrics = trainer.train_epoch(optimizer, criterion)
         t_epoch = time.time() - t0
         epoch_times.append(t_epoch)
+
+        print(f"Epoch Time = {t_epoch}")
+        stat.print_timeline()
 
         if metrics["val_acc"] > best_val:
             best_val = metrics["val_acc"]
