@@ -412,7 +412,7 @@ class Trainer:
         stat.weights_done()
 
         stat.print_timeline()
-        exit(123)
+        exit(1)
 
         return metrics
 
