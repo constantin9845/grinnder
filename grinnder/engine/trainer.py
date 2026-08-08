@@ -358,10 +358,10 @@ class Trainer:
             self.cache.cache_tracker_print()
             self._forward_layer(layer_id)
 
-            if cnt == 1:
+            if cnt == 2:
                 stat.print_timeline()
                 exit(1)
-            cnt +=1
+            cnt +=2
             stat.reset()
             self._progress(f"FORWARD LAYER {layer_id + 1}/{self.model.num_layers} DONE")
 
