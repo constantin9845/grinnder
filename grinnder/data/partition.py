@@ -449,18 +449,23 @@ def build_partitioned_graph_metis(
             )
         print(f"Ignoring incompatible partitioned graph cache at {cache_path}")
 
-    data = Data(edge_index=edge_index, num_nodes=num_nodes)
-    partition_transform = T.MetisPartitioning(
-        num_parts=config.num_parts, **config.partitioner_kwargs
-    )
-    data = partition_transform(data)
-    node_parts = data.node_type  # Tensor [num_nodes] with partition IDs
+    
 
-    # Convert partition assignments into reordering permutation (perm) and offsets (ptr)
-    sorted_parts, perm = torch.sort(node_parts)
-    counts = torch.bincount(sorted_parts, minlength=config.num_parts)
-    ptr = torch.zeros(config.num_parts + 1, dtype=torch.long, device=edge_index.device)
-    torch.cumsum(counts, dim=0, out=ptr[1:])
+    # Step 1: Partition using METIS via ClusterData
+    from torch_geometric.loader import ClusterData
+    from torch_geometric.data import Data
+
+    data = Data(edge_index=edge_index, num_nodes=num_nodes)
+    cluster_data = ClusterData(
+        data,
+        num_parts=config.num_parts,
+        recursive=config.partitioner_kwargs.get("recursive", False),
+        log=False,
+    )
+
+    # ClusterData automatically computes node permutation and partition pointers
+    perm = cluster_data.perm.to(edge_index.device)
+    ptr = cluster_data.ptr.to(edge_index.device)
 
     # Step 2: Reorder nodes by partition
     inv_perm = torch.empty_like(perm)
