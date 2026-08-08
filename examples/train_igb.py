@@ -150,6 +150,9 @@ def main():
         save_cache=not args.no_save_partition_cache,
     )
 
+
+    # Detailed partition depedency analysis (METIS)
+    '''
     print("\n" + "="*80)
     print("      DETAILED METIS PARTITION DEPENDENCY ANALYSIS")
     print("="*80)
@@ -259,6 +262,8 @@ def main():
         print("="*80)
 
     exit(1)
+
+    '''
 
     '''
     # ---- Fast METIS Diagnostic Test ----
