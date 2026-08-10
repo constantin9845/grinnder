@@ -286,7 +286,7 @@ class Trainer:
             self.cache.ensure_dependencies_in_host(
                 layer_id,
                 pid,
-                phase
+                phase,
                 boundaries=self.graph.boundaries[pid],
             )
 
