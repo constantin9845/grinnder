@@ -550,6 +550,8 @@ class Trainer:
                 x = self.device_features[layer_id][pid]
                 x.requires_grad_(True)
 
+                stat.begin_compute("forward")
+
                 # saved_tensors_hooks wraps checkpoint(fn, x).
                 # checkpoint only saves x. adj loaded inside fn (not passed).
                 if self.config.mode == "hongtu":
@@ -570,6 +572,8 @@ class Trainer:
                             layer_id, pid, x,
                             use_reentrant=True,
                         )
+
+                stat.compute_timestamp("forward")
 
                 # Keep activation reference
                 self.activations[layer_id][pid] = out
@@ -653,7 +657,6 @@ class Trainer:
         adj is loaded INSIDE this function (not passed to checkpoint)
         so that checkpoint only saves x, not adj's sparse tensors.
         """
-        stat.begin_compute("forward")
 
         x = GradOffload.apply(
             x, layer_id, pid,
@@ -667,7 +670,6 @@ class Trainer:
         out = self.model.forward_layer(layer_id, x, adj)
         del adj
 
-        stat.compute_timestamp("forward")
         return out
 
     # ==================================================================
