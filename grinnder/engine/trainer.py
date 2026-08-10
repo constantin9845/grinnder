@@ -552,7 +552,6 @@ class Trainer:
 
                 # saved_tensors_hooks wraps checkpoint(fn, x).
                 # checkpoint only saves x. adj loaded inside fn (not passed).
-                #stat.begin_compute()
                 if self.config.mode == "hongtu":
                     with HongtuCheckpoint(pid, self.device_features[layer_id]):
                         out = checkpoint(
@@ -654,6 +653,8 @@ class Trainer:
         adj is loaded INSIDE this function (not passed to checkpoint)
         so that checkpoint only saves x, not adj's sparse tensors.
         """
+        stat.begin_compute("forward")
+
         x = GradOffload.apply(
             x, layer_id, pid,
             self.host_gradients[layer_id] if layer_id > 0 else None,
@@ -666,7 +667,7 @@ class Trainer:
         out = self.model.forward_layer(layer_id, x, adj)
         del adj
 
-        stat.compute_timestamp()
+        stat.compute_timestamp("forward")
         return out
 
     # ==================================================================
@@ -889,10 +890,11 @@ class Trainer:
                         df.release(prev_pid)
 
                 # Backward through loss (triggers checkpoint recompute)
-                stat.begin_compute()
+                stat.begin_compute("backward")
                 loss = losses[loss_idx]
                 loss.backward(retain_graph=False)
                 self.streams.compute.synchronize()
+                stat.compute_timestamp("backward")
                 losses[loss_idx] = None
                 act = self.activations[layer_id][pid]
                 if act is not None:
@@ -1084,6 +1086,7 @@ class Trainer:
                         act.backward(retain_graph=False)
 
                     self.streams.compute.synchronize()
+                    stat.compute_timestamp("backward")
                     if (
                         self.device_gradients[next_grad_layer] is not None
                         and self.device_gradients[next_grad_layer].is_allocated(pid)
