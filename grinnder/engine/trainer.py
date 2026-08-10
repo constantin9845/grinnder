@@ -508,7 +508,7 @@ class Trainer:
 
 
         t0 = time.time()
-        stat.start()
+        #stat.start()
         # Storage_to_Host: load layer activations into cache
         self._prepare_cache_layer(layer_id)
 
@@ -553,7 +553,7 @@ class Trainer:
 
                 # saved_tensors_hooks wraps checkpoint(fn, x).
                 # checkpoint only saves x. adj loaded inside fn (not passed).
-                stat.begin_compute()
+                #stat.begin_compute()
                 if self.config.mode == "hongtu":
                     with HongtuCheckpoint(pid, self.device_features[layer_id]):
                         out = checkpoint(
@@ -825,6 +825,7 @@ class Trainer:
             return
 
         cache_layer_id = layer_id
+        stat.start()
         self._prepare_cache_layer(cache_layer_id)
 
         if layer_id > 0 and self.host_gradients[layer_id] is not None:
@@ -884,6 +885,7 @@ class Trainer:
                         df.release(prev_pid)
 
                 # Backward through loss (triggers checkpoint recompute)
+                stat.begin_compute()
                 loss = losses[loss_idx]
                 loss.backward(retain_graph=False)
                 self.streams.compute.synchronize()

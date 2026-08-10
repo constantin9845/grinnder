@@ -13,6 +13,11 @@ class Stat:
         self.partition_load_GPU_timesteps: List[int] = []
         self.compute_timesteps: List[int] = []
 
+        self.backward_start = 0
+        self.backward_direct_load_timesteps: List[int] = []
+        self.recompute_timesteps: List[int] = []
+
+
     def started(self):
         return self.running == True
     
@@ -28,6 +33,10 @@ class Stat:
         self.partition_load_CPU_timesteps.append(time.perf_counter_ns())
 
     def load_GPU_timestamp(self):
+        #print("Loaded CPU --> GPU")
+        self.partition_load_GPU_timesteps.append(time.perf_counter_ns())
+
+    def load_GDS_timestamp(self):
         #print("Loaded CPU --> GPU")
         self.partition_load_GPU_timesteps.append(time.perf_counter_ns())
 
@@ -70,6 +79,10 @@ class Stat:
 
         print(f'CPU --> GPU :')
         for i in self.partition_load_GPU_timesteps:
+            print(f'\t{i}')
+
+        print(f'SSD --> GPU (GDS):')
+        for i in self.backward_direct_load_timesteps:
             print(f'\t{i}')
 
         print(f'Compute: start = {self.compute_start}')

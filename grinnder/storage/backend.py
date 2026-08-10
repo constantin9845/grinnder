@@ -16,6 +16,7 @@ import torch
 from torch import Tensor
 
 from grinnder.utils import ensure_dir
+from grinnder.stats import stat
 
 
 class StorageBackend:
@@ -99,6 +100,8 @@ class StorageBackend:
         f = self._kvikio.CuFile(path, "r")
         f.read(tensor, file_offset=0)
         f.close()
+
+        stat.load_GDS_timestamp()
 
     # ------------------------------------------------------------------
     # Host <-> Storage (io_uring)
