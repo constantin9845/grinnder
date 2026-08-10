@@ -296,22 +296,24 @@ class PartitionCache:
         if self._mode == "partition_lru":
             # Compatibility path: callers that do not provide a target partition
             # request the whole layer. The trainer uses dependency-aware calls.
+            phase = "none"
             for pid in range(self.num_parts):
-                self.ensure_partition_in_host(layer_id, pid)
+                self.ensure_partition_in_host(layer_id, pid, phase)
             return
 
-    def ensure_partition_in_host(self, layer_id: int, pid: int) -> None:
+    def ensure_partition_in_host(self, layer_id: int, pid: int, phase) -> None:
         """Ensure a single (layer, partition) is in host cache.
 
         Used in partition_lru mode. Evicts least-recently-used (layer, partition)
         pairs when host memory budget is exceeded.
         """
-        self.ensure_dependencies_in_host(layer_id, pid, dependencies={pid})
+        self.ensure_dependencies_in_host(layer_id, pid, phase, dependencies={pid})
 
     def ensure_dependencies_in_host(
         self,
         layer_id: int,
         target_pid: int,
+        phase,
         boundaries: Optional[List[Optional[torch.Tensor]]] = None,
         dependencies: Optional[Set[int]] = None,
     ) -> None:
@@ -365,7 +367,7 @@ class PartitionCache:
 
         for key in missing:
             _, pid = key
-            self.host_buffers[layer_id].storage_to_cpu(pid=pid)
+            self.host_buffers[layer_id].storage_to_cpu(phase, pid=pid)
             self._cached_partitions[key] = True
             self._resident_activation_bytes += self._partition_bytes(layer_id, pid)
             self._cache_tracker.add_partition(layer_id, pid, self._partition_bytes(layer_id, pid))
@@ -425,7 +427,7 @@ class PartitionCache:
                 return
             self.grad_buffers[layer_id].cpu_to_storage()
 
-    def prepare_layer(self, layer_id: int) -> None:
+    def prepare_layer(self, phase, layer_id: int) -> None:
         """Alias for ensure_in_host (used in backward for regathering)."""
         self.ensure_in_host(layer_id)
 

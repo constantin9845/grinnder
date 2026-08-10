@@ -271,6 +271,7 @@ class HostBuffer:
 
     def async_gather(
         self,
+        phase,
         pid: int,
         gpu_target: Tensor,
         boundaries: List[Optional[Tensor]],
@@ -324,7 +325,7 @@ class HostBuffer:
                     gpu_target[offset : offset + n].copy_(selected)
                     offset += n
 
-        stat.load_GPU_timestamp()
+        stat.load_GPU_timestamp(phase)
 
         bt = gpu_target.numel() * gpu_target.element_size()
         gb = round(bt / (1024**3),3)
@@ -419,7 +420,7 @@ class HostBuffer:
         """Re-allocate host tensor if it was freed by cache eviction."""
         self.allocate(pid)
 
-    def storage_to_cpu(self, pid: Optional[int] = None) -> None:
+    def storage_to_cpu(self, phase = "none", pid: Optional[int] = None) -> None:
         """Load partition(s) from NVMe to host cache via io_uring.
 
         Re-allocates host tensor if previously freed by cache eviction.
@@ -430,7 +431,7 @@ class HostBuffer:
             file_id = f"{self._file_prefix}_p{pid}"
             h = self._backend.host_read(file_id, self._tensors[pid])
             self._backend.wait(h)
-            stat.load_CPU_timestamp()
+            stat.load_CPU_timestamp(phase)
             self._zero_initialized[pid] = True
         else:
             handles = []

@@ -281,11 +281,12 @@ class Trainer:
         if self.cache is not None and self.cache.mode != "partition_lru":
             self.cache.ensure_in_host(layer_id)
 
-    def _prepare_cache_partition(self, layer_id: int, pid: int) -> None:
+    def _prepare_cache_partition(self, layer_id: int, pid: int, phase: str) -> None:
         if self._uses_partition_lru():
             self.cache.ensure_dependencies_in_host(
                 layer_id,
                 pid,
+                phase
                 boundaries=self.graph.boundaries[pid],
             )
 
@@ -351,18 +352,13 @@ class Trainer:
         self.reset_epoch()
         optimizer.zero_grad()
 
-        #cnt = 0
+        stat.start()
+
         # Phase 1: Layer-wise forward
         for layer_id in range(self.model.num_layers):
             self._progress(f"FORWARD LAYER {layer_id + 1}/{self.model.num_layers} START")
             self.cache.cache_tracker_print()
             self._forward_layer(layer_id)
-
-            #if cnt == 2:
-            #    stat.print_timeline()
-            #    exit(1)
-            #cnt +=2
-            #stat.reset()
             
             self._progress(f"FORWARD LAYER {layer_id + 1}/{self.model.num_layers} DONE")
 
@@ -372,6 +368,7 @@ class Trainer:
         # activations are loaded from storage one partition at a time.
         self._progress("LOSS START")
         self.cache.cache_tracker_print()
+        stat.start_loss()
         losses, metrics = self._compute_losses(criterion)
         self._progress("LOSS DONE")
 
@@ -381,6 +378,7 @@ class Trainer:
         # Losses are sum-reduced per partition. Backward accumulates gradients.
         self._progress(f"BACKWARD LAYER {self.model.num_layers}/{self.model.num_layers} START")
         self.cache.cache_tracker_print()
+        stat.start_backward()
         self._backward_last_layer(losses)
         self._progress(f"BACKWARD LAYER {self.model.num_layers}/{self.model.num_layers} DONE")
         for layer_id in reversed(range(self.model.num_layers - 1)):
@@ -508,13 +506,13 @@ class Trainer:
 
 
         t0 = time.time()
-        #stat.start()
         # Storage_to_Host: load layer activations into cache
         self._prepare_cache_layer(layer_id)
 
         # Prologue: prefetch first assigned partition
-        self._prepare_cache_partition(layer_id, pids[0])
+        self._prepare_cache_partition(layer_id, pids[0], "forward")
         self.device_features[layer_id].async_gather(
+            "forward",
             pid=pids[0],
             host_buffer=self.host_features[layer_id],
             boundaries=self.graph.boundaries[pids[0]],
