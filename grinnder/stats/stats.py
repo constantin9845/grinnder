@@ -191,14 +191,17 @@ class Stat:
         print(header_fwd)
         print(divider_fwd)
 
+        cnt = 1
         for i, j, k in zip_longest(
             self.forward_partition_load_CPU_timesteps,
             self.forward_partition_load_GPU_timesteps,
             self.forward_compute_timesteps,
             fillvalue=FILL,
         ):
-            print(f"\t| {str(i):<{W}} | {str(j):<{W}} | {str(k):<{W}} |")
+            print(f"{cnt}\t| {str(i):<{W}} | {str(j):<{W}} | {str(k):<{W}} |")
+            cnt += 1
 
+        cnt = 1
         # --- LOSS STEP ---
         print("\n\n[LOSS STEP]")
         header_loss = f"\t| {'SD --> CPU':<{W}} | {'CPU --> GPU':<{W}} |"
@@ -211,7 +214,9 @@ class Stat:
             self.loss_partition_load_GPU_timesteps,
             fillvalue=FILL,
         ):
-            print(f"\t| {str(i):<{W}} | {str(j):<{W}} |")
+            print(f"{cnt}\t| {str(i):<{W}} | {str(j):<{W}} |")
+            cnt += 1
+        cnt = 1
 
         # --- BACKWARD STEP ---
         print("\n\n[BACKWARD STEP]")
@@ -228,8 +233,9 @@ class Stat:
             fillvalue=FILL,
         ):
             print(
-                f"\t| {str(i):<{W}} | {str(j):<{W}} | {str(k):<{W}} | {str(l):<{W}} |"
+                f"{cnt}\t| {str(i):<{W}} | {str(j):<{W}} | {str(k):<{W}} | {str(l):<{W}} |"
             )
+            cnt += 1
 
         # --- SUMMARY ---
         print(
