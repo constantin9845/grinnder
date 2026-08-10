@@ -93,7 +93,8 @@ class Stat:
 
             t = t - self.backward_GPU_start
             t = t / 1000000000.0
-            t = round(t,2) + self.backward_partition_load_CPU_timesteps[-1]
+            if len(self.backward_partition_load_CPU_timesteps) > 0:
+                t = round(t,2) + self.backward_partition_load_CPU_timesteps[-1]
             self.backward_partition_load_GPU_timesteps.append(t)
 
     def load_GDS_timestamp(self):
