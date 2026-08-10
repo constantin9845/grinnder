@@ -828,7 +828,6 @@ class Trainer:
             return
 
         cache_layer_id = layer_id
-        stat.start()
         self._prepare_cache_layer(cache_layer_id)
 
         if layer_id > 0 and self.host_gradients[layer_id] is not None:
