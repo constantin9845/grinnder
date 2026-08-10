@@ -230,7 +230,7 @@ class HostBuffer:
     # ------------------------------------------------------------------
 
     def async_upload(
-        self, pid: int, gpu_target: Tensor, stream: torch.cuda.Stream
+        self, phase, pid: int, gpu_target: Tensor, stream: torch.cuda.Stream
     ) -> None:
         """H2D: copy host partition buffer to GPU tensor.
 
@@ -250,6 +250,8 @@ class HostBuffer:
                 self._ops.h2d_copy_async(self._tensors[pid], gpu_target)
             else:
                 gpu_target.copy_(self._tensors[pid], non_blocking=True)
+
+        stat.load_GPU_timestamp(phase)
 
     def h2d_synchronize(self, stream: torch.cuda.Stream) -> None:
         """Wait for H2D operations to complete.

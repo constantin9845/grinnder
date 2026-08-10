@@ -272,7 +272,7 @@ class Trainer:
             return
         if grad.storage_exists(pid):
             print(f"[Layer = {layer_id} | PID = {pid}] Gradients move SSD --> CPU")
-            grad.storage_to_cpu(pid)
+            grad.storage_to_cpu("backward", pid)
             self.cache.add_gradient_relay(layer_id, pid)
         else:
             grad.zero_partition(pid)
@@ -538,8 +538,9 @@ class Trainer:
                 if i < len(pids) - 1 and pool_size > 1:
                     next_pid = pids[i + 1]
                     next_pool = (i + 1) % pool_size
-                    self._prepare_cache_partition(layer_id, next_pid)
+                    self._prepare_cache_partition(layer_id, next_pid, "forward")
                     self.device_features[layer_id].async_gather(
+                        "forward",
                         pid=next_pid,
                         host_buffer=self.host_features[layer_id],
                         boundaries=self.graph.boundaries[next_pid],
@@ -622,8 +623,9 @@ class Trainer:
 
                 if i < len(pids) - 1:
                     next_pid = pids[i + 1]
-                    self._prepare_cache_partition(layer_id, next_pid)
+                    self._prepare_cache_partition(layer_id, next_pid, "forward")
                     self.device_features[layer_id].async_gather(
+                        "forward",
                         pid=next_pid,
                         host_buffer=self.host_features[layer_id],
                         boundaries=self.graph.boundaries[next_pid],
@@ -705,7 +707,7 @@ class Trainer:
         first_pid = pids[0]
         if use_bypass:
             print(f"LOSS : load partition [-1] [SSD --> CPU]")
-            self.host_features[-1].storage_to_cpu(first_pid)
+            self.host_features[-1].storage_to_cpu("loss", first_pid)
         act_first = self.activations[last_layer][first_pid]
         if act_first is not None:
             act_first.untyped_storage().resize_(
@@ -714,7 +716,7 @@ class Trainer:
 
         print("LOSS : load partition [-1] [CPU --> GPU]")
         self.host_features[-1].async_upload(
-            first_pid, act_first, self.streams.h2d[0]
+            "loss", first_pid, act_first, self.streams.h2d[0]
         )
 
         for i, pid in enumerate(pids):
@@ -728,7 +730,7 @@ class Trainer:
                 next_pid = pids[i + 1]
                 if use_bypass:
                     print(f"LOSS : load partition [{next_pid}] [SSD --> CPU]")
-                    self.host_features[-1].storage_to_cpu(next_pid)
+                    self.host_features[-1].storage_to_cpu("loss", next_pid)
                 act_next = self.activations[last_layer][next_pid]
                 if act_next is not None:
                     act_next.untyped_storage().resize_(
@@ -736,6 +738,7 @@ class Trainer:
                     )
                 
                 self.host_features[-1].async_upload(
+                    "loss", 
                     next_pid, act_next,
                     self.streams.h2d[(i + 1) % pool_size],
                 )
@@ -783,13 +786,14 @@ class Trainer:
             if i < len(pids) - 1 and pool_size == 1:
                 next_pid = pids[i + 1]
                 if use_bypass:
-                    self.host_features[-1].storage_to_cpu(next_pid)
+                    self.host_features[-1].storage_to_cpu("loss", next_pid)
                 act_next = self.activations[last_layer][next_pid]
                 if act_next is not None:
                     act_next.untyped_storage().resize_(
                         act_next.numel() * act_next.element_size()
                     )
                 self.host_features[-1].async_upload(
+                    "loss", 
                     next_pid,
                     act_next,
                     self.streams.h2d[0],
@@ -833,8 +837,9 @@ class Trainer:
 
         # Prologue: re-gather features for first partition's checkpoint recompute
         if self.config.mode == "grinnder" and layer_id > 0:
-            self._prepare_cache_partition(cache_layer_id, pids[0])
+            self._prepare_cache_partition(cache_layer_id, pids[0], "backward")
             self.device_features[layer_id].async_gather(
+                "backward",
                 pid=pids[0],
                 host_buffer=self.host_features[layer_id],
                 boundaries=self.graph.boundaries[pids[0]],
@@ -861,8 +866,9 @@ class Trainer:
             ):
                 next_pid = pids[i + 1]
                 next_pool = (i + 1) % pool_size
-                self._prepare_cache_partition(cache_layer_id, next_pid)
+                self._prepare_cache_partition(cache_layer_id, next_pid, "backward")
                 self.device_features[layer_id].async_gather(
+                    "backward",
                     pid=next_pid,
                     host_buffer=self.host_features[layer_id],
                     boundaries=self.graph.boundaries[next_pid],
@@ -908,8 +914,9 @@ class Trainer:
                     and layer_id > 0
                 ):
                     next_pid = pids[i + 1]
-                    self._prepare_cache_partition(cache_layer_id, next_pid)
+                    self._prepare_cache_partition(cache_layer_id, next_pid, "backward")
                     self.device_features[layer_id].async_gather(
+                        "backward",
                         pid=next_pid,
                         host_buffer=self.host_features[layer_id],
                         boundaries=self.graph.boundaries[next_pid],
@@ -971,8 +978,9 @@ class Trainer:
 
         # Prologue: prefetch features for regathering + upload gradient for first pid
         if self.config.mode == "grinnder":
-            self._prepare_cache_partition(layer_id, first_pid)
+            self._prepare_cache_partition(layer_id, first_pid, "backward")
             self.device_features[layer_id].async_gather(
+                "backward",
                 pid=first_pid,
                 host_buffer=self.host_features[layer_id],
                 boundaries=self.graph.boundaries[first_pid],
@@ -994,7 +1002,7 @@ class Trainer:
                     )
                 grad_buf.allocate(first_pid)
                 self.host_gradients[next_grad_layer].async_upload(
-                    first_pid, grad_buf[first_pid], self.streams.h2d[0]
+                    "backward", first_pid, grad_buf[first_pid], self.streams.h2d[0]
                 )
 
         for i, pid in enumerate(pids):
@@ -1015,8 +1023,9 @@ class Trainer:
                     next_pool = (i + 1) % pool_size
 
                     if self.config.mode == "grinnder" and prefetch_next_feature:
-                        self._prepare_cache_partition(layer_id, next_pid)
+                        self._prepare_cache_partition(layer_id, next_pid, "backward")
                         self.device_features[layer_id].async_gather(
+                            "backward",
                             pid=next_pid,
                             host_buffer=self.host_features[layer_id],
                             boundaries=self.graph.boundaries[next_pid],
@@ -1040,6 +1049,7 @@ class Trainer:
                                 )
                             grad_buf.allocate(next_pid)
                             self.host_gradients[next_grad_layer].async_upload(
+                                "backward", 
                                 next_pid, grad_buf[next_pid],
                                 self.streams.h2d[next_pool],
                             )
@@ -1093,8 +1103,9 @@ class Trainer:
                             self.device_features[layer_id].release(pid)
                         next_pid = pids[i + 1]
                         next_pool = (i + 1) % pool_size
-                        self._prepare_cache_partition(layer_id, next_pid)
+                        self._prepare_cache_partition(layer_id, next_pid, "backward")
                         self.device_features[layer_id].async_gather(
+                            "backward",
                             pid=next_pid,
                             host_buffer=self.host_features[layer_id],
                             boundaries=self.graph.boundaries[next_pid],
@@ -1122,6 +1133,7 @@ class Trainer:
                                 )
                             grad_buf.allocate(next_pid)
                             self.host_gradients[next_grad_layer].async_upload(
+                                "backward", 
                                 next_pid,
                                 grad_buf[next_pid],
                                 self.streams.h2d[next_pool],
@@ -1144,8 +1156,9 @@ class Trainer:
                     next_pid = pids[i + 1]
 
                     if self.config.mode == "grinnder":
-                        self._prepare_cache_partition(layer_id, next_pid)
+                        self._prepare_cache_partition(layer_id, next_pid, "backward")
                         self.device_features[layer_id].async_gather(
+                            "backward",
                             pid=next_pid,
                             host_buffer=self.host_features[layer_id],
                             boundaries=self.graph.boundaries[next_pid],
@@ -1166,6 +1179,7 @@ class Trainer:
                                 )
                             grad_buf.allocate(next_pid)
                             self.host_gradients[next_grad_layer].async_upload(
+                                "backward", 
                                 next_pid,
                                 grad_buf[next_pid],
                                 self.streams.h2d[0],
