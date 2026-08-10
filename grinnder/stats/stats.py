@@ -93,6 +93,7 @@ class Stat:
 
             t = t - self.backward_GPU_start
             t = t / 1000000000.0
+            # top layer uses losses instead of gradients, losses are already in HOST
             if len(self.backward_partition_load_CPU_timesteps) > 0:
                 t = round(t,2) + self.backward_partition_load_CPU_timesteps[-1]
             self.backward_partition_load_GPU_timesteps.append(t)
@@ -172,33 +173,72 @@ class Stat:
 
         self.weights_time = 0
 
+    from itertools import zip_longest
+
     def print_timeline(self):
-        print(f'========== TIMELINE ==========')
-        print(f'Start = {self.start_time}\n')
+        print("========== TIMELINE ==========")
+        print(f"Start = {self.start_time}\n")
 
-        print("\n\n[FORWARD STEP]")
+        W = 14
+        FILL = "-"  # Placeholder when lists have unequal lengths
 
-        print(f'\t| SD --> CPU | CPU --> GPU | Compute |')
-        for i,j,k in self.forward_partition_load_CPU_timesteps, self.forward_partition_load_GPU_timesteps, self.forward_compute_timesteps:
-            print(f'\t| {i} | {j} | {k} |')
+        # --- FORWARD STEP ---
+        print("[FORWARD STEP]")
+        header_fwd = (
+            f"\t| {'SD --> CPU':<{W}} | {'CPU --> GPU':<{W}} | {'Compute':<{W}} |"
+        )
+        divider_fwd = f"\t+{'-' * (W + 2)}+{'-' * (W + 2)}+{'-' * (W + 2)}+"
+        print(header_fwd)
+        print(divider_fwd)
 
+        for i, j, k in zip_longest(
+            self.forward_partition_load_CPU_timesteps,
+            self.forward_partition_load_GPU_timesteps,
+            self.forward_compute_timesteps,
+            fillvalue=FILL,
+        ):
+            print(f"\t| {str(i):<{W}} | {str(j):<{W}} | {str(k):<{W}} |")
 
+        # --- LOSS STEP ---
         print("\n\n[LOSS STEP]")
+        header_loss = f"\t| {'SD --> CPU':<{W}} | {'CPU --> GPU':<{W}} |"
+        divider_loss = f"\t+{'-' * (W + 2)}+{'-' * (W + 2)}+"
+        print(header_loss)
+        print(divider_loss)
 
-        print(f'\t| SD --> CPU | CPU --> GPU |')
-        for i,j in self.loss_partition_load_CPU_timesteps, self.loss_partition_load_GPU_timesteps:
-            print(f'\t| {i} | {j} |')
+        for i, j in zip_longest(
+            self.loss_partition_load_CPU_timesteps,
+            self.loss_partition_load_GPU_timesteps,
+            fillvalue=FILL,
+        ):
+            print(f"\t| {str(i):<{W}} | {str(j):<{W}} |")
 
-
+        # --- BACKWARD STEP ---
         print("\n\n[BACKWARD STEP]")
+        header_bwd = f"\t| {'SD --> CPU':<{W}} | {'CPU --> GPU':<{W}} | {'Compute':<{W}} | {'GDS':<{W}} |"
+        divider_bwd = f"\t+{'-' * (W + 2)}+{'-' * (W + 2)}+{'-' * (W + 2)}+{'-' * (W + 2)}+"
+        print(header_bwd)
+        print(divider_bwd)
 
-        print(f'\t| SD --> CPU | CPU --> GPU | Compute | GDS |')
-        for i,j,k,l in self.backward_partition_load_CPU_timesteps, self.backward_partition_load_GPU_timesteps, self.backward_compute_timesteps, self.backward_direct_load_timesteps:
-            print(f'\t| {i} | {j} | {k} | {l} |')
+        for i, j, k, l in zip_longest(
+            self.backward_partition_load_CPU_timesteps,
+            self.backward_partition_load_GPU_timesteps,
+            self.backward_compute_timesteps,
+            self.backward_direct_load_timesteps,
+            fillvalue=FILL,
+        ):
+            print(
+                f"\t| {str(i):<{W}} | {str(j):<{W}} | {str(k):<{W}} | {str(l):<{W}} |"
+            )
 
-
-        print(f'\n\n\tStart = {self.start_time} \n\tforward done = {self.forward_time} \n\tloss done = {self.loss_time} \n\tbackward done = {self.backward_time} \n\t weights done = {self.weights_time}')
-
-        print(f'==============================')
+        # --- SUMMARY ---
+        print(
+            f"\n\n\tStart = {self.start_time} "
+            f"\n\tforward done = {self.forward_time} "
+            f"\n\tloss done = {self.loss_time} "
+            f"\n\tbackward done = {self.backward_time} "
+            f"\n\tweights done = {self.weights_time}"
+        )
+        print("==============================")
 
 stat = Stat()
