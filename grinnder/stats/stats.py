@@ -173,9 +173,9 @@ class Stat:
 
         self.weights_time = 0
 
-    from itertools import zip_longest
 
     def print_timeline(self):
+        from itertools import zip_longest
         print("========== TIMELINE ==========")
         print(f"Start = {self.start_time}\n")
 
