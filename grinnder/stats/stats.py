@@ -276,10 +276,22 @@ class Stat:
             ("backward_direct_load_timesteps", self.backward_direct_load_timesteps),
         ]
 
-        print("# --- READY TO COPY PASTE ---")
-        for name, val_list in attrs:
-            formatted_list = json.dumps(val_list if val_list is not None else [])
-            print(f"{name} = {formatted_list}")
+        with open("timesteps_output.py", "w") as f:
+            f.write("# --- READY TO COPY PASTE ---\n")
+            for name, data in attrs:
+                if data is None:
+                    f.write(f"{name} = []\n\n")
+                    continue
+
+                clean_vals = [
+                    x.item() if hasattr(x, "item") else x for x in list(data)
+                ]
+                f.write(f"{name} = [\n")
+                for item in clean_vals:
+                    f.write(f"    {item},\n")
+                f.write("]\n\n")
+
+        print("Successfully written to timesteps_output.py!")
 
 
 
