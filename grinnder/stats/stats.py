@@ -26,7 +26,9 @@ class Stat:
         self.backward_GPU_start = 0
         self.backward_compute_start = 0
         self.backward_partition_load_CPU_timesteps: List[int] = []
+        self.backward_gradient_load_CPU_timesteps: List[int] = []
         self.backward_partition_load_GPU_timesteps: List[int] = []
+        self.backward_gradient_load_GPU_timesteps: List[int] = []
         self.backward_direct_load_timesteps: List[int] = []
         self.backward_compute_timesteps: List[int] = []
 
@@ -58,6 +60,8 @@ class Stat:
             self.forward_partition_load_CPU_timesteps.append(t)
         elif stage == "loss":
             self.loss_partition_load_CPU_timesteps.append(t)
+        elif stage == "gradient":
+            self.backward_gradient_load_CPU_timesteps.append(t)
         else:
             self.backward_partition_load_CPU_timesteps.append(t)
 
@@ -72,6 +76,9 @@ class Stat:
 
         elif stage == "loss":
             self.loss_partition_load_GPU_timesteps.append(t)
+
+        elif stage == "gradient":
+            self.backward_gradient_load_GPU_timesteps.append(t)
 
         else:
             self.backward_partition_load_GPU_timesteps.append(t)
@@ -200,20 +207,22 @@ class Stat:
 
         # --- BACKWARD STEP ---
         print("\n\n[BACKWARD STEP]")
-        header_bwd = f"\t| {'SD --> CPU':<{W}} | {'CPU --> GPU':<{W}} | {'Compute':<{W}} | {'GDS':<{W}} |"
-        divider_bwd = f"\t+{'-' * (W + 2)}+{'-' * (W + 2)}+{'-' * (W + 2)}+{'-' * (W + 2)}+"
+        header_bwd = f"\t| {'SD --> CPU (Partition(s))':<{W}} | {'SD --> CPU (Gradients)':<{W}} | {'CPU --> GPU (Partition(s))':<{W}} | | {'CPU --> GPU (Gradients)':<{W}}  {'Compute':<{W}} | {'GDS':<{W}} |"
+        divider_bwd = f"\t+{'-' * (W + 2)}+{'-' * (W + 2)}+{'-' * (W + 2)}+{'-' * (W + 2)}+{'-' * (W + 2)}+{'-' * (W + 2)}+"
         print(header_bwd)
         print(divider_bwd)
 
-        for i, j, k, l in zip_longest(
+        for i, j, k, l, m, n in zip_longest(
             self.backward_partition_load_CPU_timesteps,
+            self.backward_gradient_load_CPU_timesteps,
             self.backward_partition_load_GPU_timesteps,
+            self.backward_gradient_load_GPU_timesteps,
             self.backward_compute_timesteps,
             self.backward_direct_load_timesteps,
             fillvalue=FILL,
         ):
             print(
-                f"{cnt}\t| {str(i):<{W}} | {str(j):<{W}} | {str(k):<{W}} | {str(l):<{W}} |"
+                f"{cnt}\t| {str(i):<{W}} | {str(j):<{W}} | {str(k):<{W}} | {str(l):<{W}} | {str(m):<{W}} | {str(n):<{W}} |"
             )
             cnt += 1
 

@@ -272,7 +272,7 @@ class Trainer:
             return
         if grad.storage_exists(pid):
             print(f"[Layer = {layer_id} | PID = {pid}] Gradients move SSD --> CPU")
-            grad.storage_to_cpu("backward", pid)
+            grad.storage_to_cpu("gradient", pid)
             self.cache.add_gradient_relay(layer_id, pid)
         else:
             grad.zero_partition(pid)
@@ -1003,7 +1003,7 @@ class Trainer:
                     )
                 grad_buf.allocate(first_pid)
                 self.host_gradients[next_grad_layer].async_upload(
-                    "backward", first_pid, grad_buf[first_pid], self.streams.h2d[0]
+                    "gradient", first_pid, grad_buf[first_pid], self.streams.h2d[0]
                 )
 
         for i, pid in enumerate(pids):
@@ -1050,7 +1050,7 @@ class Trainer:
                                 )
                             grad_buf.allocate(next_pid)
                             self.host_gradients[next_grad_layer].async_upload(
-                                "backward", 
+                                "gradient", 
                                 next_pid, grad_buf[next_pid],
                                 self.streams.h2d[next_pool],
                             )
@@ -1135,7 +1135,7 @@ class Trainer:
                                 )
                             grad_buf.allocate(next_pid)
                             self.host_gradients[next_grad_layer].async_upload(
-                                "backward", 
+                                "gradient", 
                                 next_pid,
                                 grad_buf[next_pid],
                                 self.streams.h2d[next_pool],
@@ -1181,7 +1181,7 @@ class Trainer:
                                 )
                             grad_buf.allocate(next_pid)
                             self.host_gradients[next_grad_layer].async_upload(
-                                "backward", 
+                                "gradient", 
                                 next_pid,
                                 grad_buf[next_pid],
                                 self.streams.h2d[0],
