@@ -51,84 +51,64 @@ class Stat:
 
     def load_CPU_timestamp(self, stage):
         t = time.perf_counter_ns()
+        t = t - self.start_time
+        t = t / 1000000000.0
+        t = round(t,2)
         if stage == "forward":
-            t = t - self.start_time
-            t = t / 1000000000.0
-            t = round(t,2)
             self.forward_partition_load_CPU_timesteps.append(t)
         elif stage == "loss":
-            t = t - self.loss_start
-            t = t / 1000000000.0
-            t = round(t,2)
             self.loss_partition_load_CPU_timesteps.append(t)
         else:
-            t = t - self.backward_start
-            t = t / 1000000000.0
-            t = round(t,2)
             self.backward_partition_load_CPU_timesteps.append(t)
 
     def load_GPU_timestamp(self, stage):
         t = time.perf_counter_ns()
-        if stage == "forward":
-            if len(self.forward_partition_load_GPU_timesteps) == 0:
-                self.forward_GPU_start = t
+        t = t - self.start_time
+        t = t / 1000000000.0
+        t = round(t,2)
 
-            t = t - self.forward_GPU_start
-            t = t / 1000000000.0
-            t = round(t,2) + self.forward_partition_load_CPU_timesteps[-1]
+        if stage == "forward":
             self.forward_partition_load_GPU_timesteps.append(t)
 
         elif stage == "loss":
-            if len(self.loss_partition_load_GPU_timesteps) == 0:
-                self.loss_GPU_start = t
-
-            t = t - self.loss_GPU_start
-            t = t / 1000000000.0
-            t = round(t,2) + self.loss_partition_load_CPU_timesteps[-1]
             self.loss_partition_load_GPU_timesteps.append(t)
 
         else:
-            if len(self.backward_partition_load_GPU_timesteps) == 0:
-                self.backward_GPU_start = t
-
-            t = t - self.backward_GPU_start
-            t = t / 1000000000.0
-            # top layer uses losses instead of gradients, losses are already in HOST
-            if len(self.backward_partition_load_CPU_timesteps) > 0:
-                t = round(t,2) + self.backward_partition_load_CPU_timesteps[-1]
             self.backward_partition_load_GPU_timesteps.append(t)
 
     def load_GDS_timestamp(self):
         t = time.perf_counter_ns()
-        t = t - self.backward_start
+        t = t - self.start_time
         t = t / 1000000000.0
         t = round(t,2)
         self.backward_direct_load_timesteps.append(time.perf_counter_ns())
 
     def begin_compute(self, stage):
         t = time.perf_counter_ns()
+
         if stage == "foward":
             if self.forward_compute_start == 0:
                 t = t - self.start_time
+                t = t / 1000000000.0
+                t = round(t,2)
                 self.forward_compute_start = t
 
         else:
             if self.backward_compute_start == 0:
-                t = t - self.backward_start
+                t = t - self.start_time
+                t = t / 1000000000.0
+                t = round(t,2)
                 self.backward_compute_start = t
 
     def compute_timestamp(self, stage):
         t = time.perf_counter_ns()
+        t = t - self.start_time
+        t = t / 1000000000.0
+        t = round(t,2)
 
         if stage == "forward":
-            t = t - self.forward_compute_start
-            t = t / 1000000000.0
-            t = round(t,2)
             self.forward_compute_timesteps.append(t)
         else:
-            t = t - self.backward_compute_start
-            t = t / 1000000000.0
-            t = round(t,2)
             self.backward_compute_timesteps.append(t)
 
     def forward_done(self):
