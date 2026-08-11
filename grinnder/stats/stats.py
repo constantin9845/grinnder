@@ -236,4 +236,19 @@ class Stat:
         )
         print("==============================")
 
+        print("copy format:")
+        print(f"forward_partition_load_CPU_timesteps\n {self.forward_partition_load_CPU_timesteps}")
+        print(f"forward_partition_load_GPU_timesteps\n {self.forward_partition_load_GPU_timesteps}")
+        print(f"forward_compute_timesteps\n {self.forward_compute_timesteps}")
+        print(f"loss_partition_load_CPU_timesteps\n {self.loss_partition_load_CPU_timesteps}")
+        print(f"loss_partition_load_GPU_timesteps\n {self.loss_partition_load_GPU_timesteps}")
+        print(f"backward_partition_load_CPU_timesteps\n {self.backward_partition_load_CPU_timesteps}")
+        print(f"backward_partition_load_GPU_timesteps\n {self.backward_partition_load_GPU_timesteps}")
+        print(f"backward_gradient_load_CPU_timesteps\n {self.backward_gradient_load_CPU_timesteps}")
+        print(f"backward_gradient_load_GPU_timesteps\n {self.backward_gradient_load_GPU_timesteps}")
+        print(f"backward_compute_timesteps\n {self.backward_compute_timesteps}")
+        print(f"backward_direct_load_timesteps\n {self.backward_direct_load_timesteps}")
+
+
+
 stat = Stat()
