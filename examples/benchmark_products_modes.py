@@ -346,7 +346,7 @@ def main() -> None:
     mode_specs = selected_modes(args.modes)
 
     fix_seed(args.seed)
-    full_data = load_dataset("ogbn-products", root=args.root)
+    full_data = load_dataset("ogbn-papers100M", root=args.root)
     data = induced_products_subset(full_data, args.sample_nodes, args.seed)
     print(
         "OGBN-Products mode benchmark: "

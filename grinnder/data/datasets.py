@@ -22,6 +22,7 @@ IGB_DATASET_URLS = {
         "tiny": "https://igb-public-awsopen.s3.amazonaws.com/igb-homogeneous/igb_homogeneous_tiny.tar.gz",
         "small": "https://igb-public-awsopen.s3.amazonaws.com/igb-homogeneous/igb_homogeneous_small.tar.gz",
         "medium": "https://igb-public-awsopen.s3.amazonaws.com/igb-homogeneous/igb_homogeneous_medium.tar.gz",
+        "large": "https://igb-public-awsopen.s3.amazonaws.com/igb-homogeneous/igb_homogeneous_large.tar.gz",
     }
 }
 
