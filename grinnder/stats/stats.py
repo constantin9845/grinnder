@@ -260,7 +260,6 @@ class Stat:
         return pairs
 
     
-
     def print_timeline(self):
         print("========== TIMELINE ==========")
         print(f"Start = {self.start_time}\n")
@@ -270,43 +269,63 @@ class Stat:
 
         # --- FORWARD STEP ---
         print("[FORWARD STEP]")
-        header_fwd = f"\t| {'SD --> CPU':<{W}} | {'CPU --> GPU Gather':<{W}} | {'Compute':<{W}} |"
-        divider_fwd = f"\t+{'-' * (W + 2)}+{'-' * (W + 2)}+{'-' * (W + 2)}+"
+        header_fwd = (
+            f"\t| {'SD --> CPU':<{W}} "
+            f"| {'CPU->GPU (Gather)':<{W}} "
+            f"| {'CPU->GPU (Copy)':<{W}} "
+            f"| {'Compute':<{W}} |"
+        )
+        divider_fwd = f"\t+{'-' * (W + 2)}" * 4 + "+"
         print(header_fwd)
         print(divider_fwd)
 
         cnt = 1
-        fwd_gpu = self._format_pairs(
+        fwd_gpu_gather = self._format_pairs(
             self.forward_partition_load_GPU_timesteps_gather
+        )
+        fwd_gpu_copy = self._format_pairs(
+            self.forward_partition_load_GPU_timesteps_copy
         )
         fwd_cmp = self._format_pairs(self.forward_compute_timesteps)
 
-        for i, j, k in zip_longest(
+        for i, j, k, l in zip_longest(
             self.forward_partition_load_CPU_timesteps,
-            fwd_gpu,
+            fwd_gpu_gather,
+            fwd_gpu_copy,
             fwd_cmp,
             fillvalue=FILL,
         ):
-            print(f"{cnt}\t| {str(i):<{W}} | {str(j):<{W}} | {str(k):<{W}} |")
+            print(
+                f"{cnt}\t| {str(i):<{W}} | {str(j):<{W}} | {str(k):<{W}} | {str(l):<{W}} |"
+            )
             cnt += 1
 
         # --- LOSS STEP ---
         cnt = 1
         print("\n\n[LOSS STEP]")
         header_loss = (
-            f"\t| {'SD --> CPU':<{W}} | {'CPU --> GPU Gather':<{W}} |"
+            f"\t| {'SD --> CPU':<{W}} "
+            f"| {'CPU->GPU (Gather)':<{W}} "
+            f"| {'CPU->GPU (Copy)':<{W}} |"
         )
-        divider_loss = f"\t+{'-' * (W + 2)}+{'-' * (W + 2)}+"
+        divider_loss = f"\t+{'-' * (W + 2)}" * 3 + "+"
         print(header_loss)
         print(divider_loss)
 
-        loss_gpu = self._format_pairs(
+        loss_gpu_gather = self._format_pairs(
             self.loss_partition_load_GPU_timesteps_gather
         )
-        for i, j in zip_longest(
-            self.loss_partition_load_CPU_timesteps, loss_gpu, fillvalue=FILL
+        loss_gpu_copy = self._format_pairs(
+            self.loss_partition_load_GPU_timesteps_copy
+        )
+
+        for i, j, k in zip_longest(
+            self.loss_partition_load_CPU_timesteps,
+            loss_gpu_gather,
+            loss_gpu_copy,
+            fillvalue=FILL,
         ):
-            print(f"{cnt}\t| {str(i):<{W}} | {str(j):<{W}} |")
+            print(f"{cnt}\t| {str(i):<{W}} | {str(j):<{W}} | {str(k):<{W}} |")
             cnt += 1
 
         # --- BACKWARD STEP ---
@@ -314,33 +333,43 @@ class Stat:
         print("\n\n[BACKWARD STEP]")
         header_bwd = (
             f"\t| {'SD->CPU (Parts)':<{W}} | {'SD->CPU (Grad)':<{W}} "
-            f"| {'CPU->GPU (Parts)':<{W}} | {'CPU->GPU (Grad)':<{W}} "
+            f"| {'GPU Parts (Gather)':<{W}} | {'GPU Parts (Copy)':<{W}} "
+            f"| {'GPU Grad (Gather)':<{W}} | {'GPU Grad (Copy)':<{W}} "
             f"| {'Compute':<{W}} | {'GDS':<{W}} |"
         )
-        divider_bwd = f"\t+{'-' * (W + 2)}" * 6 + "+"
+        divider_bwd = f"\t+{'-' * (W + 2)}" * 8 + "+"
         print(header_bwd)
         print(divider_bwd)
 
-        bwd_parts_gpu = self._format_pairs(
+        bwd_parts_gpu_gather = self._format_pairs(
             self.backward_partition_load_GPU_timesteps_gather
         )
-        bwd_grad_gpu = self._format_pairs(
+        bwd_parts_gpu_copy = self._format_pairs(
+            self.backward_partition_load_GPU_timesteps_copy
+        )
+        bwd_grad_gpu_gather = self._format_pairs(
             self.backward_gradient_load_GPU_timesteps_gather
+        )
+        bwd_grad_gpu_copy = self._format_pairs(
+            self.backward_gradient_load_GPU_timesteps_copy
         )
         bwd_cmp = self._format_pairs(self.backward_compute_timesteps)
 
-        for i, j, k, l, m, n in zip_longest(
+        for i, j, k, l, m, n, o, p in zip_longest(
             self.backward_partition_load_CPU_timesteps,
             self.backward_gradient_load_CPU_timesteps,
-            bwd_parts_gpu,
-            bwd_grad_gpu,
+            bwd_parts_gpu_gather,
+            bwd_parts_gpu_copy,
+            bwd_grad_gpu_gather,
+            bwd_grad_gpu_copy,
             bwd_cmp,
             self.backward_direct_load_timesteps,
             fillvalue=FILL,
         ):
             print(
                 f"{cnt}\t| {str(i):<{W}} | {str(j):<{W}} | {str(k):<{W}} | "
-                f"{str(l):<{W}} | {str(m):<{W}} | {str(n):<{W}} |"
+                f"{str(l):<{W}} | {str(m):<{W}} | {str(n):<{W}} | "
+                f"{str(o):<{W}} | {str(p):<{W}} |"
             )
             cnt += 1
 
@@ -368,6 +397,7 @@ class Stat:
                 self.forward_partition_load_GPU_timesteps_copy,
             ),
             ("forward_compute_timesteps", self.forward_compute_timesteps),
+            ("forward_gds_writes", self.forward_gds_writes),
             (
                 "loss_partition_load_CPU_timesteps",
                 self.loss_partition_load_CPU_timesteps,
@@ -375,6 +405,10 @@ class Stat:
             (
                 "loss_partition_load_GPU_timesteps_gather",
                 self.loss_partition_load_GPU_timesteps_gather,
+            ),
+            (
+                "loss_partition_load_GPU_timesteps_copy",
+                self.loss_partition_load_GPU_timesteps_copy,
             ),
             (
                 "backward_partition_load_CPU_timesteps",
@@ -389,8 +423,16 @@ class Stat:
                 self.backward_partition_load_GPU_timesteps_gather,
             ),
             (
+                "backward_partition_load_GPU_timesteps_copy",
+                self.backward_partition_load_GPU_timesteps_copy,
+            ),
+            (
                 "backward_gradient_load_GPU_timesteps_gather",
                 self.backward_gradient_load_GPU_timesteps_gather,
+            ),
+            (
+                "backward_gradient_load_GPU_timesteps_copy",
+                self.backward_gradient_load_GPU_timesteps_copy,
             ),
             ("backward_compute_timesteps", self.backward_compute_timesteps),
             (
@@ -421,7 +463,7 @@ class Stat:
                 f.write("]\n\n")
 
         print("Successfully written to timesteps_output.py!")
-
+    
     
     def forward_timeline(self, data):
         """Expects data = [ssd_cpu, cpu_gpu_gather, compute, gds_writes]"""
