@@ -252,7 +252,6 @@ class HostBuffer:
             else:
                 gpu_target.copy_(self._tensors[pid], non_blocking=True)
 
-        stat.load_GPU_timestamp(phase)
 
     def h2d_synchronize(self, stream: torch.cuda.Stream) -> None:
         """Wait for H2D operations to complete.
