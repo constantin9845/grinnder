@@ -552,6 +552,7 @@ class Trainer:
 
                 # saved_tensors_hooks wraps checkpoint(fn, x).
                 # checkpoint only saves x. adj loaded inside fn (not passed).
+                t0 = time.perf_counter_ns()
                 if self.config.mode == "hongtu":
                     with HongtuCheckpoint(pid, self.device_features[layer_id]):
                         out = checkpoint(
@@ -570,8 +571,8 @@ class Trainer:
                             layer_id, pid, x,
                             use_reentrant=True,
                         )
-
-                stat.compute_timestamp("forward")
+                tn = time.perf_counter_ns()
+                stat.compute_timestamp("forward", t0, tn)
 
                 # Keep activation reference
                 self.activations[layer_id][pid] = out
@@ -589,9 +590,14 @@ class Trainer:
 
                 if use_bypass:
                     print(f"[Layer {layer_id} | PID {pid}] Writing {size_mb:.2f} MB of output activations to Storage (NVMe bypass)...")
+                    
+                    t0 = time.perf_counter_ns()
                     self.host_features[layer_id + 1].async_bypass_to_storage(
                         pid, out, self.streams.d2h[pool_idx]
                     )
+                    tn = time.perf_counter_ns()
+                    stat.write_timestamp("forward", "none", t0, tn)
+
                 else:
                     print(f"[Layer {layer_id} | PID {pid}] Writing {size_mb:.2f} MB to Host RAM...")
                     self.host_features[layer_id + 1].async_fill(
@@ -881,9 +887,12 @@ class Trainer:
                     prev_pid = pids[i - 1]
                     prev_pool = (i - 1) % pool_size
                     if layer_id > 0 and self.host_gradients[layer_id] is not None:
-                        self.host_gradients[layer_id].d2h_synchronize(
-                            self.streams.d2h[prev_pool]
-                        )
+                        t0 = time.perf_counter_ns()
+                        self.host_gradients[layer_id].d2h_synchronize(self.streams.d2h[prev_pool])
+                        tn = time.perf_counter_ns()
+                        stat.write_timestamp("backward", "CPU", t0, tn)
+
+
                     df = self.device_features[layer_id]
                     if df.is_allocated(prev_pid):
                         df.release(prev_pid)
@@ -891,9 +900,14 @@ class Trainer:
                 # Backward through loss (triggers checkpoint recompute)
                 stat.begin_compute("backward")
                 loss = losses[loss_idx]
+
+                t0 = time.perf_counter_ns()
                 loss.backward(retain_graph=False)
                 self.streams.compute.synchronize()
-                stat.compute_timestamp("backward")
+
+                tn = time.perf_counter_ns()
+                stat.compute_timestamp("backward", t0, tn)
+
                 losses[loss_idx] = None
                 act = self.activations[layer_id][pid]
                 if act is not None:
@@ -903,9 +917,13 @@ class Trainer:
 
             if pool_size == 1:
                 if layer_id > 0 and self.host_gradients[layer_id] is not None:
-                    self.host_gradients[layer_id].d2h_synchronize(
-                        self.streams.d2h[0]
-                    )
+
+                    t0 = time.perf_counter_ns()
+                    self.host_gradients[layer_id].d2h_synchronize(self.streams.d2h[0])
+
+                    tn = time.perf_counter_ns()
+                    stat.write_timestamp("backward", "CPU", t0, tn)
+
                 if self.device_features[layer_id].is_allocated(pid):
                     self.device_features[layer_id].release(pid)
 
@@ -928,6 +946,7 @@ class Trainer:
         # the checkpoint recompute. The next backward phase uploads that buffer,
         # so all scatters from this phase must be visible first.
         print("Flush all gradients to write back buffer (GPU --> CPU)")
+        t0 = time.perf_counter_ns()
         if layer_id > 0 and self.host_gradients[layer_id] is not None:
             for i, _ in enumerate(pids):
                 pool_idx = i % pool_size
@@ -945,6 +964,11 @@ class Trainer:
 
         if self._uses_partition_lru() and self.cache is not None:
             self.cache.on_backward_layer_complete(layer_id)
+
+        tn = time.perf_counter_ns()
+        stat.write_timestamp("backward", "SSD", t0, tn)
+
+
 
     def _backward_layer(self, layer_id: int) -> None:
         """Backward for middle layer: activation.backward(gradient).
@@ -1060,9 +1084,13 @@ class Trainer:
                     prev_pid = pids[i - 1]
                     prev_pool = (i - 1) % pool_size
                     if self.host_gradients[layer_id] is not None:
+                        t0 = time.perf_counter_ns()
                         self.host_gradients[layer_id].d2h_synchronize(
                             self.streams.d2h[prev_pool]
                         )
+                        tn = time.perf_counter_ns()
+                        stat.write_timestamp("backward", "CPU", t0, tn)
+
                     self.device_features[layer_id].release(prev_pid)
                     if self.device_gradients[next_grad_layer] is not None:
                         self.device_gradients[next_grad_layer].release(prev_pid)
@@ -1079,13 +1107,18 @@ class Trainer:
                 act = self.activations[layer_id][pid]
                 if act is not None and act.grad_fn is not None:
                     grad_buf = self.device_gradients[next_grad_layer]
+
+                    t0 = time.perf_counter_ns()
                     if grad_buf is not None and grad_buf.is_allocated(pid):
                         act.backward(grad_buf[pid], retain_graph=False)
                     else:
                         act.backward(retain_graph=False)
 
                     self.streams.compute.synchronize()
-                    stat.compute_timestamp("backward")
+
+                    tn = time.perf_counter_ns()
+                    stat.compute_timestamp("backward", t0, tn)
+
                     if (
                         self.device_gradients[next_grad_layer] is not None
                         and self.device_gradients[next_grad_layer].is_allocated(pid)
@@ -1143,9 +1176,13 @@ class Trainer:
 
             if pool_size == 1:
                 if self.host_gradients[layer_id] is not None:
+                    t0 = time.perf_counter_ns()
                     self.host_gradients[layer_id].d2h_synchronize(
                         self.streams.d2h[0]
                     )
+                    tn = time.perf_counter_ns()
+                    stat.write_timestamp("backward", "CPU", t0, tn)
+
                 if self.device_features[layer_id].is_allocated(pid):
                     self.device_features[layer_id].release(pid)
                 if (
@@ -1188,6 +1225,7 @@ class Trainer:
                             )
 
         # Epilogue: synchronize last scatter + free last partition
+        t0 = time.perf_counter_ns()
         if pool_size > 1:
             last_pid = pids[-1]
             last_pool = (len(pids) - 1) % pool_size
@@ -1201,3 +1239,6 @@ class Trainer:
 
         if self.cache is not None:
             self.cache.on_backward_layer_complete(layer_id)
+
+        tn = time.perf_counter_ns()
+        stat.write_timestamp("backward", "SSD", t0, tn)

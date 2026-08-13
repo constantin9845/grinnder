@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import List, Optional
 
 import torch
+import time
 from torch import Tensor
 
 from grinnder.storage.backend import StorageBackend
@@ -302,6 +303,7 @@ class HostBuffer:
             )
 
         # Build boundary list (replace None with empty tensor)
+        t0 = time.perf_counter_ns()
         bndries = []
         for i in range(self.num_parts):
             if i == pid or boundaries[i] is None:
@@ -309,7 +311,13 @@ class HostBuffer:
             else:
                 bndries.append(boundaries[i])
 
+        tn = time.perf_counter_ns()
+        stat.load_GPU_timestamp(phase, "gather", t0, tn)
+
+
         stream.wait_stream(torch.cuda.current_stream(gpu_target.device))
+
+        t0 = time.perf_counter_ns()
         with torch.cuda.stream(stream):
             if self._ops is not None:
                 self._ops.gather_partitions(
@@ -326,8 +334,9 @@ class HostBuffer:
                     n = selected.size(0)
                     gpu_target[offset : offset + n].copy_(selected)
                     offset += n
-
-        stat.load_GPU_timestamp(phase)
+        
+        tn = time.perf_counter_ns()
+        stat.load_GPU_timestamp(phase, "copy", t0, tn)
 
         bt = gpu_target.numel() * gpu_target.element_size()
         gb = round(bt / (1024**3),3)
