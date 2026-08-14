@@ -1,25 +1,32 @@
-"""Train GCN or GAT on IGB-Medium (10M nodes, 120M edges) with GriNNder.
+"""Train GCN or GAT on ogbn-papers100M with GriNNder.
 
-This is the real-world benchmark from the paper. With 10M nodes and 1024-dim
-features, the intermediate activations exceed GPU memory, requiring GriNNder's
-storage offloading.
+OGB Papers100M is a massive dataset (111M nodes, 1.6B edges).
+With 100M+ nodes, intermediate activations far exceed GPU memory,
+requiring GriNNder's storage offloading.
 
 Usage:
-  python examples/train_igb.py --igb_root data/igb_datasets
-  python examples/train_igb.py --igb_root data/igb_datasets --mode hongtu
-  python examples/train_igb.py --igb_root data/igb_datasets --cache_mode lru_layer --storage_dir /pci5_nvme/grinnder
+    python train_papers100m.py --root data
+    python train_papers100m.py --root data --mode hongtu
+    python train_papers100m.py --root data --cache_mode lru_layer --storage_dir /mnt/nvme
 """
 
 import argparse
+from pathlib import Path
 import statistics
 import time
 
 import torch
 
-from grinnder import GAT, GCN, GriNNderConfig, Trainer, build_partitioned_graph, build_partitioned_graph_metis, load_dataset
-from grinnder.data.datasets import load_igb
-from grinnder.utils import fix_seed, get_default_partitioner_threads, report_memory
+from grinnder import (
+    GAT,
+    GCN,
+    GriNNderConfig,
+    Trainer,
+    build_partitioned_graph_metis,
+    load_dataset,
+)
 from grinnder.stats import stat
+from grinnder.utils import fix_seed, get_default_partitioner_threads, report_memory
 
 
 def build_model(args, graph):
@@ -46,67 +53,89 @@ def build_model(args, graph):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train GCN or GAT on IGB-Medium with GriNNder")
-    parser.add_argument("--igb_root", type=str, default="data/igb_datasets",
-                        help="Path to igb_datasets directory")
-    parser.add_argument("--igb_size", type=str, default="medium",
-                        choices=["tiny", "small", "medium", "large"])
-    parser.add_argument("--download", action=argparse.BooleanOptionalAction, default=True,
-                        help="Download homogeneous IGB tiny/small/medium if missing")
-    parser.add_argument("--root", type=str, default="data")
-    parser.add_argument("--confirm_download", action="store_true",
-                        help="Skip the interactive prompt for large IGB downloads")
-    parser.add_argument("--num_classes", type=int, default=19, choices=[19, 2983])
-    parser.add_argument("--mode", type=str, default="grinnder", choices=["hongtu", "grinnder"])
+    parser = argparse.ArgumentParser(
+        description="Train GCN or GAT on ogbn-papers100M with GriNNder"
+    )
+    parser.add_argument(
+        "--root",
+        type=str,
+        default="data",
+        help="Root directory where data/papers100M-bin resides or will be loaded from",
+    )
+    parser.add_argument(
+        "--num_classes",
+        type=int,
+        default=172,
+        help="Number of target classes (172 for ogbn-papers100M)",
+    )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="grinnder",
+        choices=["hongtu", "grinnder"],
+    )
     parser.add_argument("--num_parts", type=int, default=32)
-    parser.add_argument("--cache_mode", type=str, default="partition_lru",
-                        choices=["auto", "lru_layer", "partition_lru"])
-    parser.add_argument("--model", type=str, default="gcn", choices=["gcn", "gat"])
+    parser.add_argument(
+        "--cache_mode",
+        type=str,
+        default="partition_lru",
+        choices=["auto", "lru_layer", "partition_lru"],
+    )
+    parser.add_argument(
+        "--model", type=str, default="gcn", choices=["gcn", "gat"]
+    )
     parser.add_argument("--hidden", type=int, default=256)
     parser.add_argument("--num_layers", type=int, default=3)
-    parser.add_argument("--heads", type=int, default=1, help="GAT attention heads")
+    parser.add_argument(
+        "--heads", type=int, default=1, help="GAT attention heads"
+    )
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--lr", type=float, default=0.01)
     parser.add_argument("--dropout", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--storage_dir", type=str, default="/mnt/nvme")
-    parser.add_argument("--runtime_safety_margin_gb", type=float, default=8.0)
+    parser.add_argument(
+        "--runtime_safety_margin_gb", type=float, default=8.0
+    )
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--pool_size", type=int, default=2)
-    parser.add_argument("--partition_cache_dir", type=str, default="data/grinnder_partitions")
+    parser.add_argument(
+        "--partition_cache_dir",
+        type=str,
+        default="data/grinnder_partitions",
+    )
     parser.add_argument("--no_save_partition_cache", action="store_true")
-    parser.add_argument("--partitioner_threads", type=int, default=get_default_partitioner_threads())
-    parser.add_argument("--preprocess_workers", type=int, default=get_default_partitioner_threads())
-    parser.add_argument("--materialize_features", action="store_true",
-                        help="Load the full IGB feature matrix into RAM instead of using mmap")
+    parser.add_argument(
+        "--partitioner_threads",
+        type=int,
+        default=get_default_partitioner_threads(),
+    )
+    parser.add_argument(
+        "--preprocess_workers",
+        type=int,
+        default=get_default_partitioner_threads(),
+    )
     args = parser.parse_args()
 
     fix_seed(args.seed)
     device = args.device
 
     # ---- Load dataset ----
-    print(f"\n\nLoading IGB-{args.igb_size} dataset from {args.igb_root}...")
+    print(f"\n\nLoading ogbn-papers100M dataset from {args.root}...")
     t0 = time.time()
-
-    '''
-    data = load_igb(
-        args.igb_root,
-        size=args.igb_size,
-        num_classes=args.num_classes,
-        mmap_features=not args.materialize_features,
-        download=args.download,
-        confirm_download=args.confirm_download,
-    )
-    '''
 
     data = load_dataset("ogbn-papers100M", root=args.root)
 
     t_load = time.time() - t0
     print(f"  Loaded in {t_load:.1f}s")
-    print(f"  Nodes: {data.num_nodes:,}, Edges: {data.edge_index.size(1):,}, "
-          f"Features: {data.x.size(1)}, Classes: {args.num_classes}")
-    print(f"  Train: {data.train_mask.sum():,}, Val: {data.val_mask.sum():,}, "
-          f"Test: {data.test_mask.sum():,}")
+    print(
+        f"  Nodes: {data.num_nodes:,}, Edges: {data.edge_index.size(1):,}, "
+        f"Features: {data.x.size(1)}, Classes: {args.num_classes}"
+    )
+    print(
+        f"  Train: {data.train_mask.sum():,}, Val: {data.val_mask.sum():,}, "
+        f"Test: {data.test_mask.sum():,}"
+    )
     print(f"  {report_memory('After load')}")
 
     # ---- Configure ----
@@ -139,12 +168,10 @@ def main():
     print("\n\n\nPartitioning...")
     cache_path = None
     if args.partition_cache_dir:
-        from pathlib import Path
+        cache_dir = Path(args.partition_cache_dir)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_path = cache_dir / f"ogbn_papers100M_grinnder_{args.num_parts}p.pt"
 
-        cache_path = (
-            Path(args.partition_cache_dir)
-            / f"igb_{args.igb_size}_grinnder_{args.num_parts}p.pt"
-        )
     t0 = time.time()
     graph = build_partitioned_graph_metis(
         edge_index=data.edge_index,
@@ -158,13 +185,13 @@ def main():
         save_cache=not args.no_save_partition_cache,
     )
 
-    
-
     t_part = time.time() - t0
     print(f"  Partitioning: {t_part:.1f}s")
-    print(f"  Partition sizes: min={min(graph.partition_sizes):,}, "
-          f"max={max(graph.partition_sizes):,}, "
-          f"avg={sum(graph.partition_sizes)//len(graph.partition_sizes):,}")
+    print(
+        f"  Partition sizes: min={min(graph.partition_sizes):,}, "
+        f"max={max(graph.partition_sizes):,}, "
+        f"avg={sum(graph.partition_sizes)//len(graph.partition_sizes):,}"
+    )
     print(f"  {report_memory('After partition')}\n\n")
 
     # Free original metadata container; graph keeps an mmap-backed feature source.
@@ -193,11 +220,15 @@ def main():
             f"layer_working_set={to_gb(plan.layer_working_set_bytes):.2f}GB, \n"
             f"safety_margin={to_gb(plan.safety_margin_bytes):.2f}GB\n\n"
         )
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=5e-4)
+    optimizer = torch.optim.Adam(
+        model.parameters(), lr=args.lr, weight_decay=5e-4
+    )
     criterion = torch.nn.CrossEntropyLoss()
 
     print(f"\nTraining for {args.epochs} epochs...\n")
-    print(f"{'Epoch':>6} | {'Loss':>8} | {'Val Acc':>8} | {'Test Acc':>9} | {'Time':>8}")
+    print(
+        f"{'Epoch':>6} | {'Loss':>8} | {'Val Acc':>8} | {'Test Acc':>9} | {'Time':>8}"
+    )
     print("-" * 56)
 
     best_val = 0.0
@@ -213,7 +244,6 @@ def main():
 
         stat.print_timeline()
         print(f"Epoch Time = {t_epoch}")
-        
 
         if metrics["val_acc"] > best_val:
             best_val = metrics["val_acc"]
