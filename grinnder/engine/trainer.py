@@ -946,8 +946,8 @@ class Trainer:
         # the checkpoint recompute. The next backward phase uploads that buffer,
         # so all scatters from this phase must be visible first.
         print("Flush all gradients to write back buffer (GPU --> CPU)")
-        t0 = time.perf_counter_ns()
         if layer_id > 0 and self.host_gradients[layer_id] is not None:
+            t0 = time.perf_counter_ns()
             for i, _ in enumerate(pids):
                 pool_idx = i % pool_size
                 self.host_gradients[layer_id].d2h_synchronize(
@@ -955,6 +955,9 @@ class Trainer:
                 )
 
                 self.cache.add_gradient_relay(layer_id, pid)
+
+            tn = time.perf_counter_ns()
+            stat.write_timestamp("backward", "CPU", t0, tn)
                 
 
         if pool_size > 1:
@@ -962,6 +965,8 @@ class Trainer:
             if self.device_features[layer_id].is_allocated(last_pid):
                 self.device_features[layer_id].release(last_pid)
 
+
+        t0 = time.perf_counter_ns()
         if self._uses_partition_lru() and self.cache is not None:
             self.cache.on_backward_layer_complete(layer_id)
 
@@ -1225,18 +1230,21 @@ class Trainer:
                             )
 
         # Epilogue: synchronize last scatter + free last partition
-        t0 = time.perf_counter_ns()
         if pool_size > 1:
             last_pid = pids[-1]
             last_pool = (len(pids) - 1) % pool_size
             if self.host_gradients[layer_id] is not None:
+                t0 = time.perf_counter_ns()
                 self.host_gradients[layer_id].d2h_synchronize(
                     self.streams.d2h[last_pool]
                 )
+                tn = time.perf_counter_ns()
+                stat.write_timestamp("backward", "CPU", t0, tn)
             self.device_features[layer_id].release(last_pid)
             if self.device_gradients[next_grad_layer] is not None:
                 self.device_gradients[next_grad_layer].release(last_pid)
 
+        t0 = time.perf_counter_ns()
         if self.cache is not None:
             self.cache.on_backward_layer_complete(layer_id)
 
