@@ -246,11 +246,17 @@ class HostBuffer:
                 f"HostBuffer partition {pid} is not resident for upload"
             )
         stream.wait_stream(torch.cuda.current_stream(gpu_target.device))
+        
+        t0 = time.perf_counter_ns()
         with torch.cuda.stream(stream):
             if self._ops is not None:
                 self._ops.h2d_copy_async(self._tensors[pid], gpu_target)
             else:
                 gpu_target.copy_(self._tensors[pid], non_blocking=True)
+
+        tn = time.perf_counter_ns()
+
+        stat.load_GPU_timestamp("gradient", "copy", t0, tn)
 
 
     def h2d_synchronize(self, stream: torch.cuda.Stream) -> None:
