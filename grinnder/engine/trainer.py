@@ -975,7 +975,9 @@ class Trainer:
 
         # evict from host cache : Output activations + gradients
         for i, pid in enumerate(pids):
-            self.cache._evict_partition(layer_id, pid)
+            self.cache._evict_partition(2, pid)
+            self.cache._evict_partition(1, pid)
+            self.cache._evict_partition(0, pid)
 
 
     def _backward_layer(self, layer_id: int) -> None:
