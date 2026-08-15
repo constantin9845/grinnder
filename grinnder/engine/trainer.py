@@ -973,6 +973,9 @@ class Trainer:
         tn = time.perf_counter_ns()
         stat.write_timestamp("backward", "SSD", t0, tn)
 
+        # evict from host cache : Output activations + gradients
+        for i, pid in enumerate(pids):
+            self.cache._evict_partition(layer_id, pid)
 
 
     def _backward_layer(self, layer_id: int) -> None:
