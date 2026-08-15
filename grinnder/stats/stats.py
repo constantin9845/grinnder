@@ -68,19 +68,21 @@ class Stat:
     def start_backward(self):
         self.backward_start = time.perf_counter_ns()
 
-    def load_CPU_timestamp(self, stage):
-        t = time.perf_counter_ns()
-        t = t - self.start_time
-        t = t / 1000000000.0
-        t = round(t,2)
+    def load_CPU_timestamp(self, stage, start, end):
+
+        start = (start - self.start_time) / 1000000000.0
+        end = (end - self.start_time) / 1000000000.0
+
+        start = round(start,4)
+        end = round(end,4)
         if stage == "forward":
-            self.forward_partition_load_CPU_timesteps.append(t)
+            self.forward_partition_load_CPU_timesteps.extend([start,end])
         elif stage == "loss":
-            self.loss_partition_load_CPU_timesteps.append(t)
+            self.loss_partition_load_CPU_timesteps.extend([start,end])
         elif stage == "gradient":
-            self.backward_gradient_load_CPU_timesteps.append(t)
+            self.backward_gradient_load_CPU_timesteps.extend([start,end])
         else:
-            self.backward_partition_load_CPU_timesteps.append(t)
+            self.backward_partition_load_CPU_timesteps.extend([start,end])
 
     # track: stage
     #   - Time to gather boundary nodes from host buffer

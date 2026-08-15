@@ -445,9 +445,12 @@ class HostBuffer:
         if pid is not None:
             self._ensure_allocated(pid)
             file_id = f"{self._file_prefix}_p{pid}"
+            t0 = time.perf_counter_ns()
             h = self._backend.host_read(file_id, self._tensors[pid])
             self._backend.wait(h)
-            stat.load_CPU_timestamp(phase)
+            tn = time.perf_counter_ns()
+
+            stat.load_CPU_timestamp(phase, t0, tn)
             self._zero_initialized[pid] = True
         else:
             handles = []
