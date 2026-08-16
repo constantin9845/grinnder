@@ -526,8 +526,9 @@ def build_partitioned_graph_metis(
         expanded_sizes[pid] = expanded_size
         partition_sizes[pid] = batch_size
 
-    # filter out boundary edges that are < 1%
-    for pid, adj_csr, boundaries, expanded_size, batch_size in results:
+    # Filter out boundary connections that are < 1% of total boundary nodes
+    for pid in range(config.num_parts):
+        boundaries = boundaries_list[pid]
         if boundaries is not None:
             total_ext_boundary_nodes = sum(
                 b.numel() for b in boundaries if b is not None
@@ -535,15 +536,15 @@ def build_partitioned_graph_metis(
 
             if total_ext_boundary_nodes > 0:
                 threshold = 0.01 * total_ext_boundary_nodes
-                boundaries = [
+                
+                # Apply the 1% threshold filtering
+                filtered_boundaries = [
                     (b if (b is not None and b.numel() >= threshold) else None)
                     for b in boundaries
                 ]
-
-        adj_csr_list[pid] = adj_csr
-        boundaries_list[pid] = boundaries
-        expanded_sizes[pid] = expanded_size
-        partition_sizes[pid] = batch_size
+                
+                # Explicitly overwrite the list with the filtered result
+                boundaries_list[pid] = filtered_boundaries
 
 
     adj_csr_list_final = [
