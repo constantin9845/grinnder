@@ -562,22 +562,35 @@ def build_partitioned_graph_metis(
                 b.numel() for b in filtered_boundaries if b is not None
             )
 
-            # 3. Prune adj_csr column indices pointing to dropped neighbor partitions
+            # 3. Prune AND Remap adj_csr column indices to local contiguous range [0, expanded_size - 1]
             if adj_csr is not None:
                 rp, c, v = adj_csr
 
-                # Create mask for column targets belonging ONLY to allowed partitions
-                mask = torch.zeros_like(c, dtype=torch.bool)
-                for allowed_pid in allowed_pids:
-                    p_start = ptr[allowed_pid].item()
-                    p_end = ptr[allowed_pid + 1].item()
-                    mask |= (c >= p_start) & (c < p_end)
+                # --- A. Build global-to-local node map for retained nodes ---
+                # Order: [ Target Partition Nodes | Retained Boundary Nodes (P1, P2, ...) ]
+                p_start = ptr[pid].item()
+                p_end = ptr[pid + 1].item()
+                retained_global_nodes = [torch.arange(p_start, p_end, device=c.device)]
 
-                # Filter column array and weight values
-                new_c = c[mask]
+                for src_pid, b in enumerate(filtered_boundaries):
+                    if b is not None:
+                        retained_global_nodes.append(b.to(c.device))
+
+                all_local_nodes = torch.cat(retained_global_nodes)
+
+                # Initialize lookup table (-1 for dropped nodes)
+                global_to_local = torch.full((num_nodes,), -1, dtype=torch.long, device=c.device)
+                global_to_local[all_local_nodes] = torch.arange(all_local_nodes.numel(), dtype=torch.long, device=c.device)
+
+                # --- B. Filter edges pointing to retained nodes ---
+                remapped_c = global_to_local[c]
+                mask = remapped_c != -1  # Keeps edges targeting non-dropped partitions
+
+                # Obtain new local contiguous column indices [0, expanded_size - 1]
+                new_c = remapped_c[mask]
                 new_v = v[mask] if v is not None else None
 
-                # Reconstruct rowptr to match filtered edges per row
+                # --- C. Reconstruct CSR row pointers ---
                 row_lengths = torch.bincount(
                     torch.repeat_interleave(
                         torch.arange(rp.numel() - 1, device=c.device),
