@@ -194,8 +194,6 @@ def main():
             
         print("=" * 80)
 
-    exit(1)
-
     # Free original metadata container; graph keeps an mmap-backed feature source.
     del data
     torch.cuda.empty_cache()
