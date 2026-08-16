@@ -415,6 +415,7 @@ def build_partitioned_graph(
         ptr=ptr,
     )
 
+
 def build_partitioned_graph_metis(
     edge_index: Tensor,
     x: Any,
@@ -427,7 +428,6 @@ def build_partitioned_graph_metis(
     cache_path: Optional[Union[str, Path]] = None,
     save_cache: bool = True,
 ) -> PartitionedGraph:
-    
     import torch_geometric.transforms as T
     from torch_geometric.data import Data
 
@@ -449,10 +449,7 @@ def build_partitioned_graph_metis(
             )
         print(f"Ignoring incompatible partitioned graph cache at {cache_path}")
 
-    
-
     from torch_geometric.loader import ClusterData
-    from torch_geometric.data import Data
 
     data = Data(edge_index=edge_index, num_nodes=num_nodes)
     cluster_data = ClusterData(
@@ -467,7 +464,9 @@ def build_partitioned_graph_metis(
 
     # Reorder nodes by partition
     inv_perm = torch.empty_like(perm)
-    inv_perm[perm] = torch.arange(num_nodes, dtype=torch.long, device=perm.device)
+    inv_perm[perm] = torch.arange(
+        num_nodes, dtype=torch.long, device=perm.device
+    )
 
     x, y, train_mask, val_mask, test_mask = _reorder_graph_payload(
         x, y, train_mask, val_mask, test_mask, perm
@@ -481,6 +480,7 @@ def build_partitioned_graph_metis(
 
     # Add self-loops to edge_index (matching compute_gcn_norm)
     from torch_geometric.utils import add_self_loops
+
     edge_index, _ = add_self_loops(edge_index, num_nodes=num_nodes)
 
     # Convert to CSR
@@ -493,7 +493,9 @@ def build_partitioned_graph_metis(
     adj_csr_list: List[Optional[Tuple[Tensor, Tensor, Optional[Tensor]]]] = [
         None
     ] * config.num_parts
-    boundaries_list: List[Optional[List[Optional[Tensor]]]] = [None] * config.num_parts
+    boundaries_list: List[Optional[List[Optional[Tensor]]]] = [
+        None
+    ] * config.num_parts
     expanded_sizes = [0] * config.num_parts
     partition_sizes = [0] * config.num_parts
     preprocess_workers = max(1, int(config.preprocess_workers))
@@ -520,40 +522,78 @@ def build_partitioned_graph_metis(
             ]
             results = [future.result() for future in futures]
 
+    # Populate initial raw results
     for pid, adj_csr, boundaries, expanded_size, batch_size in results:
         adj_csr_list[pid] = adj_csr
         boundaries_list[pid] = boundaries
         expanded_sizes[pid] = expanded_size
         partition_sizes[pid] = batch_size
 
-    # Filter out boundary connections that are < 1% of total boundary nodes
+    # --- FIX: Filter < 1% boundary nodes AND prune CSR adjacencies ---
     for pid in range(config.num_parts):
         boundaries = boundaries_list[pid]
-        if boundaries is not None:
-            total_ext_boundary_nodes = sum(
-                b.numel() for b in boundaries if b is not None
+        adj_csr = adj_csr_list[pid]
+
+        if boundaries is None:
+            continue
+
+        total_ext_boundary_nodes = sum(
+            b.numel() for b in boundaries if b is not None
+        )
+
+        if total_ext_boundary_nodes > 0:
+            threshold = 0.01 * total_ext_boundary_nodes
+
+            # 1. Filter boundary tensors below threshold
+            filtered_boundaries = []
+            allowed_pids = {pid}  # Always keep target partition itself
+
+            for src_pid, b in enumerate(boundaries):
+                if b is not None and b.numel() >= threshold:
+                    filtered_boundaries.append(b)
+                    allowed_pids.add(src_pid)
+                else:
+                    filtered_boundaries.append(None)
+
+            boundaries_list[pid] = filtered_boundaries
+
+            # 2. Update expanded_size reflection
+            expanded_sizes[pid] = partition_sizes[pid] + sum(
+                b.numel() for b in filtered_boundaries if b is not None
             )
 
-            if total_ext_boundary_nodes > 0:
-                threshold = 0.01 * total_ext_boundary_nodes
-                
-                # Apply the 1% threshold filtering
-                filtered_boundaries = [
-                    (b if (b is not None and b.numel() >= threshold) else None)
-                    for b in boundaries
-                ]
-                
-                # Explicitly overwrite the list with the filtered result
-                boundaries_list[pid] = filtered_boundaries
+            # 3. Prune adj_csr column indices pointing to dropped neighbor partitions
+            if adj_csr is not None:
+                rp, c, v = adj_csr
 
+                # Create mask for column targets belonging ONLY to allowed partitions
+                mask = torch.zeros_like(c, dtype=torch.bool)
+                for allowed_pid in allowed_pids:
+                    p_start = ptr[allowed_pid].item()
+                    p_end = ptr[allowed_pid + 1].item()
+                    mask |= (c >= p_start) & (c < p_end)
 
-    adj_csr_list_final = [
-        adj for adj in adj_csr_list if adj is not None
-    ]
+                # Filter column array and weight values
+                new_c = c[mask]
+                new_v = v[mask] if v is not None else None
+
+                # Reconstruct rowptr to match filtered edges per row
+                row_lengths = torch.bincount(
+                    torch.repeat_interleave(
+                        torch.arange(rp.numel() - 1, device=c.device),
+                        rp[1:] - rp[:-1],
+                    )[mask],
+                    minlength=rp.numel() - 1,
+                )
+                new_rp = torch.zeros_like(rp)
+                new_rp[1:] = torch.cumsum(row_lengths, dim=0)
+
+                adj_csr_list[pid] = (new_rp, new_c, new_v)
+
+    adj_csr_list_final = [adj for adj in adj_csr_list if adj is not None]
     boundaries_list_final = [
         boundaries for boundaries in boundaries_list if boundaries is not None
     ]
-
 
     # Optionally store adjacencies on NVMe
     if backend is not None:
