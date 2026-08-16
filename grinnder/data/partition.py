@@ -562,31 +562,41 @@ def build_partitioned_graph_metis(
                 b.numel() for b in filtered_boundaries if b is not None
             )
 
-            # 3. Prune AND Remap adj_csr column indices to local contiguous range [0, expanded_size - 1]
+            # 3. Prune AND Remap adj_csr column indices from old local positions to new local positions
             if adj_csr is not None:
                 rp, c, v = adj_csr
 
-                # --- A. Build global-to-local node map for retained nodes ---
-                # Order: [ Target Partition Nodes | Retained Boundary Nodes (P1, P2, ...) ]
-                p_start = ptr[pid].item()
-                p_end = ptr[pid + 1].item()
-                retained_global_nodes = [torch.arange(p_start, p_end, device=c.device)]
+                # --- A. Map old local positions to new local positions ---
+                # Old arrangement in _build_partition_subgraph:
+                # [ Target Nodes | Raw Boundary 0 | Raw Boundary 1 | ... | Raw Boundary N-1 ]
+                old_to_new_local = torch.full((expanded_sizes[pid],), -1, dtype=torch.long, device=c.device)
 
-                for src_pid, b in enumerate(filtered_boundaries):
-                    if b is not None:
-                        retained_global_nodes.append(b.to(c.device))
+                # 1. Target partition's own nodes stay at [0 ... partition_sizes[pid] - 1]
+                num_own = partition_sizes[pid]
+                old_to_new_local[:num_own] = torch.arange(num_own, device=c.device)
 
-                all_local_nodes = torch.cat(retained_global_nodes)
+                # 2. Map retained boundary nodes sequentially after own nodes
+                old_offset = num_own
+                new_offset = num_own
 
-                # Initialize lookup table (-1 for dropped nodes)
-                global_to_local = torch.full((num_nodes,), -1, dtype=torch.long, device=c.device)
-                global_to_local[all_local_nodes] = torch.arange(all_local_nodes.numel(), dtype=torch.long, device=c.device)
+                for src_pid, orig_b in enumerate(boundaries):
+                    if orig_b is None or orig_b.numel() == 0:
+                        continue
 
-                # --- B. Filter edges pointing to retained nodes ---
-                remapped_c = global_to_local[c]
-                mask = remapped_c != -1  # Keeps edges targeting non-dropped partitions
+                    b_len = orig_b.numel()
+                    # Check if this boundary partition was retained
+                    if filtered_boundaries[src_pid] is not None:
+                        old_to_new_local[old_offset : old_offset + b_len] = torch.arange(
+                            new_offset, new_offset + b_len, device=c.device
+                        )
+                        new_offset += b_len
 
-                # Obtain new local contiguous column indices [0, expanded_size - 1]
+                    old_offset += b_len
+
+                # --- B. Remap column indices and prune dropped edges ---
+                remapped_c = old_to_new_local[c]
+                mask = remapped_c != -1  # Retain only edges targeting active partitions
+
                 new_c = remapped_c[mask]
                 new_v = v[mask] if v is not None else None
 
