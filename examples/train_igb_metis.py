@@ -160,6 +160,116 @@ def main():
           f"avg={sum(graph.partition_sizes)//len(graph.partition_sizes):,}")
     print(f"  {report_memory('After partition')}\n\n")
 
+    print("\n" + "="*80)
+    print("      DETAILED METIS PARTITION DEPENDENCY ANALYSIS")
+    print("="*80)
+
+    from torch_geometric.loader import ClusterData
+    
+    print(f"Partitioning graph into {args.num_parts} parts...")
+    t_metis_start = time.time()
+    
+    cluster_data = ClusterData(
+        data, 
+        num_parts=args.num_parts, 
+        recursive=False, 
+        save_dir="/tmp/metis_test"
+    )
+    print(f"METIS finished in {time.time() - t_metis_start:.1f}s\n")
+    
+    # Safely retrieve partition mapping
+    partition = cluster_data.partition
+    partptr, perm = None, None
+    for attr in ["partptr", "partition_ptr", "node_perm_ptr", "_ptr", "ptr"]:
+        if hasattr(partition, attr):
+            partptr = getattr(partition, attr)
+            break
+            
+    for attr in ["node_perm", "perm", "_perm"]:
+        if hasattr(partition, attr):
+            perm = getattr(partition, attr)
+            break
+
+    # Reconstruct node -> partition mapping
+    num_nodes = data.num_nodes
+    node_to_part = torch.empty(num_nodes, dtype=torch.long)
+    
+    if partptr is not None and perm is not None:
+        for p_id in range(args.num_parts):
+            start, end = partptr[p_id], partptr[p_id + 1]
+            nodes_in_part = perm[start:end]
+            node_to_part[nodes_in_part] = p_id
+    else:
+        for p_id in range(args.num_parts):
+            part_data = cluster_data[p_id]
+            node_ids = part_data.n_id if hasattr(part_data, "n_id") else part_data.input_id
+            node_to_part[node_ids] = p_id
+
+    # Compute boundary node counts across partitions
+    src, dst = data.edge_index[0], data.edge_index[1]
+    src_part = node_to_part[src]
+    dst_part = node_to_part[dst]
+
+    # Filter cross-partition edges
+    cross_mask = src_part != dst_part
+    cross_src_part = src_part[cross_mask]
+    cross_dst_part = dst_part[cross_mask]
+    cross_dst_nodes = dst[cross_mask]
+
+    # Build dependency matrix: size_matrix[target_part, source_part]
+    dep_matrix = torch.zeros((args.num_parts, args.num_parts), dtype=torch.long)
+
+    for p_id in range(args.num_parts):
+        p_mask = cross_dst_part == p_id
+        if not p_mask.any():
+            continue
+        
+        p_src_parts = cross_src_part[p_mask]
+        p_dst_nodes = cross_dst_nodes[p_mask]
+        
+        for neighbor_pid in range(args.num_parts):
+            if p_id == neighbor_pid:
+                continue
+            n_mask = p_src_parts == neighbor_pid
+            if n_mask.any():
+                # Unique nodes needed from neighbor_pid by partition p_id
+                unique_nodes = torch.unique(p_dst_nodes[n_mask]).numel()
+                dep_matrix[p_id, neighbor_pid] = unique_nodes
+
+    # Format and display output per partition
+    print("="*80)
+    for pid in range(args.num_parts):
+        row = dep_matrix[pid]
+        total_ext_nodes = row.sum().item()
+        
+        # Get non-zero dependencies
+        valid_indices = (row > 0).nonzero(as_tuple=True)[0]
+        valid_counts = row[valid_indices]
+        
+        # Sort dependencies in descending order
+        sorted_counts, sort_order = torch.sort(valid_counts, descending=True)
+        sorted_neighbors = valid_indices[sort_order]
+        
+        num_neighbors = len(sorted_counts)
+        print(f"PARTITION {pid:02d} | Own Nodes: {(node_to_part == pid).sum().item():,d} | Total Ext Boundary Nodes Required: {total_ext_nodes:,d}")
+        print(f"Connected to {num_neighbors}/{args.num_parts-1} partitions.")
+        print("-" * 80)
+        
+        # List exact counts and percentages for each dependent neighbor partition
+        dep_strings = []
+        for neighbor_pid, count in zip(sorted_neighbors, sorted_counts):
+            c_val = count.item()
+            pct = (c_val / total_ext_nodes * 100) if total_ext_nodes > 0 else 0.0
+            dep_strings.append(f"P{neighbor_pid.item():02d}: {c_val:6,d} ({pct:5.1f}%)")
+        
+        # Print in formatted rows of 4 dependencies per line for readability
+        for i in range(0, len(dep_strings), 4):
+            print("   " + "  |  ".join(dep_strings[i:i+4]))
+            
+        print("="*80)
+
+    exit(1)
+
     # Free original metadata container; graph keeps an mmap-backed feature source.
     del data
     torch.cuda.empty_cache()
