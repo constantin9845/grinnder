@@ -544,38 +544,39 @@ def build_partitioned_graph_metis(
         if total_ext_boundary_nodes > 0:
             threshold = 0.01 * total_ext_boundary_nodes
 
-            # 1. Filter boundary tensors below threshold
-            filtered_boundaries = []
-            allowed_pids = {pid}  # Always keep target partition itself
+            # 1. Store the OLD expanded size BEFORE filtering
+            old_expanded_size = expanded_sizes[pid]
 
+            # 2. Filter boundary tensors below threshold
+            filtered_boundaries = []
             for src_pid, b in enumerate(boundaries):
                 if b is not None and b.numel() >= threshold:
                     filtered_boundaries.append(b)
-                    allowed_pids.add(src_pid)
                 else:
                     filtered_boundaries.append(None)
 
             boundaries_list[pid] = filtered_boundaries
 
-            # 2. Update expanded_size reflection
-            expanded_sizes[pid] = partition_sizes[pid] + sum(
+            # 3. Update expanded_sizes[pid] to the NEW pruned size
+            new_expanded_size = partition_sizes[pid] + sum(
                 b.numel() for b in filtered_boundaries if b is not None
             )
+            expanded_sizes[pid] = new_expanded_size
 
-            # 3. Prune AND Remap adj_csr column indices from old local positions to new local positions
+            # 4. Prune AND Remap adj_csr column indices
             if adj_csr is not None:
                 rp, c, v = adj_csr
 
-                # --- A. Map old local positions to new local positions ---
-                # Old arrangement in _build_partition_subgraph:
-                # [ Target Nodes | Raw Boundary 0 | Raw Boundary 1 | ... | Raw Boundary N-1 ]
-                old_to_new_local = torch.full((expanded_sizes[pid],), -1, dtype=torch.long, device=c.device)
+                # Allocate mapping vector using OLD expanded size!
+                old_to_new_local = torch.full(
+                    (old_expanded_size,), -1, dtype=torch.long, device=c.device
+                )
 
-                # 1. Target partition's own nodes stay at [0 ... partition_sizes[pid] - 1]
                 num_own = partition_sizes[pid]
+                
+                # Own nodes map 1:1 at the beginning
                 old_to_new_local[:num_own] = torch.arange(num_own, device=c.device)
 
-                # 2. Map retained boundary nodes sequentially after own nodes
                 old_offset = num_own
                 new_offset = num_own
 
@@ -584,23 +585,25 @@ def build_partitioned_graph_metis(
                         continue
 
                     b_len = orig_b.numel()
-                    # Check if this boundary partition was retained
+                    
+                    # If this neighbor partition passed the threshold, map its range
                     if filtered_boundaries[src_pid] is not None:
                         old_to_new_local[old_offset : old_offset + b_len] = torch.arange(
                             new_offset, new_offset + b_len, device=c.device
                         )
                         new_offset += b_len
 
+                    # Always advance old_offset by original boundary length
                     old_offset += b_len
 
-                # --- B. Remap column indices and prune dropped edges ---
+                # Remap column indices and prune dropped edges (-1)
                 remapped_c = old_to_new_local[c]
-                mask = remapped_c != -1  # Retain only edges targeting active partitions
+                mask = remapped_c != -1
 
                 new_c = remapped_c[mask]
                 new_v = v[mask] if v is not None else None
 
-                # --- C. Reconstruct CSR row pointers ---
+                # Reconstruct CSR row pointers
                 row_lengths = torch.bincount(
                     torch.repeat_interleave(
                         torch.arange(rp.numel() - 1, device=c.device),
@@ -612,6 +615,7 @@ def build_partitioned_graph_metis(
                 new_rp[1:] = torch.cumsum(row_lengths, dim=0)
 
                 adj_csr_list[pid] = (new_rp, new_c, new_v)
+                
 
     adj_csr_list_final = [adj for adj in adj_csr_list if adj is not None]
     boundaries_list_final = [
