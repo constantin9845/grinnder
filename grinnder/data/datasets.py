@@ -290,7 +290,7 @@ def load_igb(
 def load_papers100M(
     root: str = "data/ogb_datasets",
 ) -> "torch_geometric.data.Data":
-    """Load ogbn-papers100M graph (111M nodes, 1.6B edges) via OGB/DGL.
+    """Load ogbn-papers100M graph (111M nodes, 1.6B edges) via OGB.
 
     Args:
         root: Directory to download and store ogbn-papers100M files.
@@ -299,38 +299,40 @@ def load_papers100M(
         PyG Data object with x, y, edge_index, train/val/test masks.
     """
     try:
-        from ogb.nodeproppred import DglNodePropPredDataset
-    except ImportError:
+        import torch
+        from ogb.nodeproppred import NodePropPredDataset
+    except ImportError as e:
         raise ImportError(
-            "ogbn-papers100M requires 'ogb' and 'dgl'. Install them with: pip install ogb dgl"
-        )
+            f"Failed to import 'ogb'. Error: {e}\n"
+            "Ensure ogb is installed with: pip install ogb"
+        ) from e
 
     from torch_geometric.data import Data
 
     print(f"Loading ogbn-papers100M dataset from {root}...")
-    dataset = DglNodePropPredDataset(name="ogbn-papers100M", root=root)
+    dataset = NodePropPredDataset(name="ogbn-papers100M", root=root)
     split_idx = dataset.get_idx_split()
 
-    g, labels = dataset[0]
+    # Get dictionary graph structure from OGB
+    graph, labels = dataset[0]
 
-    # Extract edge index [2, num_edges]
-    src, dst = g.edges()
-    edge_index = torch.stack([src, dst], dim=0).long().contiguous()
+    # Convert edge_index [2, num_edges] to torch LongTensor
+    edge_index = torch.from_numpy(graph["edge_index"]).long().contiguous()
 
     # Features and labels
-    x = g.ndata["feat"]
-    y = labels.squeeze().long()
+    x = torch.from_numpy(graph["node_feat"]).float()
+    y = torch.from_numpy(labels).squeeze().long()
 
-    num_nodes = g.num_nodes()
+    num_nodes = graph["num_nodes"]
 
-    # Map node indices to boolean masks
+    # Map node index arrays to boolean masks
     train_mask = torch.zeros(num_nodes, dtype=torch.bool)
     val_mask = torch.zeros(num_nodes, dtype=torch.bool)
     test_mask = torch.zeros(num_nodes, dtype=torch.bool)
 
-    train_mask[split_idx["train"]] = True
-    val_mask[split_idx["valid"]] = True
-    test_mask[split_idx["test"]] = True
+    train_mask[torch.from_numpy(split_idx["train"]).long()] = True
+    val_mask[torch.from_numpy(split_idx["valid"]).long()] = True
+    test_mask[torch.from_numpy(split_idx["test"]).long()] = True
 
     return Data(
         x=x,
@@ -341,6 +343,7 @@ def load_papers100M(
         test_mask=test_mask,
         num_nodes=num_nodes,
     )
+
 
 def _load_ogb_node_dataset(name: str, root: str):
     from ogb.nodeproppred import PygNodePropPredDataset
