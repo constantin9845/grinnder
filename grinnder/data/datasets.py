@@ -196,6 +196,7 @@ def download_igb(
     dataset_type: str = "homogeneous",
     confirm_download: bool = False,
 ) -> None:
+    
     """Download and extract the official homogeneous IGB dataset archive."""
     if dataset_type not in IGB_DATASET_URLS or size not in IGB_DATASET_URLS[dataset_type]:
         raise ValueError(f"Unsupported dataset configuration: {dataset_type}/{size}")
@@ -285,6 +286,61 @@ def load_igb(
         num_nodes=num_nodes,
     )
 
+
+def load_papers100m(
+    root: str = "data/ogb_datasets",
+) -> "torch_geometric.data.Data":
+    """Load ogbn-papers100M graph (111M nodes, 1.6B edges) via OGB/DGL.
+
+    Args:
+        root: Directory to download and store ogbn-papers100M files.
+
+    Returns:
+        PyG Data object with x, y, edge_index, train/val/test masks.
+    """
+    try:
+        from ogb.nodeproppred import DglNodePropPredDataset
+    except ImportError:
+        raise ImportError(
+            "ogbn-papers100M requires 'ogb' and 'dgl'. Install them with: pip install ogb dgl"
+        )
+
+    from torch_geometric.data import Data
+
+    print(f"Loading ogbn-papers100M dataset from {root}...")
+    dataset = DglNodePropPredDataset(name="ogbn-papers100M", root=root)
+    split_idx = dataset.get_idx_split()
+
+    g, labels = dataset[0]
+
+    # Extract edge index [2, num_edges]
+    src, dst = g.edges()
+    edge_index = torch.stack([src, dst], dim=0).long().contiguous()
+
+    # Features and labels
+    x = g.ndata["feat"]
+    y = labels.squeeze().long()
+
+    num_nodes = g.num_nodes()
+
+    # Map node indices to boolean masks
+    train_mask = torch.zeros(num_nodes, dtype=torch.bool)
+    val_mask = torch.zeros(num_nodes, dtype=torch.bool)
+    test_mask = torch.zeros(num_nodes, dtype=torch.bool)
+
+    train_mask[split_idx["train"]] = True
+    val_mask[split_idx["valid"]] = True
+    test_mask[split_idx["test"]] = True
+
+    return Data(
+        x=x,
+        y=y,
+        edge_index=edge_index,
+        train_mask=train_mask,
+        val_mask=val_mask,
+        test_mask=test_mask,
+        num_nodes=num_nodes,
+    )
 
 def _load_ogb_node_dataset(name: str, root: str):
     from ogb.nodeproppred import PygNodePropPredDataset

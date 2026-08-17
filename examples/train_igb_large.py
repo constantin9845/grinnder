@@ -14,7 +14,7 @@ from grinnder import (
     Trainer,
     build_partitioned_graph_metis,
 )
-from grinnder.data.datasets import load_igb
+from grinnder.data.datasets import load_igb, load_papers100M
 from grinnder.stats import stat
 from grinnder.utils import fix_seed, get_default_partitioner_threads, report_memory
 
@@ -119,13 +119,7 @@ def main():
     # ---- Load dataset ----
     print(f"\n\nLoading IGB-{args.igb_size} dataset from {args.igb_root}...")
     t0 = time.time()
-    data = load_igb(
-        args.igb_root,
-        size=args.igb_size,
-        num_classes=args.num_classes,
-        mmap_features=not args.materialize_features,
-        download=args.download,
-    )
+    data = load_papers100M("data/ogb_datasets")
     t_load = time.time() - t0
     print(f"  Loaded in {t_load:.1f}s")
     print(
