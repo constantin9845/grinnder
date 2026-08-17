@@ -78,10 +78,14 @@ def main():
     parser.add_argument("--preprocess_workers", type=int, default=get_default_partitioner_threads())
     parser.add_argument("--materialize_features", action="store_true",
                         help="Load the full IGB feature matrix into RAM instead of using mmap")
+    
+    parser.add_argument("--sparse", type=bool, default=True,
+                        help="Sparsify graph to reduce partition dependencies.")
     args = parser.parse_args()
 
     fix_seed(args.seed)
     device = args.device
+    sparse = args.sparse
 
     # ---- Load dataset ----
     print(f"\n\nLoading IGB-{args.igb_size} dataset from {args.igb_root}...")
@@ -140,6 +144,7 @@ def main():
         )
     t0 = time.time()
     graph = build_partitioned_graph_metis(
+        sparse=sparse
         edge_index=data.edge_index,
         x=data.x,
         y=data.y,

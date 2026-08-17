@@ -417,6 +417,7 @@ def build_partitioned_graph(
 
 
 def build_partitioned_graph_metis(
+    sparse: bool,
     edge_index: Tensor,
     x: Any,
     y: Tensor,
@@ -529,7 +530,7 @@ def build_partitioned_graph_metis(
         expanded_sizes[pid] = expanded_size
         partition_sizes[pid] = batch_size
 
-    # --- FIX: Filter < 1% boundary nodes AND prune CSR adjacencies ---
+    # --- Filter < 1% boundary nodes AND prune CSR adjacencies ---
     for pid in range(config.num_parts):
         boundaries = boundaries_list[pid]
         adj_csr = adj_csr_list[pid]
@@ -550,8 +551,11 @@ def build_partitioned_graph_metis(
             # 2. Filter boundary tensors below threshold
             filtered_boundaries = []
             for src_pid, b in enumerate(boundaries):
-                if b is not None and b.numel() >= threshold:
-                    filtered_boundaries.append(b)
+                if b is not None:
+                    if sparse and b.numel() >= threshold:
+                        filtered_boundaries.append(b)
+                    elif not sparse:
+                        filtered_boundaries.append(b)
                 else:
                     filtered_boundaries.append(None)
 
@@ -615,7 +619,7 @@ def build_partitioned_graph_metis(
                 new_rp[1:] = torch.cumsum(row_lengths, dim=0)
 
                 adj_csr_list[pid] = (new_rp, new_c, new_v)
-                
+
 
     adj_csr_list_final = [adj for adj in adj_csr_list if adj is not None]
     boundaries_list_final = [
