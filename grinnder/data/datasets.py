@@ -208,11 +208,7 @@ def download_igb(
 
     if not archive.exists():
         print(f"Downloading IGB {dataset_type} {size} from {url}...")
-        
-        req = urlrequest.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urlrequest.urlopen(req) as response, open(archive, "wb") as out_file:
-            while chunk := response.read(16 * 1024 * 1024):  
-                out_file.write(chunk)
+        urlrequest.urlretrieve(url, archive)
 
     # Optional MD5 check if available in dictionary
     expected_md5 = IGB_MD5SUMS.get(dataset_type, {}).get(size)
