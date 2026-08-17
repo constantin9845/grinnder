@@ -52,6 +52,14 @@ class Stat:
         self.weights_time = 0
 
 
+        # determine how much is wasted when loading full partitions
+        self.partition_utilization: List[float] = [] 
+
+        # determine at gather step
+        # compare across different numbers of partitions
+        self.actual_partition_size: List[float] = [] 
+
+
     def started(self):
         return self.running == True
     
@@ -248,6 +256,12 @@ class Stat:
 
         self.weights_time = 0
 
+    def add_actual_size(self, part_size, working_size):
+        self.actual_partition_size.extend([part_size, working_size])
+
+    def add_boundary_utilization(self, percentage):
+        self.partition_utilization.append(percentage)
+
     @staticmethod
     def _format_pairs(flat_list: List[float]) -> List[str]:
         """Converts flat list [s1, e1, s2, e2] -> ['(s1 - e1)', '(s2 - e2)']"""
@@ -383,6 +397,10 @@ class Stat:
             f"\n\tbackward done = {self.backward_time} "
             f"\n\tweights done = {self.weights_time}"
         )
+
+        print("\n\n")
+        print(f"Boundary partition utilization = {self.partition_utilization}\n")
+        print(f"Working partition size = {self.actual_partition_size}\n")
         print("==============================")
 
         attrs = [

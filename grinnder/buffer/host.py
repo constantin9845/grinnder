@@ -308,6 +308,7 @@ class HostBuffer:
             )
 
         # Build boundary list (replace None with empty tensor)
+        bound_size = 0
         t0 = time.perf_counter_ns()
         bndries = []
         for i in range(self.num_parts):
@@ -347,6 +348,7 @@ class HostBuffer:
         gb = round(bt / (1024**3),3)
 
         print(f"\tPartition {pid} loads {gb} GB from other partitions")
+        stat.add_actual_size(target_partition_size, boundary_size)
 
     # ------------------------------------------------------------------
     # Scatter: one GPU tensor -> multiple host partitions (with accumulation)
@@ -389,6 +391,29 @@ class HostBuffer:
                 bndries.append(torch.empty(0, dtype=torch.long))
             else:
                 bndries.append(boundaries[i])
+
+        target_partition_nodes = self._tensors[pid].size(0)
+        boundary_nodes = sum(b.numel() for b in bndries)
+
+        feature_dim = gpu_source.size(1)
+        bytes_per_elem = gpu_source.element_size()
+        bytes_to_gb = 1024**3
+
+        target_partition_gb = (target_partition_nodes * feature_dim * bytes_per_elem) / bytes_to_gb
+        boundary_gb = (boundary_nodes * feature_dim * bytes_per_elem) / bytes_to_gb
+
+        stat.add_actual_size(target_partition_gb, target_partition_gb + boundary_gb)
+
+        boundary_nodes = sum(b.numel() for b in bndries)
+        total_boundary_parts_nodes = sum(
+            self._tensors[src_pid].size(0) 
+            for src_pid, bnd in enumerate(bndries) 
+            if src_pid != pid and bnd.numel() > 0
+        )
+
+        overall_pct = (boundary_nodes / total_boundary_parts_nodes * 100) if total_boundary_parts_nodes > 0 else 0.0
+
+        stat.add_boundary_utilization(overall_pct)
 
         with torch.cuda.stream(stream):
             if self._ops is not None:

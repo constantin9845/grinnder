@@ -619,6 +619,8 @@ class Trainer:
                     if act_prev is not None:
                         act_prev.untyped_storage().resize_(0)
 
+            self.cache._evict_partition(2, pid)
+
             if pool_size == 1:
                 self.streams.compute.wait_stream(self.streams.d2h[0])
                 self.host_features[layer_id + 1].d2h_synchronize(
