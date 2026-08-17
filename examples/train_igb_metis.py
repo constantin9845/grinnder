@@ -144,7 +144,7 @@ def main():
         )
     t0 = time.time()
     graph = build_partitioned_graph_metis(
-        sparse=sparse
+        sparse=sparse,
         edge_index=data.edge_index,
         x=data.x,
         y=data.y,
