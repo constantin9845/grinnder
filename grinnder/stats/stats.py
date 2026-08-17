@@ -484,12 +484,12 @@ class Stat:
 
             f.write("utilization = [")
             for i in self.partition_utilization:
-                f.write(f"{i},")
+                f.write(f"{i},\n")
             f.write("]")
 
             f.write("working_size = [")
             for i in self.actual_partition_size:
-                f.write(f"{i},")
+                f.write(f"{i},\n")
             f.write("]")
 
         print("Successfully written to timesteps_output.py!")
