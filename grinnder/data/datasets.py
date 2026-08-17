@@ -287,7 +287,7 @@ def load_igb(
     )
 
 
-def load_papers100m(
+def load_papers100M(
     root: str = "data/ogb_datasets",
 ) -> "torch_geometric.data.Data":
     """Load ogbn-papers100M graph (111M nodes, 1.6B edges) via OGB/DGL.
