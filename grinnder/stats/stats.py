@@ -482,6 +482,9 @@ class Stat:
                     f.write(f"    {item},\n")
                 f.write("]\n\n")
 
+            f.write(self.partition_utilization)
+            f.write(self.actual_partition_size)
+
         print("Successfully written to timesteps_output.py!")
     
     
