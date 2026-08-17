@@ -552,9 +552,9 @@ def build_partitioned_graph_metis(
             filtered_boundaries = []
             for src_pid, b in enumerate(boundaries):
                 if b is not None:
-                    if sparse and b.numel() >= threshold:
-                        filtered_boundaries.append(b)
-                    elif not sparse:
+                    if sparse and b.numel() < threshold:
+                        filtered_boundaries.append(None) 
+                    else:
                         filtered_boundaries.append(b)
                 else:
                     filtered_boundaries.append(None)
