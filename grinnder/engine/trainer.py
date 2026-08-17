@@ -619,7 +619,7 @@ class Trainer:
                     if act_prev is not None:
                         act_prev.untyped_storage().resize_(0)
 
-            self.cache._evict_partition(2, pid)
+            #self.cache._evict_partition(2, pid)
 
             if pool_size == 1:
                 self.streams.compute.wait_stream(self.streams.d2h[0])
