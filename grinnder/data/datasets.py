@@ -198,27 +198,29 @@ def download_igb(
 ) -> None:
     """Download and extract the official homogeneous IGB dataset archive."""
     if dataset_type not in IGB_DATASET_URLS or size not in IGB_DATASET_URLS[dataset_type]:
-        raise ValueError(
-            "Automatic IGB download currently supports homogeneous "
-            "tiny/small/medium. Use the official IGB scripts for larger releases."
-        )
+        raise ValueError(f"Unsupported dataset configuration: {dataset_type}/{size}")
 
     root_path = Path(root)
+    root_path.mkdir(parents=True, exist_ok=True)
+    
     url = IGB_DATASET_URLS[dataset_type][size]
     archive = root_path / f"igb_{dataset_type}_{size}.tar.gz"
-    if not archive.exists():
-        if not _confirm_large_download(url, confirm_download):
-            raise RuntimeError("IGB download declined by user")
-        print(f"Downloading IGB {dataset_type} {size} to {archive}...")
-        _download_file(url, archive)
-    else:
-        print(f"Using existing IGB archive {archive}")
 
-    print("Verifying IGB archive checksum...")
-    _check_md5(archive, IGB_MD5SUMS[dataset_type][size])
-    print(f"Extracting IGB {dataset_type} {size} under {root_path}...")
-    _safe_extract_tar(archive, root_path)
-    archive.unlink(missing_ok=True)
+    if not archive.exists():
+        print(f"Downloading IGB {dataset_type} {size} from {url}...")
+        urlrequest.urlretrieve(url, archive)
+
+    # Optional MD5 check if available in dictionary
+    expected_md5 = IGB_MD5SUMS.get(dataset_type, {}).get(size)
+    if expected_md5:
+        digest = hashlib.md5(archive.read_bytes()).hexdigest()
+        if digest != expected_md5:
+            archive.unlink(missing_ok=True)
+            raise RuntimeError("MD5 Checksum failed.")
+
+    print(f"Extracting {archive} to {root_path}...")
+    with tarfile.open(archive) as tar:
+        tar.extractall(root_path)
 
 
 def load_igb(
@@ -248,43 +250,26 @@ def load_igb(
     """
     from torch_geometric.data import Data
 
-    if download and not _has_igb_dataset(root, size, num_classes):
-        download_igb(root, size=size, confirm_download=confirm_download)
-
     proc = _igb_processed_dir(root, size)
-    if not proc.is_dir():
-        raise FileNotFoundError(
-            f"IGB data not found at {proc}. Pass download=True to fetch "
-            "homogeneous tiny/small/medium automatically."
-        )
-    missing = [path for path in _igb_required_paths(root, size, num_classes) if not path.exists()]
-    if missing:
-        missing_text = ", ".join(str(path) for path in missing)
-        raise FileNotFoundError(f"IGB data is incomplete. Missing: {missing_text}")
+    required_files = _igb_required_paths(root, size, num_classes)
+    
+    missing = [p for p in required_files if not p.exists()]
+    if missing and download:
+        download_igb(root, size=size)
+    elif missing:
+        raise FileNotFoundError(f"Missing required dataset files at {proc}")
 
-    # Features: keep mmap-backed by default to avoid loading the full matrix.
     feat_path = proc / "paper" / "node_feat.npy"
     feat = np.load(feat_path, mmap_mode="r" if mmap_features else None)
     num_nodes = feat.shape[0]
-    feat_dim = feat.shape[1]
-    print(f"  IGB-{size}: {num_nodes:,} nodes, {feat_dim} features, {num_classes} classes")
 
-    # Labels
     labels = np.load(proc / "paper" / _igb_label_filename(num_classes))
-
-    # Edges (paper cites paper)
     edges = np.load(proc / "paper__cites__paper" / "edge_index.npy")
-    print(f"  Edges: {edges.shape[0]:,}")
 
-    # Convert metadata to tensors. Features stay lazy unless explicitly requested.
-    if mmap_features:
-        x = NumpyFeatureStore(feat)
-    else:
-        x = torch.from_numpy(np.asarray(feat)).float()
+    x = NumpyFeatureStore(feat) if mmap_features else torch.from_numpy(np.asarray(feat)).float()
     y = torch.from_numpy(labels).long()
     edge_index = torch.from_numpy(edges.T.copy()).long().contiguous()
 
-    # Train/val/test split: 80/10/10
     n_train = int(num_nodes * 0.8)
     n_val = int(num_nodes * 0.1)
     train_mask = torch.zeros(num_nodes, dtype=torch.bool)
