@@ -453,7 +453,6 @@ def build_partitioned_graph_metis(
             num_edges=input_num_edges,
             num_parts=config.num_parts,
             partitioner=config.partitioner,
-            sparse=sparse,  # Prevent loading cache created with different sparse setting
         ):
             print(f"Loading partitioned graph cache from {cache_path}")
             return _graph_from_partition_cache(

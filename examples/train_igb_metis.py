@@ -79,7 +79,7 @@ def main():
     parser.add_argument("--materialize_features", action="store_true",
                         help="Load the full IGB feature matrix into RAM instead of using mmap")
     
-    parser.add_argument("--sparse", type=bool, default=True,
+    parser.add_argument("--sparse", type=bool, default=False,
                         help="Sparsify graph to reduce partition dependencies.")
     args = parser.parse_args()
 
