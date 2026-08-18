@@ -1,22 +1,84 @@
-"""Train GCN or GAT on IGB-Large (100M nodes, 3.3B edges) with GriNNder."""
+"""Train GCN or GAT on ogbn-papers100M (111M nodes, 1.61B edges) with GriNNder.
+
+This script mirrors the IGB training benchmark for the massive ogbn-papers100M dataset.
+Because of the dataset's scale, intermediate activations easily exceed VRAM, requiring
+GriNNder's partitioning and NVMe storage offloading.
+
+Usage:
+  python examples/train_ogb_papers100m.py --ogb_root data/ogb_datasets
+  python examples/train_ogb_papers100m.py --ogb_root data/ogb_datasets --mode hongtu
+  python examples/train_ogb_papers100m.py --ogb_root data/ogb_datasets --cache_mode lru_layer --storage_dir /mnt/nvme
+"""
 
 import argparse
-import gc
 import statistics
 import time
+from pathlib import Path
+from typing import Any, NamedTuple
 
 import torch
+
+from ogb.nodeproppred import PygNodePropPredDataset
 
 from grinnder import (
     GAT,
     GCN,
     GriNNderConfig,
     Trainer,
+    build_partitioned_graph,
     build_partitioned_graph_metis,
 )
-from grinnder.data.datasets import load_igb, load_papers100M
 from grinnder.stats import stat
 from grinnder.utils import fix_seed, get_default_partitioner_threads, report_memory
+
+
+class OGBDataContainer(NamedTuple):
+    """Container holding ogbn-papers100M attributes structured identically to PyG / IGB loader objects."""
+
+    num_nodes: int
+    edge_index: torch.Tensor
+    x: Any
+    y: torch.Tensor
+    train_mask: torch.Tensor
+    val_mask: torch.Tensor
+    test_mask: torch.Tensor
+
+
+def load_ogb_papers100m(root: str) -> OGBDataContainer:
+    """Downloads (if necessary) and loads the ogbn-papers100M dataset.
+
+    Converts OGB node split indices into boolean mask tensors matching GriNNder expected types.
+    """
+    print(f"Downloading/Loading ogbn-papers100M dataset from {root}...")
+    dataset = PygNodePropPredDataset(name="ogbn-papers100M", root=root)
+    data = dataset[0]
+
+    num_nodes = data.num_nodes
+
+    # Convert node indices from OGB format to boolean masks
+    split_idx = dataset.get_idx_split()
+    train_mask = torch.zeros(num_nodes, dtype=torch.bool)
+    val_mask = torch.zeros(num_nodes, dtype=torch.bool)
+    test_mask = torch.zeros(num_nodes, dtype=torch.bool)
+
+    train_mask[split_idx["train"]] = True
+    val_mask[split_idx["valid"]] = True
+    test_mask[split_idx["test"]] = True
+
+    # Flatten label tensor to shape (num_nodes,) with long type
+    y = data.y.squeeze(-1)
+    if y.dtype != torch.long:
+        y = y.to(torch.long)
+
+    return OGBDataContainer(
+        num_nodes=num_nodes,
+        edge_index=data.edge_index,
+        x=data.x,
+        y=y,
+        train_mask=train_mask,
+        val_mask=val_mask,
+        test_mask=test_mask,
+    )
 
 
 def build_model(args, graph):
@@ -44,34 +106,25 @@ def build_model(args, graph):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Train GCN or GAT on IGB-Large with GriNNder"
+        description="Train GCN or GAT on ogbn-papers100M with GriNNder"
     )
     parser.add_argument(
-        "--igb_root",
+        "--ogb_root",
         type=str,
-        default="data/igb_datasets",
-        help="Path to igb_datasets directory",
+        default="data/ogb_datasets",
+        help="Path to ogb_datasets directory",
     )
     parser.add_argument(
-        "--igb_size",
+        "--num_classes",
+        type=int,
+        default=172,
+        help="Number of classes in ogbn-papers100M",
+    )
+    parser.add_argument(
+        "--mode",
         type=str,
-        default="large",
-        choices=["tiny", "small", "medium", "large"],
-    )
-    parser.add_argument(
-        "--download",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Download homogeneous IGB dataset if missing",
-    )
-    parser.add_argument(
-        "--confirm_download",
-        action="store_true",
-        help="Skip the interactive prompt for large IGB downloads",
-    )
-    parser.add_argument("--num_classes", type=int, default=19, choices=[19, 2983])
-    parser.add_argument(
-        "--mode", type=str, default="grinnder", choices=["hongtu", "grinnder"]
+        default="grinnder",
+        choices=["hongtu", "grinnder"],
     )
     parser.add_argument("--num_parts", type=int, default=128)
     parser.add_argument(
@@ -80,10 +133,14 @@ def main():
         default="partition_lru",
         choices=["auto", "lru_layer", "partition_lru"],
     )
-    parser.add_argument("--model", type=str, default="gcn", choices=["gcn", "gat"])
+    parser.add_argument(
+        "--model", type=str, default="gcn", choices=["gcn", "gat"]
+    )
     parser.add_argument("--hidden", type=int, default=256)
     parser.add_argument("--num_layers", type=int, default=3)
-    parser.add_argument("--heads", type=int, default=1, help="GAT attention heads")
+    parser.add_argument(
+        "--heads", type=int, default=1, help="GAT attention heads"
+    )
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--lr", type=float, default=0.01)
     parser.add_argument("--dropout", type=float, default=0.0)
@@ -93,7 +150,9 @@ def main():
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--pool_size", type=int, default=2)
     parser.add_argument(
-        "--partition_cache_dir", type=str, default="data/grinnder_partitions"
+        "--partition_cache_dir",
+        type=str,
+        default="data/grinnder_partitions",
     )
     parser.add_argument("--no_save_partition_cache", action="store_true")
     parser.add_argument(
@@ -107,19 +166,21 @@ def main():
         default=get_default_partitioner_threads(),
     )
     parser.add_argument(
-        "--materialize_features",
-        action="store_true",
-        help="Load the full IGB feature matrix into RAM instead of using mmap",
+        "--sparse",
+        type=int,
+        default=0,
+        help="Sparsify graph to reduce partition dependencies.",
     )
     args = parser.parse_args()
 
     fix_seed(args.seed)
     device = args.device
+    sp = args.sparse
 
     # ---- Load dataset ----
-    print(f"\n\nLoading IGB-{args.igb_size} dataset from {args.igb_root}...")
+    print(f"\n\nLoading ogbn-papers100M dataset from {args.ogb_root}...")
     t0 = time.time()
-    data = load_papers100M("data/ogb_datasets")
+    data = load_ogb_papers100m(args.ogb_root)
     t_load = time.time() - t0
     print(f"  Loaded in {t_load:.1f}s")
     print(
@@ -136,11 +197,9 @@ def main():
     config = GriNNderConfig(
         mode=args.mode,
         num_parts=args.num_parts,
-        partitioner="grinnder",
+        partitioner="metis",
         partitioner_kwargs={
-            "capacity": 1.1,
-            "beta": 1.0,
-            "max_iter": 50,
+            "recursive": False,
             "num_threads": args.partitioner_threads,
         },
         preprocess_workers=args.preprocess_workers,
@@ -162,13 +221,14 @@ def main():
     print("\n\n\nPartitioning...")
     cache_path = None
     if args.partition_cache_dir:
-        from pathlib import Path
-
+        Path(args.partition_cache_dir).mkdir(parents=True, exist_ok=True)
         cache_path = (
             Path(args.partition_cache_dir)
-            / f"igb_{args.igb_size}_grinnder_{args.num_parts}p.pt"
+            / f"ogb_papers100m_metis_{args.num_parts}p.pt"
         )
     t0 = time.time()
+
+    # Pass edge_index and features directly matching your build_partitioned_graph_metis signature
     graph = build_partitioned_graph_metis(
         edge_index=data.edge_index,
         x=data.x,
@@ -208,7 +268,7 @@ def main():
         total_ext_nodes = sum(count for _, count in active_deps)
 
         print(
-            f"PARTITION {pid:03d} | Own Nodes: {graph.partition_sizes[pid]:,d} "
+            f"PARTITION {pid:02d} | Own Nodes: {graph.partition_sizes[pid]:,d} "
             f"| Total Ext Boundary Nodes Required: {total_ext_nodes:,d}"
         )
         print(
@@ -218,17 +278,18 @@ def main():
 
         dep_strings = []
         for src_pid, count in active_deps:
-            pct = (count / total_ext_nodes * 100) if total_ext_nodes > 0 else 0.0
-            dep_strings.append(f"P{src_pid:03d}: {count:7,d} ({pct:5.1f}%)")
+            pct = (
+                (count / total_ext_nodes * 100) if total_ext_nodes > 0 else 0.0
+            )
+            dep_strings.append(f"P{src_pid:02d}: {count:6,d} ({pct:5.1f}%)")
 
         for i in range(0, len(dep_strings), 4):
             print("   " + "  |  ".join(dep_strings[i : i + 4]))
 
         print("=" * 80)
 
-    # Free original metadata container; graph keeps an mmap-backed feature source.
+    # Free original dataset structure; memory maps / graph tensors are stored in PartitionedGraph
     del data
-    gc.collect()
     torch.cuda.empty_cache()
 
     # ---- Create model ----
