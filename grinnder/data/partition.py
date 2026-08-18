@@ -424,7 +424,7 @@ from torch import Tensor
 
 
 def build_partitioned_graph_metis(
-    sparse: bool,
+    sparse: int,
     edge_index: Tensor,
     x: Any,
     y: Tensor,
@@ -539,8 +539,8 @@ def build_partitioned_graph_metis(
         expanded_sizes[pid] = expanded_size
         partition_sizes[pid] = batch_size
 
-    # --- 4. Sparsification (Runs ONLY when sparse=True) ---
-    if sparse:
+    # --- 4. Sparsification ---
+    if sparse == 1:
         for pid in range(config.num_parts):
             boundaries = boundaries_list[pid]
             adj_csr = adj_csr_list[pid]
@@ -645,7 +645,6 @@ def build_partitioned_graph_metis(
             cache_path,
             {
                 "version": PARTITION_CACHE_VERSION,
-                "sparse": sparse,
                 "num_nodes": num_nodes,
                 "input_num_edges": input_num_edges,
                 "num_edges": graph_num_edges,
