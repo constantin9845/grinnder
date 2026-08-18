@@ -415,10 +415,6 @@ class PartitionCache:
 
         print("LAYER COMPLETE")
 
-        if layer_id > 0:
-            for pid in pids:
-                self._evict_partition(pid, layer_id-1)
-
     def on_backward_layer_complete(self, layer_id: int) -> None:
         """Called after backward layer completes. Flush gradients to storage."""
         if self.grad_buffers[layer_id] is not None:
