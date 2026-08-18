@@ -655,7 +655,7 @@ class Trainer:
 
         # Cache: decide what to keep vs flush
         if self.cache is not None:
-            self.cache.on_layer_complete(layer_id)
+            self.cache.on_layer_complete(layer_id, pids)
 
     def _upoffload_wrapper(self, layer_id: int, pid: int, x: Tensor) -> Tensor:
         """Wrap forward_layer with gradient offload hook.

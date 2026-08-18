@@ -376,7 +376,7 @@ class PartitionCache:
 
         
 
-    def on_layer_complete(self, layer_id: int) -> None:
+    def on_layer_complete(self, layer_id: int, pids: int) -> None:
         """Called after forward layer completes. Decide what to flush."""
         output_layer = layer_id + 1
         if output_layer >= len(self.host_buffers):
@@ -412,7 +412,12 @@ class PartitionCache:
 
         # Partition-wise mode still bypasses outputs to storage and loads only
         # demanded partitions on the next gather/regather.
+
         print("LAYER COMPLETE")
+
+        for pid in pids:
+            self._evict_partition(pid, layer_id)
+            print(f"Evict partition {pid} | layer {layer_id}")
 
     def on_backward_layer_complete(self, layer_id: int) -> None:
         """Called after backward layer completes. Flush gradients to storage."""
