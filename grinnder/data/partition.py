@@ -441,6 +441,8 @@ def build_partitioned_graph_metis(
     from torch_geometric.loader import ClusterData
     from torch_geometric.utils import add_self_loops
 
+    print(f"Sparse = {sparse}")
+
     num_nodes = x.size(0)
     input_num_edges = int(edge_index.size(1))
 
