@@ -307,6 +307,9 @@ class HostBuffer:
                 f"HostBuffer partitions {missing} are not resident for gather"
             )
 
+        print(boundaries)
+        exit(0)
+
         # Build boundary list (replace None with empty tensor)
         bound_size = 0
         t0 = time.perf_counter_ns()
@@ -345,9 +348,6 @@ class HostBuffer:
         overall_pct = (boundary_nodes / total_boundary_parts_nodes * 100) if total_boundary_parts_nodes > 0 else 0.0
 
         stat.add_boundary_utilization(overall_pct)
-
-        print(bndries)
-        exit(1)
 
         t0 = time.perf_counter_ns()
         with torch.cuda.stream(stream):
