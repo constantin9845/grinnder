@@ -448,7 +448,7 @@ class HostBuffer:
                 feat_dim = gpu_target.size(1)
                 row_bytes = feat_dim * gpu_target.element_size()
                 offset = num_nodes  # Local partition node count
-                self.gpu_read(
+                self._backend.gpu_read(
                     file_id=f"{self._file_prefix}_p{pid}",
                     tensor=gpu_target[:offset],
                     file_offset=0,
@@ -468,7 +468,7 @@ class HostBuffer:
                     # Stream rows directly from file into target GPU tensor slice
                     for idx, row_idx in enumerate(bndry_indices):
                         file_offset = row_idx * row_bytes
-                        self.gpu_read(
+                        self._backend.gpu_read(
                             file_id=file_id,
                             tensor=dst_slice[idx],  # Views sub-slice row on GPU
                             file_offset=file_offset,
