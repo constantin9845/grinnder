@@ -318,11 +318,6 @@ class HostBuffer:
             else:
                 bndries.append(boundaries[i])
 
-        print(bndries)
-        print(f"bndries length = {len(bndries)}")
-        print(f"bndries[1] length = {len(bndries[1])}")
-        exit(0)
-
 
         stream.wait_stream(torch.cuda.current_stream(gpu_target.device))
 
@@ -452,20 +447,42 @@ class HostBuffer:
 
         t0 = time.perf_counter_ns()
         with torch.cuda.stream(stream):
-            if self._ops is not None:
+            if self._ops is not None and 2 == 3:
                 self._ops.gather_partitions(
                     pid, self._tensors, gpu_target, bndries
                 )
             else:
                 # Python fallback
-                offset = self._tensors[pid].size(0)
-                gpu_target[:offset].copy_(self._tensors[pid])
+                feat_dim = gpu_target.size(1)
+                row_bytes = feat_dim * gpu_target.element_size()
+                offset = self._get_num_nodes(pid)  # Local partition node count
+                self.gpu_read(
+                    file_id=f"{self._file_prefix}_p{pid}",
+                    tensor=gpu_target[:offset],
+                    file_offset=0,
+                    stream=stream,
+                )
+
                 for i in range(self.num_parts):
                     if i == pid or bndries[i].numel() == 0:
                         continue
-                    selected = self._tensors[i].index_select(0, bndries[i])
-                    n = selected.size(0)
-                    gpu_target[offset : offset + n].copy_(selected)
+
+                    bndry_indices = bndries[i].tolist()
+                    n = len(bndry_indices)
+                    dst_slice = gpu_target[offset : offset + n]
+                    
+                    file_id = f"{self._file_prefix}_p{i}"
+
+                    # Stream rows directly from file into target GPU tensor slice
+                    for idx, row_idx in enumerate(bndry_indices):
+                        file_offset = row_idx * row_bytes
+                        self.gpu_read(
+                            file_id=file_id,
+                            tensor=dst_slice[idx],  # Views sub-slice row on GPU
+                            file_offset=file_offset,
+                            stream=stream,
+                        )
+
                     offset += n
         
         tn = time.perf_counter_ns()
