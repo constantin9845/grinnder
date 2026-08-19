@@ -448,6 +448,24 @@ class HostBuffer:
                 feat_dim = gpu_target.size(1)
                 row_bytes = feat_dim * gpu_target.element_size()
                 offset = num_nodes  # Local partition node count
+
+                import os
+
+                file_id = f"{self._file_prefix}_p{i}"
+                file_path = self._backend._path(file_id)
+                file_size_bytes = os.path.getsize(file_path)
+
+                feat_dim = gpu_target.size(1)
+                row_bytes = feat_dim * gpu_target.element_size()
+                total_rows_in_file = file_size_bytes // row_bytes
+
+                max_requested_idx = max(bndry_indices) if len(bndry_indices) > 0 else 0
+                print(f"File {file_id}: size={file_size_bytes}B, total_rows={total_rows_in_file}, max_requested_row={max_requested_idx}")
+
+                if (max_requested_idx * row_bytes) + row_bytes > file_size_bytes:
+                    print(f"ERROR: Index {max_requested_idx} exceeds file size!")
+
+
                 self._backend.gpu_read(
                     file_id=f"{self._file_prefix}_p{pid}",
                     tensor=gpu_target[:offset],
