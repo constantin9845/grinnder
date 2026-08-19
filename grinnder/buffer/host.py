@@ -449,7 +449,7 @@ class HostBuffer:
                     if i == pid or bndries[i].numel() == 0:
                         continue
 
-                    source_file_id = f"{self._backend._storage_dir}/{self._file_prefix}_p{pid}.pt"
+                    source_file_id = f"{self._backend._storage_dir}/{self._file_prefix}_p{i}.pt"
 
                     # Global node ID offset for source partition i
                     source_start_node_id = cumulative_offsets[i]
