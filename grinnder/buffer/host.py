@@ -460,12 +460,11 @@ class HostBuffer:
                     # Target slice in GPU buffer
                     dst_slice = gpu_target[offset : offset + n]
 
-                    for idx, global_node_id in enumerate(bndry_global_indices):
-                        local_row_idx = global_node_id - source_start_node_id
+                    for idx, local_row_idx in enumerate(bndry_global_indices):
 
                         if local_row_idx < 0 or local_row_idx >= source_total_rows:
                             raise IndexError(
-                                f"[GDS Read Error] Target Partition {pid} requested Node ID {global_node_id} "
+                                f"[GDS Read Error] Target Partition {pid} requested Node ID {local_row_idx} "
                                 f"from Source File '{source_file_id}'.\n"
                                 f"  - Source File Range: Global IDs [{source_start_node_id} to {source_start_node_id + source_total_rows - 1}]\n"
                                 f"  - Computed Local Row Index: {local_row_idx} (File Size: {source_total_rows} rows)"
