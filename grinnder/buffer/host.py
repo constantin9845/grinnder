@@ -379,6 +379,7 @@ class HostBuffer:
     def async_gather_direct(
         self,
         phase,
+        num_nodes: int,
         pid: int,
         gpu_target: Tensor,
         boundaries: List[Optional[Tensor]],
@@ -446,7 +447,7 @@ class HostBuffer:
                 # Python fallback
                 feat_dim = gpu_target.size(1)
                 row_bytes = feat_dim * gpu_target.element_size()
-                offset = self._get_num_nodes(pid)  # Local partition node count
+                offset = num_nodes  # Local partition node count
                 self.gpu_read(
                     file_id=f"{self._file_prefix}_p{pid}",
                     tensor=gpu_target[:offset],
