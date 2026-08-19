@@ -461,7 +461,8 @@ class HostBuffer:
                     # Target slice in GPU buffer
                     dst_slice = gpu_target[offset : offset + n]
 
-                    for idx, local_row_idx in enumerate(bndry_global_indices):
+                    for idx, global_node_id in enumerate(bndry_global_indices):
+                        local_row_idx = global_node_id - source_start_node_id
 
                         if local_row_idx < 0 or local_row_idx >= source_total_rows:
                             raise IndexError(
@@ -506,6 +507,7 @@ class HostBuffer:
         bt = gpu_target.numel() * bytes_per_elem
         gb = round(bt / bytes_to_gb, 3)
         print(f"\tPartition {pid} loaded {gb} GB from NVMe via GDS")
+    
     # ------------------------------------------------------------------
     # Scatter: one GPU tensor -> multiple host partitions (with accumulation)
     # ------------------------------------------------------------------
