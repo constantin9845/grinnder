@@ -422,6 +422,8 @@ class HostBuffer:
             for i in range(self.num_parts)
         ]
 
+        print(actual_file_rows)
+
         # Record gather size statistics
         target_partition_nodes = num_nodes[pid]
         boundary_nodes = sum(b.numel() for b in bndries)
