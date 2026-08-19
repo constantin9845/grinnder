@@ -349,6 +349,105 @@ class HostBuffer:
         t0 = time.perf_counter_ns()
         with torch.cuda.stream(stream):
             if self._ops is not None:
+                self._ops.gather_partitions(pid, self._tensors, gpu_target, bndries)
+                print("Not a fallback")
+            else:
+                # Python fallback
+                print("Fallback")
+                offset = self._tensors[pid].size(0)
+                gpu_target[:offset].copy_(self._tensors[pid])
+                for i in range(self.num_parts):
+                    if i == pid or bndries[i].numel() == 0:
+                        continue
+                    selected = self._tensors[i].index_select(0, bndries[i])
+                    n = selected.size(0)
+                    gpu_target[offset : offset + n].copy_(selected)
+                    offset += n
+        
+        tn = time.perf_counter_ns()
+        stat.load_GPU_timestamp(phase, "copy", t0, tn)
+
+        bt = gpu_target.numel() * gpu_target.element_size()
+        gb = round(bt / (1024**3),3)
+
+        print(f"\tPartition {pid} loads {gb} GB from other partitions")
+
+    # ------------------------------------------------------------------
+    # Gather Direct: target partition + boundary feat/act from NVMe -> one GPU tensor
+    # ------------------------------------------------------------------
+
+    def async_gather_direct(
+        self,
+        phase,
+        pid: int,
+        gpu_target: Tensor,
+        boundaries: List[Optional[Tensor]],
+        stream: torch.cuda.Stream,
+    ) -> None:
+        """Gather features from NVMe to GPU.
+
+        GPU layout: [intra(pid) | boundary_from_p0 | ... | boundary_from_pN]
+
+        Args:
+            pid: Target partition index.
+            gpu_target: Pre-allocated GPU tensor [total_size, dim].
+            boundaries: boundaries[src_pid] = index tensor into self[src_pid].
+                        boundaries[pid] = None (intra-partition, copied contiguously).
+            stream: CUDA stream.
+        """
+        assert gpu_target.is_cuda
+        required_pids = {pid}
+        for src_pid, boundary in enumerate(boundaries):
+            if src_pid != pid and boundary is not None and boundary.numel() > 0:
+                required_pids.add(src_pid)
+        missing = [src_pid for src_pid in required_pids if not self.is_allocated(src_pid)]
+        if missing:
+            raise RuntimeError(
+                f"HostBuffer partitions {missing} are not resident for gather"
+            )
+
+        # Build boundary list (replace None with empty tensor)
+        bound_size = 0
+        t0 = time.perf_counter_ns()
+        bndries = []
+        for i in range(self.num_parts):
+            if i == pid or boundaries[i] is None:
+                bndries.append(torch.empty(0, dtype=torch.long))
+            else:
+                bndries.append(boundaries[i])
+
+        tn = time.perf_counter_ns()
+        stat.load_GPU_timestamp(phase, "gather", t0, tn)
+
+
+        stream.wait_stream(torch.cuda.current_stream(gpu_target.device))
+
+        target_partition_nodes = self._tensors[pid].size(0)
+        boundary_nodes = sum(b.numel() for b in bndries)
+
+        feature_dim = gpu_target.size(1)
+        bytes_per_elem = gpu_target.element_size()
+        bytes_to_gb = 1024**3
+
+        target_partition_gb = (target_partition_nodes * feature_dim * bytes_per_elem) / bytes_to_gb
+        boundary_gb = (boundary_nodes * feature_dim * bytes_per_elem) / bytes_to_gb
+
+        stat.add_actual_size(target_partition_gb, target_partition_gb + boundary_gb)
+
+        boundary_nodes = sum(b.numel() for b in bndries)
+        total_boundary_parts_nodes = sum(
+            self._tensors[src_pid].size(0) 
+            for src_pid, bnd in enumerate(bndries) 
+            if src_pid != pid and bnd.numel() > 0
+        )
+
+        overall_pct = (boundary_nodes / total_boundary_parts_nodes * 100) if total_boundary_parts_nodes > 0 else 0.0
+
+        stat.add_boundary_utilization(overall_pct)
+
+        t0 = time.perf_counter_ns()
+        with torch.cuda.stream(stream):
+            if self._ops is not None:
                 self._ops.gather_partitions(
                     pid, self._tensors, gpu_target, bndries
                 )
@@ -371,6 +470,7 @@ class HostBuffer:
         gb = round(bt / (1024**3),3)
 
         print(f"\tPartition {pid} loads {gb} GB from other partitions")
+
 
     # ------------------------------------------------------------------
     # Scatter: one GPU tensor -> multiple host partitions (with accumulation)
