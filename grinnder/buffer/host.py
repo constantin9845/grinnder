@@ -396,15 +396,6 @@ class HostBuffer:
             stream: CUDA stream.
         """
         assert gpu_target.is_cuda
-        required_pids = {pid}
-        for src_pid, boundary in enumerate(boundaries):
-            if src_pid != pid and boundary is not None and boundary.numel() > 0:
-                required_pids.add(src_pid)
-        missing = [src_pid for src_pid in required_pids if not self.is_allocated(src_pid)]
-        if missing:
-            raise RuntimeError(
-                f"HostBuffer partitions {missing} are not resident for gather"
-            )
 
         # Build boundary list (replace None with empty tensor)
         bound_size = 0
