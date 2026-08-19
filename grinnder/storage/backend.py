@@ -99,7 +99,7 @@ class StorageBackend:
         assert tensor.is_contiguous(), "gpu_read requires contiguous tensor"
 
         f = self._kvikio.CuFile(path, "r")
-        f.read(tensor, file_offset)
+        f.read(tensor, file_offset=file_offset)
         f.close()
 
         stat.load_GDS_timestamp()
