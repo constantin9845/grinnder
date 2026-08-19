@@ -428,6 +428,9 @@ class HostBuffer:
         import itertools
         cumulative_offsets = [0] + list(itertools.accumulate(num_nodes[:-1]))
 
+        print(f"Partition {i} file range: [{cumulative_offsets[i]} to {cumulative_offsets[i] + num_nodes[i]}]")
+        print(f"boundaries[{i}] min ID: {boundaries[i].min().item()}, max ID: {boundaries[i].max().item()}")
+        exit(0)
         t0 = time.perf_counter_ns()
         with torch.cuda.stream(stream):
             if self._ops is not None and 2 == 3: 
