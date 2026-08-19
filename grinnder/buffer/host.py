@@ -471,6 +471,25 @@ class HostBuffer:
                             )
                         
                         file_offset = local_row_idx * row_bytes
+                        actual_file_bytes = os.path.getsize(source_file_id)
+                        requested_read_bytes = dst_slice[idx].numel() * dst_slice[idx].element_size()
+                        if file_offset + requested_read_bytes > actual_file_bytes:
+                            print(f"\n=== EOF TRIGGER DETECTED ===")
+                            print(f"Source File:          {source_file_id} ({source_file_id})")
+                            print(f"File Size on Disk:    {actual_file_bytes:,} bytes")
+                            print(f"Target GPU Tensor:    {dst_slice[idx].shape}, dtype={dst_slice[idx].dtype}")
+                            print(f"Element Size:         {dst_slice[idx].element_size()} bytes")
+                            print(f"Row Bytes:            {row_bytes} bytes")
+                            print(f"Global Node ID:       {source_file_id}")
+                            print(f"Source Start Node ID: {source_start_node_id}")
+                            print(f"Local Row Index:      {local_row_idx}")
+                            print(f"Calculated Offset:    {file_offset:,} bytes")
+                            print(f"Read Size:            {requested_read_bytes:,} bytes")
+                            print(f"Offset + Read Size:   {file_offset + requested_read_bytes:,} bytes (EXCEEDS FILE SIZE!)")
+                            
+                            raise ValueError(f"Aborting before KvikIO crash: Offset + Read Size exceeds file size.")
+
+
                         self._backend.gpu_read(
                             file_id=source_file_id,
                             tensor=dst_slice[idx],
