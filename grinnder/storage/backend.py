@@ -94,11 +94,11 @@ class StorageBackend:
         stream: Optional[torch.cuda.Stream] = None,
     ) -> None:
         """Read from NVMe directly into GPU tensor via GDS."""
-        path = self._path(file_id)
+        #path = self._path(file_id)
         assert tensor.is_cuda, "gpu_read requires a CUDA tensor"
         assert tensor.is_contiguous(), "gpu_read requires contiguous tensor"
 
-        f = self._kvikio.CuFile(path, "r")
+        f = self._kvikio.CuFile(file_id, "r")
         f.read(tensor, file_offset=file_offset)
         f.close()
 
