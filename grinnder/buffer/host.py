@@ -308,6 +308,8 @@ class HostBuffer:
             )
 
         print(boundaries)
+        print(f"Boundaries length = {len(boundaries)}")
+        print(f"Boundaries[1] length = {len(boundaries[1])}")
         exit(0)
 
         # Build boundary list (replace None with empty tensor)
