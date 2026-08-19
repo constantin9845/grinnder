@@ -418,7 +418,7 @@ class HostBuffer:
         bytes_to_gb = 1024**3
 
         # Record gather size statistics
-        target_partition_nodes = num_nodes
+        target_partition_nodes = num_nodes[pid]
         boundary_nodes = sum(b.numel() for b in bndries)
 
         target_partition_gb = (target_partition_nodes * row_bytes) / bytes_to_gb
