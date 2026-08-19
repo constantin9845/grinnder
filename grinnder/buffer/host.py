@@ -426,11 +426,8 @@ class HostBuffer:
         stat.add_actual_size(target_partition_gb, target_partition_gb + boundary_gb)
 
         import itertools
-        cumulative_offsets = [0] + list(itertools.accumulate(num_nodes[:-1]))
+        cumulative_offsets = [0] + list(itertools.accumulate(num_nodes))[:-1]
 
-        print(f"Partition {i} file range: [{cumulative_offsets[i]} to {cumulative_offsets[i] + num_nodes[i]}]")
-        print(f"boundaries[{i}] min ID: {boundaries[i].min().item()}, max ID: {boundaries[i].max().item()}")
-        exit(0)
         t0 = time.perf_counter_ns()
         with torch.cuda.stream(stream):
             if self._ops is not None and 2 == 3: 
@@ -451,28 +448,32 @@ class HostBuffer:
                     if i == pid or bndries[i].numel() == 0:
                         continue
 
-                    file_id = f"{self._file_prefix}_p{i}"
-                    total_file_rows = num_nodes[i]
-                    start_node_id = cumulative_offsets[i]
+                    source_file_id = f"{self._file_prefix}_p{i}"
+
+                    # Global node ID offset for source partition i
+                    source_start_node_id = cumulative_offsets[i]
+                    source_total_rows = num_nodes[i]
 
                     bndry_global_indices = bndries[i].tolist()
                     n = len(bndry_global_indices)
 
+                    # Target slice in GPU buffer
                     dst_slice = gpu_target[offset : offset + n]
 
                     for idx, global_node_id in enumerate(bndry_global_indices):
-                        local_row_idx = global_node_id - start_node_id
+                        local_row_idx = global_node_id - source_start_node_id
 
-                        if local_row_idx < 0 or local_row_idx >= total_file_rows:
+                        if local_row_idx < 0 or local_row_idx >= source_total_rows:
                             raise IndexError(
-                                f"Index Out of Bounds in {file_id}: "
-                                f"Global ID {global_node_id} mapped to local row {local_row_idx}, "
-                                f"but file has {total_file_rows} rows."
+                                f"[GDS Read Error] Target Partition {pid} requested Node ID {global_node_id} "
+                                f"from Source File '{source_file_id}'.\n"
+                                f"  - Source File Range: Global IDs [{source_start_node_id} to {source_start_node_id + source_total_rows - 1}]\n"
+                                f"  - Computed Local Row Index: {local_row_idx} (File Size: {source_total_rows} rows)"
                             )
                         
                         file_offset = local_row_idx * row_bytes
                         self._backend.gpu_read(
-                            file_id=file_id,
+                            file_id=source_file_id,
                             tensor=dst_slice[idx],
                             file_offset=file_offset,
                             stream=stream,
