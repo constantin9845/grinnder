@@ -296,6 +296,7 @@ class HostBuffer:
                         boundaries[pid] = None (intra-partition, copied contiguously).
             stream: CUDA stream.
         """
+        t0 = time.perf_counter_ns()
         assert gpu_target.is_cuda
         required_pids = {pid}
         for src_pid, boundary in enumerate(boundaries):
@@ -307,14 +308,9 @@ class HostBuffer:
                 f"HostBuffer partitions {missing} are not resident for gather"
             )
 
-        print(boundaries)
-        print(f"Boundaries length = {len(boundaries)}")
-        print(f"Boundaries[1] length = {len(boundaries[1])}")
-        exit(0)
-
         # Build boundary list (replace None with empty tensor)
         bound_size = 0
-        t0 = time.perf_counter_ns()
+    
         bndries = []
         for i in range(self.num_parts):
             if i == pid or boundaries[i] is None:
@@ -322,11 +318,16 @@ class HostBuffer:
             else:
                 bndries.append(boundaries[i])
 
-        tn = time.perf_counter_ns()
-        stat.load_GPU_timestamp(phase, "gather", t0, tn)
+        print(bndries)
+        print(f"bndries length = {len(bndries)}")
+        print(f"bndries[1] length = {len(bndries[1])}")
+        exit(0)
 
 
         stream.wait_stream(torch.cuda.current_stream(gpu_target.device))
+
+        tn = time.perf_counter_ns()
+        stat.load_GPU_timestamp(phase, "gather", t0, tn)
 
         target_partition_nodes = self._tensors[pid].size(0)
         boundary_nodes = sum(b.numel() for b in bndries)
@@ -348,7 +349,6 @@ class HostBuffer:
         )
 
         overall_pct = (boundary_nodes / total_boundary_parts_nodes * 100) if total_boundary_parts_nodes > 0 else 0.0
-
         stat.add_boundary_utilization(overall_pct)
 
         t0 = time.perf_counter_ns()
