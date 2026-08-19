@@ -417,6 +417,11 @@ class HostBuffer:
         row_bytes = feature_dim * bytes_per_elem
         bytes_to_gb = 1024**3
 
+        actual_file_rows = [
+            os.path.getsize(f"{self._backend._storage_dir}/{self._file_prefix}_p{i}.pt") // row_bytes
+            for i in range(self.num_parts)
+        ]
+
         # Record gather size statistics
         target_partition_nodes = num_nodes[pid]
         boundary_nodes = sum(b.numel() for b in bndries)
@@ -431,7 +436,7 @@ class HostBuffer:
                 self._ops.gather_partitions(pid, self._cufiles, gpu_target, bndries)
             else:
                 # Load full target partition --> whole file
-                offset = num_nodes[pid]
+                offset = actual_file_rows[pid]
                 print(f"{self._backend._storage_dir}/{self._file_prefix}_p{pid}.pt")
                 self._backend.gpu_read(
                     file_id=f"{self._backend._storage_dir}/{self._file_prefix}_p{pid}.pt",
@@ -446,7 +451,7 @@ class HostBuffer:
                         continue
 
                     source_file_id = f"{self._backend._storage_dir}/{self._file_prefix}_p{i}.pt"
-                    source_total_rows = num_nodes[i]
+                    source_total_rows = actual_file_rows[i]
 
                     bndry_local_indices = bndries[i].tolist()
                     n = len(bndry_local_indices)
