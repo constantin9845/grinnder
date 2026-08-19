@@ -115,7 +115,7 @@ class DeviceBuffer:
     def async_gather_direct(
         self,
         phase,
-        num_nodes: int,
+        num_nodes: List[int],
         pid: int,
         host_buffer: HostBuffer,
         boundaries: List[Optional[Tensor]],

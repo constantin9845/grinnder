@@ -17,6 +17,9 @@ def __getattr__(name):
     if name == "load_igb":
         from grinnder.data.datasets import load_igb
         return load_igb
+    if name == "load_papers100M":
+        from grinnder.data.datasets import load_papers100M
+        return load_papers100M
     if name == "NumpyFeatureStore":
         from grinnder.data.datasets import NumpyFeatureStore
         return NumpyFeatureStore
