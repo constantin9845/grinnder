@@ -201,8 +201,8 @@ class Trainer:
         for pid in range(self.graph.num_parts):
             start = time.perf_counter()
             feat = self.graph.partition_features(pid)
-            print(feat)
-            print(feat.shape)
+            #print(feat)
+            #print(feat.shape)
             self.host_features[0][pid].copy_(feat)
             del feat
             gc.collect()
