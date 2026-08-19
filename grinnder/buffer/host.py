@@ -435,10 +435,8 @@ class HostBuffer:
             else:
                 # Load full target partition --> whole file
                 offset = num_nodes[pid]
-                print(f"{self._backend._storage_dir}{self._file_prefix}_p{pid}.pt")
-                exit(1)
                 self._backend.gpu_read(
-                    file_id=f"{self._backend._storage_dir}{self._file_prefix}_p{pid}.pt",
+                    file_id=f"{self._backend._storage_dir}/{self._file_prefix}_p{pid}.pt",
                     tensor=gpu_target[:offset],
                     file_offset=0,
                     stream=stream,
@@ -450,7 +448,7 @@ class HostBuffer:
                     if i == pid or bndries[i].numel() == 0:
                         continue
 
-                    source_file_id = f"{self._backend._storage_dir}{self._file_prefix}_p{pid}.pt"
+                    source_file_id = f"{self._backend._storage_dir}/{self._file_prefix}_p{pid}.pt"
 
                     # Global node ID offset for source partition i
                     source_start_node_id = cumulative_offsets[i]
