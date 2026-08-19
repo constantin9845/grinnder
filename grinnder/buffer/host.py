@@ -386,40 +386,53 @@ class HostBuffer:
         boundaries: List[Optional[Tensor]],
         stream: torch.cuda.Stream,
     ) -> None:
-        """Gather features from NVMe to GPU via GDS."""
-        assert gpu_target.is_cuda
+        """Gather features directly from NVMe files to GPU VRAM via GDS.
 
-        # Build boundary list
+        GPU layout: [intra(pid) | boundary_from_p0 | ... | boundary_from_pN]
+
+        Args:
+            phase: Current execution phase name for stats.
+            num_nodes: Number of local nodes in target partition `pid`.
+            pid: Target partition index.
+            gpu_target: Pre-allocated CUDA tensor [total_nodes, feature_dim].
+            boundaries: List of boundary index tensors for each partition.
+            stream: CUDA stream for non-blocking asynchronous execution.
+        """
+        import os
+
+        assert gpu_target.is_cuda, "gpu_target must be a CUDA tensor"
+
+        # 1. Standardize boundary list (replace None with empty 1D long tensor)
         bndries = []
         for i in range(self.num_parts):
             if i == pid or boundaries[i] is None:
-                bndries.append(torch.empty(0, dtype=torch.long))
+                bndries.append(torch.empty(0, dtype=torch.long, device="cpu"))
             else:
-                bndries.append(boundaries[i])
+                bndries.append(boundaries[i].cpu())
 
         stream.wait_stream(torch.cuda.current_stream(gpu_target.device))
 
+        # Tensor metrics
         feature_dim = gpu_target.size(1)
         bytes_per_elem = gpu_target.element_size()
+        row_bytes = feature_dim * bytes_per_elem
         bytes_to_gb = 1024**3
 
+        # Record gather size statistics
         target_partition_nodes = num_nodes
         boundary_nodes = sum(b.numel() for b in bndries)
 
-        target_partition_gb = (target_partition_nodes * feature_dim * bytes_per_elem) / bytes_to_gb
-        boundary_gb = (boundary_nodes * feature_dim * bytes_per_elem) / bytes_to_gb
-
+        target_partition_gb = (target_partition_nodes * row_bytes) / bytes_to_gb
+        boundary_gb = (boundary_nodes * row_bytes) / bytes_to_gb
         stat.add_actual_size(target_partition_gb, target_partition_gb + boundary_gb)
 
         t0 = time.perf_counter_ns()
         with torch.cuda.stream(stream):
-            if self._ops is not None and 2 == 3:
-                self._ops.gather_partitions(pid, self._tensors, gpu_target, bndries)
+            if self._ops is not None and 2 == 3:  # Reserved for C++ batch extension
+                self._ops.gather_partitions(pid, self._cufiles, gpu_target, bndries)
             else:
-                row_bytes = feature_dim * bytes_per_elem
-                offset = num_nodes  # Local partition node count
-
-                # 1. Intra-partition read (contiguous from file offset 0)
+                # 2. Intra-partition local read (contiguous block from file offset 0)
+                offset = num_nodes
                 self._backend.gpu_read(
                     file_id=f"{self._file_prefix}_p{pid}",
                     tensor=gpu_target[:offset],
@@ -427,27 +440,53 @@ class HostBuffer:
                     stream=stream,
                 )
 
-                # 2. Inter-partition boundary reads
+                # 3. Calculate cumulative global node offsets per partition on-the-fly
+                # (Partition `i` starting ID = sum of rows in all files 0 to i-1)
+                cumulative_node_offsets = [0] * self.num_parts
+                running_nodes = 0
+                for p in range(self.num_parts):
+                    cumulative_node_offsets[p] = running_nodes
+                    p_file = self._backend._path(f"{self._file_prefix}_p{p}")
+                    if os.path.exists(p_file):
+                        running_nodes += os.path.getsize(p_file) // row_bytes
+
+                # 4. Inter-partition boundary reads
                 for i in range(self.num_parts):
                     if i == pid or bndries[i].numel() == 0:
                         continue
 
-                    # Calculate global start node ID by summing row counts of previous partition files (0 to i-1)
-                    start_node_id = 0
-                    for prev_p in range(i):
-                        prev_file_path = self._backend._path(f"{self._file_prefix}_p{prev_p}")
-                        prev_bytes = os.path.getsize(prev_file_path)
-                        start_node_id += prev_bytes // row_bytes
-
-                    # Convert global node IDs to 0-based partition-local row indices
-                    bndry_indices = (bndries[i] - start_node_id).tolist()
-                    
-                    n = len(bndry_indices)
-                    dst_slice = gpu_target[offset : offset + n]
                     file_id = f"{self._file_prefix}_p{i}"
+                    file_path = self._backend._path(file_id)
+                    file_size_bytes = os.path.getsize(file_path)
+                    total_file_rows = file_size_bytes // row_bytes
 
-                    # Stream rows directly from NVMe using 0-based local row offsets
-                    for idx, local_row_idx in enumerate(bndry_indices):
+                    start_node_id = cumulative_node_offsets[i]
+                    bndry_global_indices = bndries[i].tolist()
+                    n = len(bndry_global_indices)
+
+                    # Sub-slice view of target VRAM buffer for this remote partition
+                    dst_slice = gpu_target[offset : offset + n]
+
+                    # Read individual boundary rows straight from SSD to VRAM
+                    for idx, global_node_id in enumerate(bndry_global_indices):
+                        # Convert global node ID to 0-based partition-local row index
+                        local_row_idx = global_node_id - start_node_id
+
+                        # Guard against out-of-bounds or negative indices
+                        if local_row_idx < 0:
+                            print(
+                                f"[WARN] Skipping negative index: global={global_node_id}, "
+                                f"start_offset={start_node_id}, local={local_row_idx}"
+                            )
+                            continue
+
+                        if local_row_idx >= total_file_rows:
+                            print(
+                                f"[ERROR] Local row {local_row_idx} (global {global_node_id}) "
+                                f"exceeds total rows ({total_file_rows}) in {file_id}"
+                            )
+                            continue
+
                         file_offset = local_row_idx * row_bytes
                         self._backend.gpu_read(
                             file_id=file_id,
@@ -461,10 +500,9 @@ class HostBuffer:
         tn = time.perf_counter_ns()
         stat.load_GPU_timestamp(phase, "copy", t0, tn)
 
-        bt = gpu_target.numel() * gpu_target.element_size()
+        bt = gpu_target.numel() * bytes_per_elem
         gb = round(bt / bytes_to_gb, 3)
-        print(f"\tPartition {pid} loads {gb} GB from NVMe")
-
+        print(f"\tPartition {pid} loaded {gb} GB from NVMe via GDS")
     # ------------------------------------------------------------------
     # Scatter: one GPU tensor -> multiple host partitions (with accumulation)
     # ------------------------------------------------------------------
