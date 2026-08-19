@@ -459,7 +459,9 @@ class HostBuffer:
                 row_bytes = feat_dim * gpu_target.element_size()
                 total_rows_in_file = file_size_bytes // row_bytes
 
-                max_requested_idx = max(bndry_indices) if len(bndry_indices) > 0 else 0
+                # Get the maximum requested index directly from your PyTorch tensor `bndries[i]`
+                max_requested_idx = bndries[i].max().item() if bndries[i].numel() > 0 else 0
+
                 print(f"File {file_id}: size={file_size_bytes}B, total_rows={total_rows_in_file}, max_requested_row={max_requested_idx}")
 
                 if (max_requested_idx * row_bytes) + row_bytes > file_size_bytes:
