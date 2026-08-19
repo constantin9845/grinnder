@@ -425,9 +425,6 @@ class HostBuffer:
         boundary_gb = (boundary_nodes * row_bytes) / bytes_to_gb
         stat.add_actual_size(target_partition_gb, target_partition_gb + boundary_gb)
 
-        import itertools
-        cumulative_offsets = [0] + list(itertools.accumulate(num_nodes))[:-1]
-
         t0 = time.perf_counter_ns()
         with torch.cuda.stream(stream):
             if self._ops is not None and 2 == 3: 
@@ -444,32 +441,26 @@ class HostBuffer:
                 )
 
 
-                # 4. Inter-partition boundary reads
                 for i in range(self.num_parts):
                     if i == pid or bndries[i].numel() == 0:
                         continue
 
                     source_file_id = f"{self._backend._storage_dir}/{self._file_prefix}_p{i}.pt"
-
-                    # Global node ID offset for source partition i
-                    source_start_node_id = cumulative_offsets[i]
                     source_total_rows = num_nodes[i]
 
-                    bndry_global_indices = bndries[i].tolist()
-                    n = len(bndry_global_indices)
+                    bndry_local_indices = bndries[i].tolist()
+                    n = len(bndry_local_indices)
 
                     # Target slice in GPU buffer
                     dst_slice = gpu_target[offset : offset + n]
 
-                    for idx, global_node_id in enumerate(bndry_global_indices):
-                        local_row_idx = global_node_id - source_start_node_id
+                    for idx, local_row_idx in enumerate(bndry_local_indices):
 
                         if local_row_idx < 0 or local_row_idx >= source_total_rows:
                             raise IndexError(
-                                f"[GDS Read Error] Target Partition {pid} requested Node ID {local_row_idx} "
+                                f"[GDS Read Error] Target Partition {pid} requested local row index {local_row_idx} "
                                 f"from Source File '{source_file_id}'.\n"
-                                f"  - Source File Range: Global IDs [{source_start_node_id} to {source_start_node_id + source_total_rows - 1}]\n"
-                                f"  - Computed Local Row Index: {local_row_idx} (File Size: {source_total_rows} rows)"
+                                f"  - Source File Max Local Rows: {source_total_rows}"
                             )
                         
                         file_offset = local_row_idx * row_bytes
@@ -477,20 +468,17 @@ class HostBuffer:
                         requested_read_bytes = dst_slice[idx].numel() * dst_slice[idx].element_size()
                         if file_offset + requested_read_bytes > actual_file_bytes:
                             print(f"\n=== EOF TRIGGER DETECTED ===")
-                            print(f"Source File:          {source_file_id} ({source_file_id})")
+                            print(f"Source File:          {source_file_id}")
                             print(f"File Size on Disk:    {actual_file_bytes:,} bytes")
                             print(f"Target GPU Tensor:    {dst_slice[idx].shape}, dtype={dst_slice[idx].dtype}")
                             print(f"Element Size:         {dst_slice[idx].element_size()} bytes")
                             print(f"Row Bytes:            {row_bytes} bytes")
-                            print(f"Global Node ID:       {source_file_id}")
-                            print(f"Source Start Node ID: {source_start_node_id}")
                             print(f"Local Row Index:      {local_row_idx}")
                             print(f"Calculated Offset:    {file_offset:,} bytes")
                             print(f"Read Size:            {requested_read_bytes:,} bytes")
                             print(f"Offset + Read Size:   {file_offset + requested_read_bytes:,} bytes (EXCEEDS FILE SIZE!)")
                             
                             raise ValueError(f"Aborting before KvikIO crash: Offset + Read Size exceeds file size.")
-
 
                         self._backend.gpu_read(
                             file_id=source_file_id,
