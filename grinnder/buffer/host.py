@@ -346,6 +346,9 @@ class HostBuffer:
 
         stat.add_boundary_utilization(overall_pct)
 
+        print(bndries)
+        
+
         t0 = time.perf_counter_ns()
         with torch.cuda.stream(stream):
             if self._ops is not None:
