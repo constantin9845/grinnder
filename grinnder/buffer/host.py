@@ -434,7 +434,7 @@ class HostBuffer:
                 self._ops.gather_partitions(pid, self._cufiles, gpu_target, bndries)
             else:
                 # Load full target partition --> whole file
-                offset = num_nodes
+                offset = num_nodes[pid]
                 self._backend.gpu_read(
                     file_id=f"{self._file_prefix}_p{pid}",
                     tensor=gpu_target[:offset],
