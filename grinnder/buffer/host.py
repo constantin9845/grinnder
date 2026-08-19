@@ -402,7 +402,6 @@ class HostBuffer:
 
         assert gpu_target.is_cuda, "gpu_target must be a CUDA tensor"
 
-        # 1. Standardize boundary list (replace None with empty 1D long tensor)
         bndries = []
         for i in range(self.num_parts):
             if i == pid or boundaries[i] is None:
@@ -426,12 +425,15 @@ class HostBuffer:
         boundary_gb = (boundary_nodes * row_bytes) / bytes_to_gb
         stat.add_actual_size(target_partition_gb, target_partition_gb + boundary_gb)
 
+        import itertools
+        cumulative_offsets = [0] + list(itertools.accumulate(num_nodes[:-1]))
+
         t0 = time.perf_counter_ns()
         with torch.cuda.stream(stream):
-            if self._ops is not None and 2 == 3:  # Reserved for C++ batch extension
+            if self._ops is not None and 2 == 3: 
                 self._ops.gather_partitions(pid, self._cufiles, gpu_target, bndries)
             else:
-                # 2. Intra-partition local read (contiguous block from file offset 0)
+                # Load full target partition --> whole file
                 offset = num_nodes
                 self._backend.gpu_read(
                     file_id=f"{self._file_prefix}_p{pid}",
@@ -440,15 +442,6 @@ class HostBuffer:
                     stream=stream,
                 )
 
-                # 3. Calculate cumulative global node offsets per partition on-the-fly
-                # (Partition `i` starting ID = sum of rows in all files 0 to i-1)
-                cumulative_node_offsets = [0] * self.num_parts
-                running_nodes = 0
-                for p in range(self.num_parts):
-                    cumulative_node_offsets[p] = running_nodes
-                    p_file = self._backend._path(f"{self._file_prefix}_p{p}")
-                    if os.path.exists(p_file):
-                        running_nodes += os.path.getsize(p_file) // row_bytes
 
                 # 4. Inter-partition boundary reads
                 for i in range(self.num_parts):
@@ -456,37 +449,24 @@ class HostBuffer:
                         continue
 
                     file_id = f"{self._file_prefix}_p{i}"
-                    file_path = self._backend._path(file_id)
-                    file_size_bytes = os.path.getsize(file_path)
-                    total_file_rows = file_size_bytes // row_bytes
+                    total_file_rows = num_nodes[i]
+                    start_node_id = cumulative_offsets[i]
 
-                    start_node_id = cumulative_node_offsets[i]
                     bndry_global_indices = bndries[i].tolist()
                     n = len(bndry_global_indices)
 
-                    # Sub-slice view of target VRAM buffer for this remote partition
                     dst_slice = gpu_target[offset : offset + n]
 
-                    # Read individual boundary rows straight from SSD to VRAM
                     for idx, global_node_id in enumerate(bndry_global_indices):
-                        # Convert global node ID to 0-based partition-local row index
                         local_row_idx = global_node_id - start_node_id
 
-                        # Guard against out-of-bounds or negative indices
-                        if local_row_idx < 0:
-                            print(
-                                f"[WARN] Skipping negative index: global={global_node_id}, "
-                                f"start_offset={start_node_id}, local={local_row_idx}"
+                        if local_row_idx < 0 or local_row_idx >= total_file_rows:
+                            raise IndexError(
+                                f"Index Out of Bounds in {file_id}: "
+                                f"Global ID {global_node_id} mapped to local row {local_row_idx}, "
+                                f"but file has {total_file_rows} rows."
                             )
-                            continue
-
-                        if local_row_idx >= total_file_rows:
-                            print(
-                                f"[ERROR] Local row {local_row_idx} (global {global_node_id}) "
-                                f"exceeds total rows ({total_file_rows}) in {file_id}"
-                            )
-                            continue
-
+                        
                         file_offset = local_row_idx * row_bytes
                         self._backend.gpu_read(
                             file_id=file_id,
