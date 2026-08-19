@@ -432,27 +432,23 @@ class HostBuffer:
                     if i == pid or bndries[i].numel() == 0:
                         continue
 
-                    # If bndries[i] holds global node IDs, translate to local row indices
-                    start_node_offset = getattr(self, "partition_offsets", [0] * self.num_parts)[i]
-                    local_bndry = bndries[i] - start_node_offset
+                    # Calculate global start node ID by summing row counts of previous partition files (0 to i-1)
+                    start_node_id = 0
+                    for prev_p in range(i):
+                        prev_file_path = self._backend._path(f"{self._file_prefix}_p{prev_p}")
+                        prev_bytes = os.path.getsize(prev_file_path)
+                        start_node_id += prev_bytes // row_bytes
 
-                    bndry_indices = local_bndry.tolist()
+                    # Convert global node IDs to 0-based partition-local row indices
+                    bndry_indices = (bndries[i] - start_node_id).tolist()
+                    
                     n = len(bndry_indices)
                     dst_slice = gpu_target[offset : offset + n]
                     file_id = f"{self._file_prefix}_p{i}"
 
-                    # Debug verification inside the partition loop
-                    file_path = self._backend._path(file_id)
-                    file_size_bytes = os.path.getsize(file_path)
-                    total_rows = file_size_bytes // row_bytes
-                    max_idx = max(bndry_indices) if n > 0 else 0
-
-                    if (max_idx * row_bytes) + row_bytes > file_size_bytes:
-                        print(f"[ERROR] Partition {i}: Max row {max_idx} exceeds file capacity ({total_rows} rows)")
-
-                    # Direct GDS stream transfers
-                    for idx, row_idx in enumerate(bndry_indices):
-                        file_offset = row_idx * row_bytes
+                    # Stream rows directly from NVMe using 0-based local row offsets
+                    for idx, local_row_idx in enumerate(bndry_indices):
+                        file_offset = local_row_idx * row_bytes
                         self._backend.gpu_read(
                             file_id=file_id,
                             tensor=dst_slice[idx],
