@@ -363,6 +363,7 @@ class HostBuffer:
                     print(bndries[i])
                     print(selected)
                     print(pid)
+                    print("************")
                     exit(0)
                     n = selected.size(0)
                     gpu_target[offset : offset + n].copy_(selected)
