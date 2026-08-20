@@ -459,7 +459,7 @@ class HostBuffer:
                     
                     # all boundary features required for target partition
                     for j in bndries[i]:
-                        file_offset += j * row_bytes
+                        file_offset = j * row_bytes
 
                         fd = None
 
