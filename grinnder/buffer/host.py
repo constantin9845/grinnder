@@ -365,7 +365,7 @@ class HostBuffer:
                     print(selected)
 
                     print("************")
-                    print(self._tensors[bndries[i][0]])
+                    print(self._tensors[i][367053])
                     print(selected[0])
                     print("************")
                     exit(0)
