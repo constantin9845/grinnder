@@ -451,14 +451,54 @@ class HostBuffer:
 
                 print("Target partition loaded")
 
+                partition_streams = []
+
 
                 for i in range(self.num_parts):
                     if i == pid or bndries[i].numel() == 0:
                         continue
 
+                    p_stream = torch.cuda.Stream(device=gpu_target.device)
+                    p_stream.wait_stream(stream)
+                    partition_streams.append(p_stream)
+
                     part_file = f"{self._backend._storage_dir}/{self._file_prefix}_p{i}.pt"
- 
-                    
+
+                    part_bndry_nodes = bndries[i].numel()
+                    part_target_slice = gpu_target[offset : offset + part_bndry_nodes]
+
+                    with torch.cuda.stream(p_stream):
+                        fd = None
+                        for idx, j in enumerate(bndries[i]):
+
+                            file_offset = j.item() * row_bytes
+                            dst_slice = part_target_slice[idx : idx + 1]
+
+                            if idx == 0 and part_bndry_nodes == 1:
+                                status = 2  # Single element: read and close
+                            elif idx == 0:
+                                status = 0  # First element: open file
+                            elif idx == part_bndry_nodes - 1:
+                                status = 2  # Last element: read and close file
+                            else:
+                                status = 1  # Intermediate element: reuse handle
+
+                            fd = self._backend.gpu_read(
+                                status=status,
+                                fd=fd,
+                                file_id=part_file,
+                                tensor=dst_slice,
+                                file_offset=file_offset,
+                                stream=p_stream,
+                            )
+
+                    offset += part_bndry_nodes  
+
+                for p_stream in partition_streams:
+                    if p_stream is not None:
+                        stream.wait_stream(p_stream)
+
+                    '''
                     # all boundary features required for target partition
                     for j in bndries[i]:
                         file_offset = j * row_bytes
@@ -498,7 +538,7 @@ class HostBuffer:
 
                         offset += 1
                     print(f"Boundary partition {i} data loaded")
-                    
+                    '''
 
         tn = time.perf_counter_ns()
         stat.load_GPU_timestamp(phase, "copy", t0, tn)
