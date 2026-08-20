@@ -507,7 +507,7 @@ class Trainer:
 
         t0 = time.time()
         # Storage_to_Host: load layer activations into cache
-        self._prepare_cache_layer(layer_id)
+        #self._prepare_cache_layer(layer_id)
 
         # Prologue: prefetch first assigned partition
         #self._prepare_cache_partition(layer_id, pids[0], "forward")
@@ -515,7 +515,7 @@ class Trainer:
             "forward",
             self.graph.partition_sizes,
             pid=pids[0],
-            host_buffer=self.host_features[layer_id],
+            gpu_target=self.device_features[layer_id][pids[0]],
             boundaries=self.graph.boundaries[pids[0]],
             stream=self.streams.h2d[0],
         )
@@ -523,11 +523,9 @@ class Trainer:
         for i, pid in enumerate(pids):
             pool_idx = i % pool_size
 
-            # Wait for H2D of current partition
-            self.device_features[layer_id].h2d_synchronize(
-                self.streams.h2d[pool_idx]
-            )
+            self.streams.h2d[pool_idx].synchronize() # sync GDS with compute
             self.streams.compute.wait_stream(self.streams.h2d[pool_idx])
+
             if self.config.mode == "grinnder":
                 self.streams.compute.wait_stream(self.streams.act_h2d[pool_idx])
 
@@ -544,7 +542,7 @@ class Trainer:
                         "forward",
                         self.graph.partition_sizes,
                         pid=next_pid,
-                        host_buffer=self.host_features[layer_id],
+                        gpu_target=self.device_features[layer_id][next_pid],
                         boundaries=self.graph.boundaries[next_pid],
                         stream=self.streams.h2d[next_pool],
                     )
@@ -641,7 +639,7 @@ class Trainer:
                         "forward",
                         self.graph.partition_sizes,
                         pid=next_pid,
-                        host_buffer=self.host_features[layer_id],
+                        gpu_target=self.device_features[layer_id][next_pid],
                         boundaries=self.graph.boundaries[next_pid],
                         stream=self.streams.h2d[0],
                     )
