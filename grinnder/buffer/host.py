@@ -443,6 +443,7 @@ class HostBuffer:
                 self._backend.gpu_read(
                     True, # file open
                     True, # file close
+                    None,
                     file_id=f"{self._backend._storage_dir}/{self._file_prefix}_p{pid}.pt",
                     tensor=gpu_target[:offset],
                     file_offset=0,
