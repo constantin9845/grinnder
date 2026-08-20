@@ -361,6 +361,8 @@ class HostBuffer:
                     if i == pid or bndries[i].numel() == 0:
                         continue
                     selected = self._tensors[i].index_select(0, bndries[i])
+                    print(selected)
+                    exit(1)
                     n = selected.size(0)
                     gpu_target[offset : offset + n].copy_(selected)
                     offset += n

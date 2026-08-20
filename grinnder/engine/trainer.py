@@ -511,9 +511,8 @@ class Trainer:
 
         # Prologue: prefetch first assigned partition
         #self._prepare_cache_partition(layer_id, pids[0], "forward")
-        self.device_features[layer_id].async_gather_direct(
+        self.device_features[layer_id].async_gather(
             "forward",
-            self.graph.partition_sizes,
             pid=pids[0],
             host_buffer=self.host_features[layer_id],
             boundaries=self.graph.boundaries[pids[0]],
