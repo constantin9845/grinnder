@@ -470,7 +470,7 @@ class HostBuffer:
                     fd = None
                     total_chunks = len(row_chunks)
 
-                    for chunk_idx, (chunk, orig_perm) in enumerate(zip(row_chunks, perm_chunks)):
+                    for chunk_idx, (chunk, chunk_perm) in enumerate(zip(row_chunks, perm_chunks)):
                         start_row = chunk[0].item()
                         num_rows = chunk.numel()
                         file_offset = start_row * row_bytes
@@ -485,7 +485,7 @@ class HostBuffer:
                             status = 1 # intermediate write
 
                         if num_rows == 1:
-                            dest_idx = offset + orig_perm[0].item()
+                            dest_idx = offset + chunk_perm[0].item()
                             fd = self._backend.gpu_read(
                                 status=status, 
                                 fd=fd,
@@ -512,10 +512,11 @@ class HostBuffer:
                                 stream=stream,
                             )
 
-                            dst_indices = (offset + orig_perm).to(gpu_target.device)
+                            dst_indices = (offset + chunk_perm).to(gpu_target.device)
                             gpu_target[dst_indices] = staging_buf
                         
                     offset += original_boundaries.numel()
+                    print(f"Boundary partition {i} data loaded")
 
                     
                     '''
