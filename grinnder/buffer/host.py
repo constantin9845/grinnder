@@ -362,6 +362,7 @@ class HostBuffer:
                     selected = self._tensors[i].index_select(0, bndries[i])
                     print(bndries[i])
                     print(selected)
+                    print(pid)
                     exit(0)
                     n = selected.size(0)
                     gpu_target[offset : offset + n].copy_(selected)
