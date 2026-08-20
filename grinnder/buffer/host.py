@@ -451,53 +451,78 @@ class HostBuffer:
 
                 print("Target partition loaded")
 
-                partition_streams = []
-
 
                 for i in range(self.num_parts):
                     if i == pid or bndries[i].numel() == 0:
                         continue
 
-                    p_stream = torch.cuda.Stream(device=gpu_target.device)
-                    p_stream.wait_stream(stream)
-                    partition_streams.append(p_stream)
-
                     part_file = f"{self._backend._storage_dir}/{self._file_prefix}_p{i}.pt"
 
-                    part_bndry_nodes = bndries[i].numel()
-                    part_target_slice = gpu_target[offset : offset + part_bndry_nodes]
+                    index = 0
+                    chunks = []
+                    while index < len(bndries[i]):
+                        start = index
+                        end = index + 1
 
-                    with torch.cuda.stream(p_stream):
-                        fd = None
-                        for idx, j in enumerate(bndries[i]):
+                        while end < len(bndries[i]) and bndries[i][end] == bndries[i][end - 1] + 1:
+                            end += 1
+                        
+                        chunk_len = end - start
+                        file_offset = bndries[i][start].item() * row_bytes
+                        chunks.append((file_offset, chunk_len))
 
-                            file_offset = j.item() * row_bytes
-                            dst_slice = part_target_slice[idx : idx + 1]
+                        index = end
 
-                            if idx == 0 and part_bndry_nodes == 1:
-                                status = 2  # Single element: read and close
-                            elif idx == 0:
-                                status = 0  # First element: open file
-                            elif idx == part_bndry_nodes - 1:
-                                status = 2  # Last element: read and close file
-                            else:
-                                status = 1  # Intermediate element: reuse handle
+                    fd = None
+                    total_chunks = len(chunks)
 
+                    for chunk_idx, (file_offset, chunk_len) in enumerate(chunks):
+                        if chunk_idx == 0 and total_chunks == 1:
+                            # single read --> open, read, close
                             fd = self._backend.gpu_read(
-                                status=status,
-                                fd=fd,
+                                status=3,
+                                fd=None,
                                 file_id=part_file,
-                                tensor=dst_slice,
+                                tensor=gpu_target[offset : offset + chunk_len],
                                 file_offset=file_offset,
-                                stream=p_stream,
+                                stream=stream,
                             )
 
-                    offset += part_bndry_nodes  
+                        elif chunk_idx == 0:
+                            # first read --> open file
+                            fd = self._backend.gpu_read(
+                                status=0,
+                                fd=None,
+                                file_id=part_file,
+                                tensor=gpu_target[offset : offset + chunk_len],
+                                file_offset=file_offset,
+                                stream=stream,
+                            )
 
-                for p_stream in partition_streams:
-                    if p_stream is not None:
-                        stream.wait_stream(p_stream)
+                        elif chunk_idx != total_chunks - 1:
+                            # file already open
+                            fd = self._backend.gpu_read(
+                                status=1,
+                                fd=fd,
+                                file_id=part_file,
+                                tensor=gpu_target[offset : offset + chunk_len],
+                                file_offset=file_offset,
+                                stream=stream,
+                            )
 
+                        else:
+                            # last read --> close file and record timestamps
+                            fd = self._backend.gpu_read(
+                                status=2,
+                                fd=fd,
+                                file_id=part_file,
+                                tensor=gpu_target[offset : offset + chunk_len],
+                                file_offset=file_offset,
+                                stream=stream,
+                            )
+
+                        offset += chunk_len
+                    print(f"Boundary partition {i} data loaded")
                     '''
                     # all boundary features required for target partition
                     for j in bndries[i]:
