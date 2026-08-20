@@ -401,6 +401,11 @@ class HostBuffer:
             stream: CUDA stream for non-blocking asynchronous execution.
         """
         import os
+        num_nodes = []
+        for i in range(self.num_parts):
+            f_bytes = os.path.getsize(f"{self._backend._storage_dir}/{self._file_prefix}_p{i}.pt")
+            total_features = f_bytes // gpu_target.element_size()
+            num_nodes.append(total_features)
 
         assert gpu_target.is_cuda, "gpu_target must be a CUDA tensor"
 
@@ -419,13 +424,6 @@ class HostBuffer:
         row_bytes = feature_dim * bytes_per_elem
         bytes_to_gb = 1024**3
 
-        actual_file_rows = [
-            os.path.getsize(f"{self._backend._storage_dir}/{self._file_prefix}_p{i}.pt") // row_bytes
-            for i in range(self.num_parts)
-        ]
-
-        print(actual_file_rows)
-
         # Record gather size statistics
         target_partition_nodes = num_nodes[pid]
         boundary_nodes = sum(b.numel() for b in bndries)
@@ -440,9 +438,11 @@ class HostBuffer:
                 self._ops.gather_partitions(pid, self._cufiles, gpu_target, bndries)
             else:
                 # Load full target partition --> whole file
-                offset = actual_file_rows[pid]
-                print(f"{self._backend._storage_dir}/{self._file_prefix}_p{pid}.pt")
+                
+                offset = num_nodes[pid]
                 self._backend.gpu_read(
+                    True, # file open
+                    True, # file close
                     file_id=f"{self._backend._storage_dir}/{self._file_prefix}_p{pid}.pt",
                     tensor=gpu_target[:offset],
                     file_offset=0,
@@ -454,49 +454,48 @@ class HostBuffer:
                     if i == pid or bndries[i].numel() == 0:
                         continue
 
-                    source_file_id = f"{self._backend._storage_dir}/{self._file_prefix}_p{i}.pt"
-                    source_total_rows = actual_file_rows[i]
+                    part_file = f"{self._backend._storage_dir}/{self._file_prefix}_p{pid}.pt"
+                    
+                    # all boundary features required for target partition
+                    for j in bndries[i]:
+                        file_offset += j * row_bytes
 
-                    bndry_local_indices = bndries[i].tolist()
-                    n = len(bndry_local_indices)
-
-                    # Target slice in GPU buffer
-                    dst_slice = gpu_target[offset : offset + n]
-
-                    for idx, local_row_idx in enumerate(bndry_local_indices):
-
-                        if local_row_idx < 0 or local_row_idx >= source_total_rows:
-                            raise IndexError(
-                                f"[GDS Read Error] Target Partition {pid} requested local row index {local_row_idx} "
-                                f"from Source File '{source_file_id}'.\n"
-                                f"  - Source File Max Local Rows: {source_total_rows}"
+                        if j == bndries[i][0]:
+                            # first read --> open file
+                            self._backend.gpu_read(
+                                True, # file open
+                                False, # file close
+                                file_id=part_file,
+                                tensor=gpu_target[offset : offset+bytes_per_elem],
+                                file_offset=file_offset,
+                                stream=stream,
                             )
-                        
-                        file_offset = local_row_idx * row_bytes
-                        actual_file_bytes = os.path.getsize(source_file_id)
-                        requested_read_bytes = dst_slice[idx].numel() * dst_slice[idx].element_size()
-                        if file_offset + requested_read_bytes > actual_file_bytes:
-                            print(f"\n=== EOF TRIGGER DETECTED ===")
-                            print(f"Source File:          {source_file_id}")
-                            print(f"File Size on Disk:    {actual_file_bytes:,} bytes")
-                            print(f"Target GPU Tensor:    {dst_slice[idx].shape}, dtype={dst_slice[idx].dtype}")
-                            print(f"Element Size:         {dst_slice[idx].element_size()} bytes")
-                            print(f"Row Bytes:            {row_bytes} bytes")
-                            print(f"Local Row Index:      {local_row_idx}")
-                            print(f"Calculated Offset:    {file_offset:,} bytes")
-                            print(f"Read Size:            {requested_read_bytes:,} bytes")
-                            print(f"Offset + Read Size:   {file_offset + requested_read_bytes:,} bytes (EXCEEDS FILE SIZE!)")
-                            
-                            raise ValueError(f"Aborting before KvikIO crash: Offset + Read Size exceeds file size.")
 
-                        self._backend.gpu_read(
-                            file_id=source_file_id,
-                            tensor=dst_slice[idx],
-                            file_offset=file_offset,
-                            stream=stream,
-                        )
+                        elif j != bndries[i][-1]:
+                            # file already open
+                            self._backend.gpu_read(
+                                False, # file open
+                                False, # file close
+                                file_id=part_file,
+                                tensor=gpu_target[offset : offset+bytes_per_elem],
+                                file_offset=file_offset,
+                                stream=stream,
+                            )
 
-                    offset += n
+                        else:
+                            # last read --> close file and record timestamps
+                            self._backend.gpu_read(
+                                False, # file open
+                                True, # file close
+                                file_id=part_file,
+                                tensor=gpu_target[offset : offset+bytes_per_elem],
+                                file_offset=file_offset,
+                                stream=stream,
+                            )
+
+                        offset += bytes_per_elem
+
+                    
 
         tn = time.perf_counter_ns()
         stat.load_GPU_timestamp(phase, "copy", t0, tn)
