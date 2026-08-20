@@ -460,11 +460,14 @@ class HostBuffer:
                     for j in bndries[i]:
                         file_offset += j * row_bytes
 
+                        fd = None
+
                         if j == bndries[i][0]:
                             # first read --> open file
-                            self._backend.gpu_read(
-                                True, # file open
-                                False, # file close
+                            fd = self._backend.gpu_read(
+                                True, # open new file
+                                False, # close file
+                                None,
                                 file_id=part_file,
                                 tensor=gpu_target[offset : offset+bytes_per_elem],
                                 file_offset=file_offset,
@@ -473,9 +476,10 @@ class HostBuffer:
 
                         elif j != bndries[i][-1]:
                             # file already open
-                            self._backend.gpu_read(
-                                False, # file open
-                                False, # file close
+                            fd = self._backend.gpu_read(
+                                False, # open new file
+                                False, # close file
+                                fd,
                                 file_id=part_file,
                                 tensor=gpu_target[offset : offset+bytes_per_elem],
                                 file_offset=file_offset,
@@ -484,9 +488,10 @@ class HostBuffer:
 
                         else:
                             # last read --> close file and record timestamps
-                            self._backend.gpu_read(
-                                False, # file open
-                                True, # file close
+                            fd = self._backend.gpu_read(
+                                False, # open new file
+                                True, # close file
+                                fd,
                                 file_id=part_file,
                                 tensor=gpu_target[offset : offset+bytes_per_elem],
                                 file_offset=file_offset,
