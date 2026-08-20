@@ -455,13 +455,13 @@ class HostBuffer:
                     if i == pid or bndries[i].numel() == 0:
                         continue
 
-                    part_file = f"{self._backend._storage_dir}/{self._file_prefix}_p{pid}.pt"
+                    part_file = f"{self._backend._storage_dir}/{self._file_prefix}_p{i}.pt"
+
+                    fd = None
                     
                     # all boundary features required for target partition
                     for j in bndries[i]:
                         file_offset = j * row_bytes
-
-                        fd = None
 
                         if j == bndries[i][0]:
                             # first read --> open file
@@ -469,7 +469,7 @@ class HostBuffer:
                                 status=0, # new file
                                 fd=None,
                                 file_id=part_file,
-                                tensor=gpu_target[offset : offset+bytes_per_elem],
+                                tensor=gpu_target[offset : offset+1],
                                 file_offset=file_offset,
                                 stream=stream,
                             )
@@ -480,7 +480,7 @@ class HostBuffer:
                                 status=1, # file already open
                                 fd=fd,
                                 file_id=part_file,
-                                tensor=gpu_target[offset : offset+bytes_per_elem],
+                                tensor=gpu_target[offset : offset+1],
                                 file_offset=file_offset,
                                 stream=stream,
                             )
@@ -491,12 +491,12 @@ class HostBuffer:
                                 status=2, # last write --> close file
                                 fd=fd,
                                 file_id=part_file,
-                                tensor=gpu_target[offset : offset+bytes_per_elem],
+                                tensor=gpu_target[offset : offset+1],
                                 file_offset=file_offset,
                                 stream=stream,
                             )
 
-                        offset += bytes_per_elem
+                        offset += 1
 
                     
 

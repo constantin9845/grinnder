@@ -92,7 +92,7 @@ class StorageBackend:
         fd,
         file_id: str,
         tensor: Tensor,
-        file_offset,
+        file_offset: int,
         stream: Optional[torch.cuda.Stream] = None,
     ) -> None:
         """Read from NVMe directly into GPU tensor via GDS."""
@@ -108,7 +108,7 @@ class StorageBackend:
         
         elif status == 1:
             fd.read(tensor, file_offset=file_offset)
-            return None
+            return fd
 
         else:
             fd.read(tensor, file_offset=file_offset)
