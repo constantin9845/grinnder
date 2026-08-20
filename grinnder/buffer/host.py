@@ -466,8 +466,7 @@ class HostBuffer:
                         if j == bndries[i][0]:
                             # first read --> open file
                             fd = self._backend.gpu_read(
-                                True, # open new file
-                                False, # close file
+                                0, # new file
                                 None,
                                 file_id=part_file,
                                 tensor=gpu_target[offset : offset+bytes_per_elem],
@@ -478,8 +477,7 @@ class HostBuffer:
                         elif j != bndries[i][-1]:
                             # file already open
                             fd = self._backend.gpu_read(
-                                False, # open new file
-                                False, # close file
+                                1, # file already open
                                 fd,
                                 file_id=part_file,
                                 tensor=gpu_target[offset : offset+bytes_per_elem],
@@ -490,8 +488,7 @@ class HostBuffer:
                         else:
                             # last read --> close file and record timestamps
                             fd = self._backend.gpu_read(
-                                False, # open new file
-                                True, # close file
+                                2, # last write --> close file
                                 fd,
                                 file_id=part_file,
                                 tensor=gpu_target[offset : offset+bytes_per_elem],
