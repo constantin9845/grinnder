@@ -361,6 +361,9 @@ class HostBuffer:
                         continue
                     selected = self._tensors[i].index_select(0, bndries[i])
                     print(bndries[i])
+                    print(min(bndries[i]))
+                    print(max(bndries[i]))
+                    print(self._tensors[i].size(0))
                     print(selected)
                     print(pid)
                     print("************")
