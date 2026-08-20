@@ -441,9 +441,8 @@ class HostBuffer:
                 
                 offset = num_nodes[pid]
                 self._backend.gpu_read(
-                    True, # file open
-                    True, # file close
-                    None,
+                    status=3, # read whole file and close
+                    fd=None,
                     file_id=f"{self._backend._storage_dir}/{self._file_prefix}_p{pid}.pt",
                     tensor=gpu_target[:offset],
                     file_offset=0,

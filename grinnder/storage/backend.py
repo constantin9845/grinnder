@@ -109,8 +109,18 @@ class StorageBackend:
         elif status == 1:
             fd.read(tensor, file_offset=file_offset)
             return fd
+        
+        elif status == 2:
+            fd.read(tensor, file_offset=file_offset)
+            fd.close()
+            stat.load_GDS_timestamp()
+            return None
 
         else:
+            assert tensor.is_cuda, "gpu_read requires a CUDA tensor"
+            assert tensor.is_contiguous(), "gpu_read requires contiguous tensor"
+
+            fd = self._kvikio.CuFile(file_id, "r")
             fd.read(tensor, file_offset=file_offset)
             fd.close()
             stat.load_GDS_timestamp()
