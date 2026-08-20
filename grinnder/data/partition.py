@@ -628,7 +628,7 @@ def build_partitioned_graph_metis(
     ]
     boundaries_list_final = [
         boundaries for boundaries in boundaries_list if boundaries is not None
-    ]
+    ]   
 
     # Optionally store adjacencies on NVMe
     if backend is not None:

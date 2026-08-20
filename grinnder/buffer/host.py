@@ -449,15 +449,76 @@ class HostBuffer:
                     stream=stream,
                 )
 
+                print("Target partition loaded")
+
 
                 for i in range(self.num_parts):
                     if i == pid or bndries[i].numel() == 0:
                         continue
 
                     part_file = f"{self._backend._storage_dir}/{self._file_prefix}_p{i}.pt"
+                    original_boundaries = bndries[i]
+
+                    sorted_boundaries, perm = torch.sort(original_boundaries)
+
+                    gaps = sorted_boundaries[1:] - sorted_boundaries[:-1]
+                    split_points = (torch.where(gaps > 1)[0] +1).tolist()
+
+                    row_chunks = torch.tensor_split(sorted_boundaries, split_points)
+                    perm_chunks = torch.tensor_split(perm, split_points)
 
                     fd = None
+                    total_chunks = len(row_chunks)
+
+                    for chunk_idx, (chunk, orig_perm) in enumerate(zip(row_chunks, perm_chunks)):
+                        start_row = chunk[0].item()
+                        num_rows = chunk.numel()
+                        file_offset = start_row * row_bytes
+
+                        if total_chunks == 1:
+                            status = 3 # only write : open and close
+                        elif chunk_idx == 0:
+                            status = 0 # first write --> open file
+                        elif chunk_idx == total_chunks - 1:
+                            status = 2 # last write --> close file
+                        else:
+                            status = 1 # intermediate write
+
+                        if num_rows == 1:
+                            dest_idx = offset + orig_perm[0].item()
+                            fd = self._backend.gpu_read(
+                                status=status, 
+                                fd=fd,
+                                file_id=part_file,
+                                tensor=gpu_target[dest_idx : dest_idx+1],
+                                file_offset=file_offset,
+                                stream=stream,
+                            )
+
+                        else:
+                            # buffer for mutiple contiguous rows
+                            staging_buf = torch.empty(
+                                (num_rows, feature_dim),
+                                dtype=gpu_target.dtype,
+                                device=gpu_target.device,
+                            )
+
+                            fd = self._backend.gpu_read(
+                                status=status, 
+                                fd=fd,
+                                file_id=part_file,
+                                tensor=staging_buf,
+                                file_offset=file_offset,
+                                stream=stream,
+                            )
+
+                            dst_indices = (offset + orig_perm).to(gpu_target.device)
+                            gpu_target[dst_indices] = staging_buf
+                        
+                    offset += original_boundaries.numel()
+
                     
+                    '''
                     # all boundary features required for target partition
                     for j in bndries[i]:
                         file_offset = j * row_bytes
@@ -496,7 +557,7 @@ class HostBuffer:
                             )
 
                         offset += 1
-
+                        '''
                     
 
         tn = time.perf_counter_ns()
@@ -504,7 +565,7 @@ class HostBuffer:
 
         bt = gpu_target.numel() * bytes_per_elem
         gb = round(bt / bytes_to_gb, 3)
-        print(f"\tPartition {pid} loaded {gb} GB from NVMe via GDS")
+        print(f"\Target partition {pid} (including boundary features) loaded {gb} GB from NVMe via GDS")
     
     # ------------------------------------------------------------------
     # Scatter: one GPU tensor -> multiple host partitions (with accumulation)
