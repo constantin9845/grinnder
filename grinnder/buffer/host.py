@@ -587,7 +587,6 @@ class HostBuffer:
 
         bt = gpu_target.numel() * bytes_per_elem
         gb = round(bt / bytes_to_gb, 3)
-        print(f"\Target partition {pid} (including boundary features) loaded {gb} GB from NVMe via GDS")
 
     # ------------------------------------------------------------------
     # Scatter: one GPU tensor -> multiple host partitions (with accumulation)

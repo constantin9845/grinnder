@@ -114,6 +114,8 @@ void gather_partitions_gds(
 
       cuFileReadAsync(cf_target, dst_data, &target_size, &target_file_offset, &target_buf_offset, &target_bytes_read, raw_stream);
 
+      printf("Target partition loaded");
+
       // 2. Read boundary partition chunks
       for (size_t i = 0; i < file_paths.size(); i++) {
         if ((int)i == pid)
@@ -167,6 +169,8 @@ void gather_partitions_gds(
         cuFileHandleDeregister(cf_handle);
         close(fd);
       }
+
+      printf("Boundary partitions loaded");
 
       AT_ASSERTM(offset == dst.size(0),
                  "Gather GDS: copied size mismatch with destination");
