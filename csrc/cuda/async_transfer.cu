@@ -57,71 +57,6 @@ void h2d_copy_async(torch::Tensor src, torch::Tensor dst) {
   });
 }
 
-/*
-void gather_partitions(int pid, std::vector<torch::Tensor> srcs,
-                       torch::Tensor dst,
-                       std::vector<torch::Tensor> boundaries) {
-  AT_ASSERTM(dst.is_cuda(), "Destination must be a CUDA tensor");
-  for (auto &src : srcs) {
-    AT_ASSERTM(!src.is_cuda(), "Sources must be CPU tensors");
-  }
-  AT_ASSERTM(dst.is_contiguous(), "Destination must be contiguous");
-
-  auto stream = at::cuda::getCurrentCUDAStream(dst.get_device());
-  AT_ASSERTM(stream != at::cuda::getDefaultCUDAStream(dst.get_device()),
-             "Async gather requires a non-default CUDA stream");
-
-  AT_DISPATCH_ALL_TYPES_AND(at::ScalarType::Half,dst.scalar_type(), "gather_partitions", [&] {
-    getH2DPool().run([=] {
-      auto dst_data = dst.data_ptr<scalar_t>();
-      int64_t feat_dim = dst.numel() / dst.size(0);
-
-      // Keep index_select results alive until CUDA copies complete.
-      // Without this, selected tensors would be freed when they go
-      // out of scope in the loop, but cudaMemcpyAsync DMA may still
-      // be reading from their memory (use-after-free).
-      std::vector<torch::Tensor> keep_alive;
-
-      // First: copy intra-partition (contiguous block)
-      int64_t offset = srcs[pid].size(0);
-      auto src_data = srcs[pid].data_ptr<scalar_t>();
-      cudaMemcpyAsync(dst_data, src_data,
-                      offset * feat_dim * sizeof(scalar_t),
-                      cudaMemcpyHostToDevice, stream);
-
-      // Then: copy boundary nodes from each other partition via index_select
-      for (size_t i = 0; i < srcs.size(); i++) {
-        if ((int)i == pid)
-          continue;
-        auto bndry = boundaries[i];
-        if (bndry.numel() == 0)
-          continue;
-
-        torch::Tensor selected = torch::index_select(srcs[i], 0, bndry);
-        AT_ASSERTM(!selected.is_cuda(), "Selected must be CPU");
-        keep_alive.push_back(selected);
-
-        auto sel_data = selected.data_ptr<scalar_t>();
-        int64_t sel_size = selected.size(0);
-        cudaMemcpyAsync(dst_data + (offset * feat_dim), sel_data,
-                        sel_size * feat_dim * sizeof(scalar_t),
-                        cudaMemcpyHostToDevice, stream);
-        offset += sel_size;
-      }
-
-      AT_ASSERTM(offset == dst.size(0),
-                  "Gather: copied size mismatch with destination");
-
-      // Ensure all DMA transfers complete before selected tensors
-      // (in keep_alive) are freed. This runs in the worker thread,
-      // so main thread stays async.
-      cudaStreamSynchronize(stream);
-    });
-  });
-}
-*/
-
-
 #include <torch/extension.h>
 #include <c10/cuda/CUDAStream.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -170,8 +105,12 @@ void gather_partitions_gds(
       CUfileError_t status = cuFileHandleRegister(&cf_target, &descr_target);
       AT_ASSERTM(status.err == CU_FILE_SUCCESS, "GDS Gather: cuFileHandleRegister failed for target file");
 
-      // read whole target partition file into destination tensor slice
-      cuFileReadAsync(cf_target, dst_data, offset * row_bytes, 0, 0, raw_stream);
+      // Set target file variables & issue cuFileReadAsync
+      ssize_t target_size = static_cast<ssize_t>(offset * row_bytes);
+      off_t target_file_offset = 0;
+      off_t target_buf_offset = 0;
+
+      cuFileReadAsync(cf_target, dst_data, &target_size, &target_file_offset, &target_buf_offset, raw_stream);
 
       // 2. Read boundary partition chunks
       for (size_t i = 0; i < file_paths.size(); i++) {
@@ -209,13 +148,12 @@ void gather_partitions_gds(
           }
 
           int64_t chunk_len = end - start;
-          int64_t file_offset_bytes = idx_ptr[start] * row_bytes;
-          int64_t read_bytes = chunk_len * row_bytes;
-
-          uint8_t* write_ptr = dst_data + (offset * row_bytes);
+          ssize_t read_bytes = static_cast<ssize_t>(chunk_len * row_bytes);
+          off_t file_offset_bytes = static_cast<off_t>(idx_ptr[start] * row_bytes);
+          off_t buf_offset_bytes = static_cast<off_t>(offset * row_bytes);
 
           // async GDS direct read directly to GPU memory
-          cuFileReadAsync(cf_handle, write_ptr, read_bytes, file_offset_bytes, 0, raw_stream);
+          cuFileReadAsync(cf_handle, dst_data, &read_bytes, &file_offset_bytes, &buf_offset_bytes, raw_stream);
 
           offset += chunk_len;
           idx = end;
@@ -237,7 +175,6 @@ void gather_partitions_gds(
     });
   });
 }
-
 
 void scatter_partitions(int pid, torch::Tensor src,
                         std::vector<torch::Tensor> dsts,
