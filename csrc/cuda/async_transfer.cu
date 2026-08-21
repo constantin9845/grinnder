@@ -57,6 +57,7 @@ void h2d_copy_async(torch::Tensor src, torch::Tensor dst) {
   });
 }
 
+
 #include <torch/extension.h>
 #include <c10/cuda/CUDAStream.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -105,12 +106,13 @@ void gather_partitions_gds(
       CUfileError_t status = cuFileHandleRegister(&cf_target, &descr_target);
       AT_ASSERTM(status.err == CU_FILE_SUCCESS, "GDS Gather: cuFileHandleRegister failed for target file");
 
-      // Set target file variables & issue cuFileReadAsync
-      ssize_t target_size = static_cast<ssize_t>(offset * row_bytes);
+      // Set variables matching cuFileReadAsync exact types
+      size_t target_size = static_cast<size_t>(offset * row_bytes);
       off_t target_file_offset = 0;
       off_t target_buf_offset = 0;
+      ssize_t target_bytes_read = 0;
 
-      cuFileReadAsync(cf_target, dst_data, &target_size, &target_file_offset, &target_buf_offset, raw_stream);
+      cuFileReadAsync(cf_target, dst_data, &target_size, &target_file_offset, &target_buf_offset, &target_bytes_read, raw_stream);
 
       // 2. Read boundary partition chunks
       for (size_t i = 0; i < file_paths.size(); i++) {
@@ -148,12 +150,13 @@ void gather_partitions_gds(
           }
 
           int64_t chunk_len = end - start;
-          ssize_t read_bytes = static_cast<ssize_t>(chunk_len * row_bytes);
+          size_t read_bytes = static_cast<size_t>(chunk_len * row_bytes);
           off_t file_offset_bytes = static_cast<off_t>(idx_ptr[start] * row_bytes);
           off_t buf_offset_bytes = static_cast<off_t>(offset * row_bytes);
+          ssize_t bytes_read = 0;
 
           // async GDS direct read directly to GPU memory
-          cuFileReadAsync(cf_handle, dst_data, &read_bytes, &file_offset_bytes, &buf_offset_bytes, raw_stream);
+          cuFileReadAsync(cf_handle, dst_data, &read_bytes, &file_offset_bytes, &buf_offset_bytes, &bytes_read, raw_stream);
 
           offset += chunk_len;
           idx = end;
@@ -175,6 +178,7 @@ void gather_partitions_gds(
     });
   });
 }
+
 
 void scatter_partitions(int pid, torch::Tensor src,
                         std::vector<torch::Tensor> dsts,
