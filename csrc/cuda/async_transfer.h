@@ -10,7 +10,7 @@ void h2d_copy_async(torch::Tensor src, torch::Tensor dst);
 
 // Gather: multiple host partitions -> one GPU tensor (via H2D thread pool)
 // Layout: [intra(srcs[pid]) | boundary_from_p0 | boundary_from_p1 | ...]
-void gather_partitions(int pid, std::vector<torch::Tensor> srcs,
+void gather_partitions_gds(int pid, std::vector<torch::Tensor> srcs,
                        torch::Tensor dst,
                        std::vector<torch::Tensor> boundaries);
 
