@@ -45,7 +45,7 @@ def get_extensions():
 
     extra_cxx_flags = ["-O3", "-std=c++17"]
     extra_nvcc_flags = ["-O3"]
-    extra_link_flags = []
+    extra_link_flags = ["-lcufile"]
     define_macros = []
 
     # Use bundled liburing from third_party/ (built from source, version 2.8)
