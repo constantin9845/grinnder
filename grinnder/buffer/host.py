@@ -401,10 +401,16 @@ class HostBuffer:
             stream: CUDA stream for non-blocking asynchronous execution.
         """
         import os
+
+        file_paths = [
+            f"{self._backend._storage_dir}/{self._file_prefix}_p{i}.pt"
+            for i in range(self.num_parts)
+        ]
+
         num_nodes = []
-        for i in range(self.num_parts):
-            f_bytes = os.path.getsize(f"{self._backend._storage_dir}/{self._file_prefix}_p{i}.pt")
-            total_features = f_bytes // gpu_target.element_size()
+        for path in file_paths:
+            f_bytes = os.path.getsize(path)
+            total_features = f_bytes // (gpu_target.size(1) * gpu_target.element_size())
             num_nodes.append(total_features)
 
         assert gpu_target.is_cuda, "gpu_target must be a CUDA tensor"
@@ -427,15 +433,14 @@ class HostBuffer:
         # Record gather size statistics
         target_partition_nodes = num_nodes[pid]
         boundary_nodes = sum(b.numel() for b in bndries)
-
         target_partition_gb = (target_partition_nodes * row_bytes) / bytes_to_gb
         boundary_gb = (boundary_nodes * row_bytes) / bytes_to_gb
         stat.add_actual_size(target_partition_gb, target_partition_gb + boundary_gb)
 
         t0 = time.perf_counter_ns()
         with torch.cuda.stream(stream):
-            if self._ops is not None and 2 == 3: 
-                self._ops.gather_partitions(pid, self._cufiles, gpu_target, bndries)
+            if self._ops is not None: 
+                self._ops.gather_partitions(pid, file_paths, num_nodes, gpu_target, bndries)
             else:
                 # Load full target partition --> whole file
                 
