@@ -855,7 +855,6 @@ class Trainer:
         print(f"LOSS : load partition [{first_pid}] Direct GDS [NVMe --> GPU]")
         self.device_features[-1].async_gather_direct(
             "loss",
-            self.graph.partition_sizes,
             pid=first_pid,
             gpu_target=act_first,
             boundaries=self.graph.boundaries[first_pid],
@@ -882,7 +881,6 @@ class Trainer:
                 print(f"LOSS : load partition [{next_pid}] Direct GDS [NVMe --> GPU]")
                 self.device_features[-1].async_gather_direct(
                     "loss",
-                    self.graph.partition_sizes,
                     pid=next_pid,
                     gpu_target=act_next,
                     boundaries=self.graph.boundaries[next_pid],
@@ -934,7 +932,6 @@ class Trainer:
                 print(f"LOSS : load partition [{next_pid}] Direct GDS [NVMe --> GPU]")
                 self.device_features[-1].async_gather_direct(
                     "loss",
-                    self.graph.partition_sizes,
                     pid=next_pid,
                     gpu_target=act_next,
                     boundaries=self.graph.boundaries[next_pid],
