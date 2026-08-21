@@ -515,7 +515,7 @@ class Trainer:
             "forward",
             self.graph.partition_sizes,
             pid=pids[0],
-            gpu_target=self.device_features[layer_id][pids[0]],
+            host_buffer=self.host_features[layer_id],
             boundaries=self.graph.boundaries[pids[0]],
             stream=self.streams.h2d[0],
         )
@@ -542,7 +542,7 @@ class Trainer:
                         "forward",
                         self.graph.partition_sizes,
                         pid=next_pid,
-                        gpu_target=self.device_features[layer_id][next_pid],
+                        host_buffer=self.host_features[layer_id],
                         boundaries=self.graph.boundaries[next_pid],
                         stream=self.streams.h2d[next_pool],
                     )
@@ -639,7 +639,7 @@ class Trainer:
                         "forward",
                         self.graph.partition_sizes,
                         pid=next_pid,
-                        gpu_target=self.device_features[layer_id][next_pid],
+                        host_buffer=self.host_features[layer_id],
                         boundaries=self.graph.boundaries[next_pid],
                         stream=self.streams.h2d[0],
                     )
