@@ -12,7 +12,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("d2h_synchronize", &d2h_synchronize, "Wait for D2H thread pool");
 
   // Partition gather/scatter
-  m.def("gather_partitions", &gather_partitions,
+  m.def("gather_partitions_gds", &gather_partitions_gds,
         "Gather features from host partitions to GPU tensor");
   m.def("scatter_partitions", &scatter_partitions,
         "Scatter GPU gradient to host partitions with accumulation");
