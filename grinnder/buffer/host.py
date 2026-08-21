@@ -382,7 +382,6 @@ class HostBuffer:
     def async_gather_direct(
         self,
         phase,
-        num_nodes: List[int],
         pid: int,
         gpu_target: Tensor,
         boundaries: List[Optional[Tensor]],
