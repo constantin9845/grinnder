@@ -839,7 +839,7 @@ class Trainer:
             return
 
         cache_layer_id = layer_id
-        self._prepare_cache_layer(cache_layer_id)
+        #self._prepare_cache_layer(cache_layer_id)
 
         if layer_id > 0 and self.host_gradients[layer_id] is not None:
             self.host_gradients[layer_id].initialize_zeros(
@@ -848,8 +848,8 @@ class Trainer:
 
         # Prologue: re-gather features for first partition's checkpoint recompute
         if self.config.mode == "grinnder" and layer_id > 0:
-            self._prepare_cache_partition(cache_layer_id, pids[0], "backward")
-            self.device_features[layer_id].async_gather(
+            #self._prepare_cache_partition(cache_layer_id, pids[0], "backward")
+            self.device_features[layer_id].async_gather_direct(
                 "backward",
                 pid=pids[0],
                 host_buffer=self.host_features[layer_id],
@@ -877,8 +877,8 @@ class Trainer:
             ):
                 next_pid = pids[i + 1]
                 next_pool = (i + 1) % pool_size
-                self._prepare_cache_partition(cache_layer_id, next_pid, "backward")
-                self.device_features[layer_id].async_gather(
+                #self._prepare_cache_partition(cache_layer_id, next_pid, "backward")
+                self.device_features[layer_id].async_gather_direct(
                     "backward",
                     pid=next_pid,
                     host_buffer=self.host_features[layer_id],
@@ -938,8 +938,8 @@ class Trainer:
                     and layer_id > 0
                 ):
                     next_pid = pids[i + 1]
-                    self._prepare_cache_partition(cache_layer_id, next_pid, "backward")
-                    self.device_features[layer_id].async_gather(
+                    #self._prepare_cache_partition(cache_layer_id, next_pid, "backward")
+                    self.device_features[layer_id].async_gather_direct(
                         "backward",
                         pid=next_pid,
                         host_buffer=self.host_features[layer_id],
@@ -1018,8 +1018,8 @@ class Trainer:
 
         # Prologue: prefetch features for regathering + upload gradient for first pid
         if self.config.mode == "grinnder":
-            self._prepare_cache_partition(layer_id, first_pid, "backward")
-            self.device_features[layer_id].async_gather(
+            #self._prepare_cache_partition(layer_id, first_pid, "backward")
+            self.device_features[layer_id].async_gather_direct(
                 "backward",
                 pid=first_pid,
                 host_buffer=self.host_features[layer_id],
@@ -1063,8 +1063,8 @@ class Trainer:
                     next_pool = (i + 1) % pool_size
 
                     if self.config.mode == "grinnder" and prefetch_next_feature:
-                        self._prepare_cache_partition(layer_id, next_pid, "backward")
-                        self.device_features[layer_id].async_gather(
+                        #self._prepare_cache_partition(layer_id, next_pid, "backward")
+                        self.device_features[layer_id].async_gather_direct(
                             "backward",
                             pid=next_pid,
                             host_buffer=self.host_features[layer_id],
@@ -1153,8 +1153,8 @@ class Trainer:
                             self.device_features[layer_id].release(pid)
                         next_pid = pids[i + 1]
                         next_pool = (i + 1) % pool_size
-                        self._prepare_cache_partition(layer_id, next_pid, "backward")
-                        self.device_features[layer_id].async_gather(
+                        #self._prepare_cache_partition(layer_id, next_pid, "backward")
+                        self.device_features[layer_id].async_gather_direct(
                             "backward",
                             pid=next_pid,
                             host_buffer=self.host_features[layer_id],
@@ -1210,8 +1210,8 @@ class Trainer:
                     next_pid = pids[i + 1]
 
                     if self.config.mode == "grinnder":
-                        self._prepare_cache_partition(layer_id, next_pid, "backward")
-                        self.device_features[layer_id].async_gather(
+                        #self._prepare_cache_partition(layer_id, next_pid, "backward")
+                        self.device_features[layer_id].async_gather_direct(
                             "backward",
                             pid=next_pid,
                             host_buffer=self.host_features[layer_id],
