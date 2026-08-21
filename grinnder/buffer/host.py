@@ -441,6 +441,8 @@ class HostBuffer:
             if self._ops is not None: 
                 print("Async loading")
                 self._ops.gather_partitions_gds(pid, file_paths, num_nodes, gpu_target, bndries)
+
+            # python fallback --> Much slower performance
             else:
                 # Load full target partition --> whole file
                 
@@ -541,50 +543,8 @@ class HostBuffer:
                 for p_stream in part_streams:
                     stream.wait_stream(p_stream)
 
-                    '''
-                    # all boundary features required for target partition
-                    for j in bndries[i]:
-                        file_offset = j * row_bytes
-
-                        if j == bndries[i][0]:
-                            # first read --> open file
-                            fd = self._backend.gpu_read(
-                                status=0, # new file
-                                fd=None,
-                                file_id=part_file,
-                                tensor=gpu_target[offset : offset+1],
-                                file_offset=file_offset,
-                                stream=stream,
-                            )
-
-                        elif j != bndries[i][-1]:
-                            # file already open
-                            fd = self._backend.gpu_read(
-                                status=1, # file already open
-                                fd=fd,
-                                file_id=part_file,
-                                tensor=gpu_target[offset : offset+1],
-                                file_offset=file_offset,
-                                stream=stream,
-                            )
-
-                        else:
-                            # last read --> close file and record timestamps
-                            fd = self._backend.gpu_read(
-                                status=2, # last write --> close file
-                                fd=fd,
-                                file_id=part_file,
-                                tensor=gpu_target[offset : offset+1],
-                                file_offset=file_offset,
-                                stream=stream,
-                            )
-
-                        offset += 1
-                    print(f"Boundary partition {i} data loaded")
-                    '''
-
         tn = time.perf_counter_ns()
-        stat.load_GPU_timestamp(phase, "copy", t0, tn)
+        stat.load_GPU_timestamp(phase, "gather", t0, tn)
 
         bt = gpu_target.numel() * bytes_per_elem
         gb = round(bt / bytes_to_gb, 3)

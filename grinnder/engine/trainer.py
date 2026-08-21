@@ -681,7 +681,7 @@ class Trainer:
     # ==================================================================
     # Loss Computation
     # ==================================================================
-
+    '''
     def _compute_losses(
         self, criterion: torch.nn.Module
     ) -> tuple[List[Tensor], Dict[str, float]]:
@@ -806,6 +806,139 @@ class Trainer:
                     next_pid,
                     act_next,
                     self.streams.h2d[0],
+                )
+
+        self._pid_to_loss_idx = pid_to_loss_idx
+
+        metrics = {
+            "loss": total_loss / max(n_train, 1),
+            "val_acc": n_val_correct / max(n_val, 1),
+            "test_acc": n_test_correct / max(n_test, 1),
+            "_n_train": n_train,
+        }
+        return losses, metrics
+    '''
+
+    def _compute_losses(
+        self, criterion: torch.nn.Module
+    ) -> tuple[List[Tensor], Dict[str, float]]:
+        """Compute per-partition losses with Direct GDS activation loading.
+
+        Returns:
+            losses: List of (pid, loss) tuples for assigned partitions.
+            metrics: dict with loss, val_acc, test_acc.
+        """
+        pool_size = self.config.pool_size
+        pids = self._my_pids
+        losses: List[Tensor] = []
+        pid_to_loss_idx: Dict[int, int] = {}  # pid -> index in losses list
+        total_loss = 0.0
+        n_train = 0
+        n_val_correct = 0
+        n_val = 0
+        n_test_correct = 0
+        n_test = 0
+
+        last_layer = self.model.num_layers - 1
+
+        if not pids:
+            return losses, {"loss": 0.0, "val_acc": 0.0, "test_acc": 0.0}
+
+        # Direct GDS: Prefetch first assigned partition's activations straight to VRAM
+        first_pid = pids[0]
+        act_first = self.activations[last_layer][first_pid]
+        if act_first is not None:
+            act_first.untyped_storage().resize_(
+                act_first.numel() * act_first.element_size()
+            )
+
+        print(f"LOSS : load partition [{first_pid}] Direct GDS [NVMe --> GPU]")
+        self.device_features[-1].async_gather_direct(
+            "loss",
+            self.graph.partition_sizes,
+            pid=first_pid,
+            gpu_target=act_first,
+            boundaries=self.graph.boundaries[first_pid],
+            stream=self.streams.h2d[0],
+        )
+
+        for i, pid in enumerate(pids):
+            pool_idx = i % pool_size
+
+            # Synchronize GDS stream with PyTorch's execution stream
+            self.streams.h2d[pool_idx].synchronize()
+            torch.cuda.current_stream().wait_stream(self.streams.h2d[pool_idx])
+
+            # Prefetch next partition directly via GDS (Double-buffering)
+            if i < len(pids) - 1 and pool_size > 1:
+                next_pid = pids[i + 1]
+                next_pool = (i + 1) % pool_size
+                act_next = self.activations[last_layer][next_pid]
+                if act_next is not None:
+                    act_next.untyped_storage().resize_(
+                        act_next.numel() * act_next.element_size()
+                    )
+
+                print(f"LOSS : load partition [{next_pid}] Direct GDS [NVMe --> GPU]")
+                self.device_features[-1].async_gather_direct(
+                    "loss",
+                    self.graph.partition_sizes,
+                    pid=next_pid,
+                    gpu_target=act_next,
+                    boundaries=self.graph.boundaries[next_pid],
+                    stream=self.streams.h2d[next_pool],
+                )
+
+            # Get masks and labels
+            y = self.graph.partition_labels(pid).to(self.device)
+            train_mask = self.graph.partition_train_mask(pid)
+            val_mask = self.graph.partition_val_mask(pid)
+            test_mask = self.graph.partition_test_mask(pid)
+            out = self.activations[last_layer][pid]
+
+            # Compute loss with sum reduction
+            n_part_train = train_mask.sum().item()
+            if n_part_train > 0:
+                loss = torch.nn.functional.cross_entropy(
+                    out[train_mask], y[train_mask], reduction="sum"
+                )
+                total_loss += loss.item()
+                n_train += n_part_train
+            else:
+                loss = out.sum() * 0.0
+
+            pid_to_loss_idx[pid] = len(losses)
+            losses.append(loss)
+
+            # Compute metrics
+            with torch.no_grad():
+                if val_mask.sum() > 0:
+                    n_val_correct += compute_micro_f1(out, y, val_mask) * val_mask.sum().item()
+                    n_val += val_mask.sum().item()
+                if test_mask.sum() > 0:
+                    n_test_correct += compute_micro_f1(out, y, test_mask) * test_mask.sum().item()
+                    n_test += test_mask.sum().item()
+
+            # Free GPU activation tensor storage
+            self.activations[last_layer][pid].untyped_storage().resize_(0)
+
+            # Sequential single-buffer fallback (pool_size == 1)
+            if i < len(pids) - 1 and pool_size == 1:
+                next_pid = pids[i + 1]
+                act_next = self.activations[last_layer][next_pid]
+                if act_next is not None:
+                    act_next.untyped_storage().resize_(
+                        act_next.numel() * act_next.element_size()
+                    )
+
+                print(f"LOSS : load partition [{next_pid}] Direct GDS [NVMe --> GPU]")
+                self.device_features[-1].async_gather_direct(
+                    "loss",
+                    self.graph.partition_sizes,
+                    pid=next_pid,
+                    gpu_target=act_next,
+                    boundaries=self.graph.boundaries[next_pid],
+                    stream=self.streams.h2d[0],
                 )
 
         self._pid_to_loss_idx = pid_to_loss_idx

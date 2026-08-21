@@ -494,7 +494,6 @@ class Stat:
 
         print("Successfully written to timesteps_output.py!")
     
-    
     def forward_timeline(self, data):
         """Expects data = [ssd_cpu, cpu_gpu_gather, compute, gds_writes]"""
         import matplotlib.pyplot as plt
