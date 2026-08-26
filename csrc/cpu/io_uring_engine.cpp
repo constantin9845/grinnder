@@ -86,12 +86,15 @@ public:
       }
     }
 
-
     std::cerr
-      << "WRITE: path=" << path
-      << " offset=" << file_offset
+      << "[IO_WRITE_SUBMIT]"
+      << " handle=" << handle
+      << " path=" << path
+      << " file_offset=" << file_offset
       << " nbytes=" << nbytes
+      << " nbytes_GiB=" << (double)nbytes / (1024.0 * 1024.0 * 1024.0)
       << std::endl;
+
     io_uring_prep_write(sqe, fd, buf, nbytes, file_offset);
     io_uring_sqe_set_data(sqe, reinterpret_cast<void *>(handle));
 
@@ -101,6 +104,14 @@ public:
     }
 
     int ret = io_uring_submit(&ring_);
+
+    std::cerr
+      << "[IO_WRITE_SUBMIT_RESULT]"
+      << " handle=" << handle
+      << " submit_ret=" << ret
+      << " requested_nbytes=" << nbytes
+      << std::endl;
+
     if (ret < 0) {
       std::lock_guard<std::mutex> lock(mutex_);
       close(fd);
@@ -114,10 +125,6 @@ public:
   void wait(int64_t handle) {
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      std::cerr
-        << "CQE: handle=" << h
-        << " res=" << cqe->res
-        << std::endl;
       if (completed_.count(handle)) {
         close_and_remove(handle);
         return;
@@ -133,16 +140,29 @@ public:
                                  std::to_string(-ret));
 
       int64_t h = reinterpret_cast<int64_t>(io_uring_cqe_get_data(cqe));
-      io_uring_cqe_seen(&ring_, cqe);
 
-      std::lock_guard<std::mutex> lock(mutex_);
-      if (h == handle) {
-        close_and_remove(h);
-        return;
-      }
-      completed_.insert(h);
-    }
-  }
+      int result = cqe->res;
+
+      std::cerr
+          << "[IO_CQE]"
+          << " handle=" << h
+          << " result=" << result;
+
+      if (result < 0)
+        std::cerr << " errno=" << -result;
+
+      std::cerr << std::endl;
+
+            io_uring_cqe_seen(&ring_, cqe);
+
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (h == handle) {
+              close_and_remove(h);
+              return;
+            }
+            completed_.insert(h);
+          }
+        }
 
   void wait_all() {
     while (true) {
