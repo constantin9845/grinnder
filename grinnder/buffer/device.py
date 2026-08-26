@@ -179,7 +179,7 @@ class DeviceBuffer:
 
         t0 = time.perf_counter_ns()
         with torch.cuda.stream(stream):
-            if self._ops is not None: 
+            if self._ops is not None and 2 == 3 : 
                 print("Async loading")
                 self._ops.gather_partitions_gds(pid, file_paths, num_nodes, gpu_target, bndries)
                 assert gpu_target.abs().sum().item() > 0, "GDS Read Failed: Destination GPU tensor is entirely zero!"
