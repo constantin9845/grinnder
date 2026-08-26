@@ -136,6 +136,8 @@ class DeviceBuffer:
 
         import os
 
+        gpu_target = self._tensors[pid]
+
         file_prefix = f"feat_l0_"
 
         file_paths = [
