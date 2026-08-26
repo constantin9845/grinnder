@@ -394,9 +394,6 @@ class Trainer:
         stat.backward_done()
         self.cache.cache_tracker_print()
 
-        stat.print_timeline()
-        exit(1)
-
         # Scale gradients by 1/total_train_nodes for mean reduction
         # (equivalent to CrossEntropyLoss(reduction='mean') over all nodes)
         n_total_train = metrics.get("_n_train", 1)
