@@ -117,12 +117,12 @@ class StorageBackend:
         assert not tensor.is_cuda, "host_write requires a CPU tensor"
         assert tensor.is_contiguous(), "host_write requires contiguous tensor"
 
-        buffer = tensor.numpy().tobytes() if hasattr(tensor, "numpy") else bytes(tensor.data_ptr())
+        #buffer = tensor.numpy().tobytes() if hasattr(tensor, "numpy") else bytes(tensor.data_ptr())
 
-        with open(path, "wb") as f:
-            print("python write")
-            f.write(buffer)
-        return 1
+        #with open(path, "wb") as f:
+        #    print("python write")
+        #    f.write(buffer)
+        #return 1
 
         return self._io_engine.submit_write(
             path, tensor, 0, tensor.numel() * tensor.element_size()
