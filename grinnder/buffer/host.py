@@ -465,10 +465,63 @@ class HostBuffer:
                         continue
 
                     part_file = file_paths[i]
-                    p_stream = torch.cuda.Stream(device=gpu_target.device)
-                    p_stream.wait_stream(stream)
-                    part_streams.append(p_stream)
+                    #p_stream = torch.cuda.Stream(device=gpu_target.device)
+                    #p_stream.wait_stream(stream)
+                    #part_streams.append(p_stream)
 
+                    indices = bndries[i]
+                    num_rows = indices.size(0)
+
+                    fd = None
+                    for k in range(num_rows):
+                        node_idx = indices[k].item()
+                        file_offset = node_idx * row_bytes
+                        dest_row = gpu_target[offset : offset + 1]
+
+                        if k == 0 and num_rows == 1:
+                            # Single row total: open, read 1 row, close
+                            fd = self._backend.gpu_read(
+                                status=3,
+                                fd=None,
+                                file_id=part_file,
+                                tensor=dest_row,
+                                file_offset=file_offset,
+                                stream=stream,
+                            )
+                        elif k == 0:
+                            # First row: open handle + read row 1
+                            fd = self._backend.gpu_read(
+                                status=0,
+                                fd=None,
+                                file_id=part_file,
+                                tensor=dest_row,
+                                file_offset=file_offset,
+                                stream=stream,
+                            )
+                        elif k != num_rows - 1:
+                            # Middle rows: read row using persistent fd handle
+                            fd = self._backend.gpu_read(
+                                status=1,
+                                fd=fd,
+                                file_id=part_file,
+                                tensor=dest_row,
+                                file_offset=file_offset,
+                                stream=stream,
+                            )
+                        else:
+                            # Last row: read row + close handle
+                            fd = self._backend.gpu_read(
+                                status=2,
+                                fd=fd,
+                                file_id=part_file,
+                                tensor=dest_row,
+                                file_offset=file_offset,
+                                stream=stream,
+                            )
+
+                        offset += 1
+
+                    '''
                     index = 0
                     chunks = []
                     while index < len(bndries[i]):
@@ -550,6 +603,7 @@ class HostBuffer:
 
         bt = gpu_target.numel() * bytes_per_elem
         gb = round(bt / bytes_to_gb, 3)
+        '''
 
     # ------------------------------------------------------------------
     # Scatter: one GPU tensor -> multiple host partitions (with accumulation)
