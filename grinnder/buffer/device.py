@@ -136,8 +136,10 @@ class DeviceBuffer:
 
         import os
 
+        file_prefix = f"feat_l0_"
+
         file_paths = [
-            f"/mnt/nvme/{self._file_prefix}_p{i}.pt"
+            f"/mnt/nvme/feat_l0_p{i}.pt"
             for i in range(self.num_parts)
         ]
 
