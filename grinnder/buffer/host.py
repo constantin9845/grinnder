@@ -406,11 +406,6 @@ class HostBuffer:
             for i in range(self.num_parts)
         ]
 
-        num_nodes = [
-        os.path.getsize(path) // row_bytes if os.path.exists(path) else 0
-        for path in file_paths
-    ]
-
         assert gpu_target.is_cuda, "gpu_target must be a CUDA tensor"
 
         bndries = []
@@ -427,6 +422,11 @@ class HostBuffer:
         bytes_per_elem = gpu_target.element_size()
         row_bytes = feature_dim * bytes_per_elem
         bytes_to_gb = 1024**3
+
+        num_nodes = [
+            os.path.getsize(path) // row_bytes if os.path.exists(path) else 0
+            for path in file_paths
+        ]
 
         # Record gather size statistics
         target_partition_nodes = num_nodes[pid]
