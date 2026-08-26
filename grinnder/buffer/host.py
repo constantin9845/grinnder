@@ -429,6 +429,7 @@ class HostBuffer:
         feature_dim = gpu_target.size(1)
         bytes_per_elem = gpu_target.element_size()
         row_bytes = feature_dim * bytes_per_elem
+        target_partition_nodes = self._tensors[pid].size(0)
         bytes_to_gb = 1024**3
 
         # Determine number of rows in each file.
