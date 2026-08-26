@@ -406,11 +406,10 @@ class HostBuffer:
             for i in range(self.num_parts)
         ]
 
-        num_nodes = []
-        for path in file_paths:
-            f_bytes = os.path.getsize(path)
-            total_features = f_bytes // (gpu_target.size(1) * gpu_target.element_size())
-            num_nodes.append(total_features)
+        num_nodes = [
+        os.path.getsize(path) // row_bytes if os.path.exists(path) else 0
+        for path in file_paths
+    ]
 
         assert gpu_target.is_cuda, "gpu_target must be a CUDA tensor"
 
@@ -442,13 +441,16 @@ class HostBuffer:
                 print("Async loading")
                 self._ops.gather_partitions_gds(pid, file_paths, num_nodes, gpu_target, bndries)
             else:
+
+
+                
                 # Load full target partition --> whole file
                 print("Fallback")
                 offset = num_nodes[pid]
                 self._backend.gpu_read(
                     status=3, # read whole file and close
                     fd=None,
-                    file_id=f"{self._backend._storage_dir}/{self._file_prefix}_p{pid}.pt",
+                    file_id=file_paths[pid],
                     tensor=gpu_target[:offset],
                     file_offset=0,
                     stream=stream,
@@ -462,8 +464,7 @@ class HostBuffer:
                     if i == pid or bndries[i].numel() == 0:
                         continue
 
-                    part_file = f"{self._backend._storage_dir}/{self._file_prefix}_p{i}.pt"
-
+                    part_file = file_paths[i]
                     p_stream = torch.cuda.Stream(device=gpu_target.device)
                     p_stream.wait_stream(stream)
                     part_streams.append(p_stream)
@@ -480,7 +481,6 @@ class HostBuffer:
                         chunk_len = end - start
                         file_offset = bndries[i][start].item() * row_bytes
                         chunks.append((file_offset, chunk_len))
-
                         index = end
 
                     fd = None
@@ -489,13 +489,16 @@ class HostBuffer:
 
                     with torch.cuda.stream(p_stream):
                         for chunk_idx, (file_offset, chunk_len) in enumerate(chunks):
+                            
+                            dest_slice = gpu_target[curr_offset : curr_offset + chunk_len]
+
                             if chunk_idx == 0 and total_chunks == 1:
                                 # single read --> open, read, close
                                 fd = self._backend.gpu_read(
                                     status=3,
                                     fd=None,
                                     file_id=part_file,
-                                    tensor=gpu_target[curr_offset : curr_offset + chunk_len],
+                                    tensor=dest_slice,
                                     file_offset=file_offset,
                                     stream=p_stream,
                                 )
@@ -506,7 +509,7 @@ class HostBuffer:
                                     status=0,
                                     fd=None,
                                     file_id=part_file,
-                                    tensor=gpu_target[curr_offset : curr_offset + chunk_len],
+                                    tensor=dest_slice,
                                     file_offset=file_offset,
                                     stream=p_stream,
                                 )
@@ -517,7 +520,7 @@ class HostBuffer:
                                     status=1,
                                     fd=fd,
                                     file_id=part_file,
-                                    tensor=gpu_target[curr_offset : curr_offset + chunk_len],
+                                    tensor=dest_slice,
                                     file_offset=file_offset,
                                     stream=p_stream,
                                 )
@@ -528,7 +531,7 @@ class HostBuffer:
                                     status=2,
                                     fd=fd,
                                     file_id=part_file,
-                                    tensor=gpu_target[curr_offset : curr_offset + chunk_len],
+                                    tensor=dest_slice,
                                     file_offset=file_offset,
                                     stream=p_stream,
                                 )
