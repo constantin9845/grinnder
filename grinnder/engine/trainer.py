@@ -163,8 +163,8 @@ class Trainer:
         )
 
         # Pre-fill host_features[0] with initial node features
-        if not self._single_partition_fast_path_enabled:
-            self._prefill_features()
+        #if not self._single_partition_fast_path_enabled:
+        #    self._prefill_features()
 
     def _progress(self, message: str) -> None:
         if self._log_progress:
