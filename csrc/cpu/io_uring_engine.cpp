@@ -86,15 +86,6 @@ public:
       }
     }
 
-    std::cerr
-      << "[IO_WRITE_SUBMIT]"
-      << " handle=" << handle
-      << " path=" << path
-      << " file_offset=" << file_offset
-      << " nbytes=" << nbytes
-      << " nbytes_GiB=" << (double)nbytes / (1024.0 * 1024.0 * 1024.0)
-      << std::endl;
-
     io_uring_prep_write(sqe, fd, buf, nbytes, file_offset);
     io_uring_sqe_set_data(sqe, reinterpret_cast<void *>(handle));
 
@@ -104,14 +95,6 @@ public:
     }
 
     int ret = io_uring_submit(&ring_);
-
-    std::cerr
-      << "[IO_WRITE_SUBMIT_RESULT]"
-      << " handle=" << handle
-      << " submit_ret=" << ret
-      << " requested_nbytes=" << nbytes
-      << std::endl;
-
     if (ret < 0) {
       std::lock_guard<std::mutex> lock(mutex_);
       close(fd);
@@ -140,32 +123,6 @@ public:
                                  std::to_string(-ret));
 
       int64_t h = reinterpret_cast<int64_t>(io_uring_cqe_get_data(cqe));
-
-      int result = cqe->res;
-
-    std::cerr
-        << "[IO_CQE]"
-        << " handle=" << h
-        << " requested=";
-
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      auto it = expected_bytes_.find(h);
-      if (it != expected_bytes_.end())
-        std::cerr << it->second;
-      else
-        std::cerr << "UNKNOWN";
-    }
-
-    std::cerr
-        << " result=" << result;
-
-    if (result < 0)
-      std::cerr << " errno=" << -result;
-
-    std::cerr
-        << std::endl;
-
       io_uring_cqe_seen(&ring_, cqe);
 
       std::lock_guard<std::mutex> lock(mutex_);
