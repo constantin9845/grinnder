@@ -19,8 +19,8 @@ public:
                       int64_t file_offset, int64_t nbytes);
 
   // Submit async write: CPU tensor -> file
-  int64_t submit_write(const std::string &path, torch::Tensor src,
-                       int64_t file_offset, int64_t nbytes);
+  int64_t submit_write(const std::string &path, const torch::Tensor &src,
+                     int64_t file_offset, int64_t nbytes);
 
   // Wait for specific operation to complete
   void wait(int64_t handle);
