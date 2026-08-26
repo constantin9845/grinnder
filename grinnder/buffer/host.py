@@ -11,6 +11,7 @@ from typing import List, Optional
 
 import torch
 import time
+import os
 from torch import Tensor
 
 from grinnder.storage.backend import StorageBackend
@@ -296,6 +297,7 @@ class HostBuffer:
                         boundaries[pid] = None (intra-partition, copied contiguously).
             stream: CUDA stream.
         """
+        t0 = time.perf_counter_ns()
         assert gpu_target.is_cuda
         required_pids = {pid}
         for src_pid, boundary in enumerate(boundaries):
@@ -309,7 +311,7 @@ class HostBuffer:
 
         # Build boundary list (replace None with empty tensor)
         bound_size = 0
-        t0 = time.perf_counter_ns()
+    
         bndries = []
         for i in range(self.num_parts):
             if i == pid or boundaries[i] is None:
@@ -317,11 +319,11 @@ class HostBuffer:
             else:
                 bndries.append(boundaries[i])
 
-        tn = time.perf_counter_ns()
-        stat.load_GPU_timestamp(phase, "gather", t0, tn)
-
 
         stream.wait_stream(torch.cuda.current_stream(gpu_target.device))
+
+        tn = time.perf_counter_ns()
+        stat.load_GPU_timestamp(phase, "gather", t0, tn)
 
         target_partition_nodes = self._tensors[pid].size(0)
         boundary_nodes = sum(b.numel() for b in bndries)
@@ -343,32 +345,24 @@ class HostBuffer:
         )
 
         overall_pct = (boundary_nodes / total_boundary_parts_nodes * 100) if total_boundary_parts_nodes > 0 else 0.0
-
         stat.add_boundary_utilization(overall_pct)
 
         t0 = time.perf_counter_ns()
         with torch.cuda.stream(stream):
             if self._ops is not None:
-                self._ops.gather_partitions(
-                    pid, self._tensors, gpu_target, bndries
-                )
+                self._ops.gather_partitions(pid, self._tensors, gpu_target, bndries)
+                print("Not a fallback")
             else:
                 # Python fallback
+                print("Fallback")
                 offset = self._tensors[pid].size(0)
                 gpu_target[:offset].copy_(self._tensors[pid])
                 for i in range(self.num_parts):
                     if i == pid or bndries[i].numel() == 0:
                         continue
                     selected = self._tensors[i].index_select(0, bndries[i])
-                    print(bndries[i])
-                    print(self._tensors[i].size(0))
                     print(selected)
-
-                    print("************")
-                    #print(self._tensors[i][367053])
-                    #print(selected[0])
-                    print("************")
-                    exit(0)
+                    exit(1)
                     n = selected.size(0)
                     gpu_target[offset : offset + n].copy_(selected)
                     offset += n
@@ -380,6 +374,343 @@ class HostBuffer:
         gb = round(bt / (1024**3),3)
 
         print(f"\tPartition {pid} loads {gb} GB from other partitions")
+
+    # ------------------------------------------------------------------
+    # Gather Direct: target partition + boundary feat/act from NVMe -> one GPU tensor
+    # ------------------------------------------------------------------
+
+    def async_gather_direct(
+    self,
+    phase,
+    pid: int,
+    gpu_target: Tensor,
+    boundaries: List[Optional[Tensor]],
+    stream: torch.cuda.Stream,
+) -> None:
+        """Gather features directly from NVMe files to GPU VRAM via GDS.
+
+        GPU layout: [intra(pid) | boundary_from_p0 | ... | boundary_from_pN]
+
+        Args:
+            phase: Current execution phase name for stats.
+            pid: Target partition index.
+            gpu_target: Pre-allocated CUDA tensor [total_nodes, feature_dim].
+            boundaries: boundaries[src_pid] = index tensor into partition src_pid.
+                        boundaries[pid] = None (intra-partition, copied contiguously).
+            stream: CUDA stream for non-blocking asynchronous execution.
+        """
+        import os
+
+        t0 = time.perf_counter_ns()
+
+        assert gpu_target.is_cuda, "gpu_target must be a CUDA tensor"
+        assert gpu_target.is_contiguous(), "gpu_target must be contiguous"
+
+        # Build boundary list (replace None with empty tensor)
+        bndries = []
+        for i in range(self.num_parts):
+            if i == pid or boundaries[i] is None:
+                bndries.append(torch.empty(0, dtype=torch.long))
+            else:
+                bndries.append(boundaries[i])
+
+        stream.wait_stream(torch.cuda.current_stream(gpu_target.device))
+
+        tn = time.perf_counter_ns()
+        stat.load_GPU_timestamp(phase, "gather", t0, tn)
+
+        # File paths
+        file_paths = [
+            f"{self._backend._storage_dir}/{self._file_prefix}_p{i}.pt"
+            for i in range(self.num_parts)
+        ]
+
+        # Tensor metrics
+        feature_dim = gpu_target.size(1)
+        bytes_per_elem = gpu_target.element_size()
+        row_bytes = feature_dim * bytes_per_elem
+        print(row_bytes)
+        exit(1)
+        target_partition_nodes = self._tensors[pid].size(0)
+
+        bytes_to_gb = 1024**3
+
+        # Determine number of rows in each file.
+        # This does not load the files.
+        file_sizes = [
+            os.path.getsize(path) if os.path.exists(path) else 0
+            for path in file_paths
+        ]
+
+        num_nodes = [
+            file_sizes[i] // row_bytes
+            for i in range(self.num_parts)
+        ]
+
+        # Check that files have valid row-aligned sizes
+        for i in range(self.num_parts):
+            if file_sizes[i] == 0:
+                raise RuntimeError(
+                    f"Partition file missing or empty: "
+                    f"pid={i}, file={file_paths[i]}"
+                )
+
+            if file_sizes[i] % row_bytes != 0:
+                raise RuntimeError(
+                    f"Partition file size is not divisible by row_bytes:\n"
+                    f"  pid={i}\n"
+                    f"  file={file_paths[i]}\n"
+                    f"  file_size={file_sizes[i]}\n"
+                    f"  row_bytes={row_bytes}"
+                )
+
+        # Record gather size statistics
+        target_partition_nodes = num_nodes[pid]
+        boundary_nodes = sum(b.numel() for b in bndries)
+
+        target_partition_gb = (
+            target_partition_nodes * row_bytes
+        ) / bytes_to_gb
+
+        boundary_gb = (
+            boundary_nodes * row_bytes
+        ) / bytes_to_gb
+
+        stat.add_actual_size(
+            target_partition_gb,
+            target_partition_gb + boundary_gb,
+        )
+
+        total_boundary_parts_nodes = sum(
+            num_nodes[src_pid]
+            for src_pid, bnd in enumerate(bndries)
+            if src_pid != pid and bnd.numel() > 0
+        )
+
+        overall_pct = (
+            boundary_nodes / total_boundary_parts_nodes * 100
+            if total_boundary_parts_nodes > 0
+            else 0.0
+        )
+
+        stat.add_boundary_utilization(overall_pct)
+
+        # Check GPU target size
+        required_nodes = target_partition_nodes + boundary_nodes
+
+        if gpu_target.size(0) < required_nodes:
+            raise RuntimeError(
+                f"gpu_target is too small:\n"
+                f"  target pid={pid}\n"
+                f"  target_partition_nodes={target_partition_nodes}\n"
+                f"  boundary_nodes={boundary_nodes}\n"
+                f"  required_nodes={required_nodes}\n"
+                f"  gpu_target.size(0)={gpu_target.size(0)}"
+            )
+
+        t0 = time.perf_counter_ns()
+
+        with torch.cuda.stream(stream):
+
+            # --------------------------------------------------------
+            # Load full target partition
+            # Equivalent to:
+            #
+            #   gpu_target[:offset].copy_(self._tensors[pid])
+            # --------------------------------------------------------
+
+            print("Fallback")
+
+            offset = num_nodes[pid]
+
+            print(f"\n--- [DEBUG Target Partition pid={pid}] ---")
+            print(f"File: {file_paths[pid]}")
+            print(
+                f"File size: {file_sizes[pid]} bytes "
+                f"({num_nodes[pid]} rows)"
+            )
+            print(
+                f"Reading target slice: "
+                f"gpu_target[0:{offset}] "
+                f"(file_offset=0)"
+            )
+
+            self._backend.gpu_read(
+                status=3,
+                fd=None,
+                file_id=file_paths[pid],
+                tensor=gpu_target[:offset],
+                file_offset=0,
+                stream=stream,
+            )
+
+            print("Target partition loaded")
+
+            # --------------------------------------------------------
+            # Load only required boundary rows
+            #
+            # Equivalent to:
+            #
+            #   selected = self._tensors[i].index_select(0, bndries[i])
+            #   gpu_target[offset : offset + n].copy_(selected)
+            # --------------------------------------------------------
+
+            for i in range(self.num_parts):
+
+                if i == pid or bndries[i].numel() == 0:
+                    continue
+
+                part_file = file_paths[i]
+                indices = bndries[i]
+                num_rows = indices.size(0)
+                part_file_size = file_sizes[i]
+                max_valid_nodes = num_nodes[i]
+
+                if indices.device.type != "cpu":
+                    indices = indices.cpu()
+
+                print(f"--- [DEBUG Boundary Partition src_pid={i}] ---")
+                print(f"File: {part_file}")
+                print(
+                    f"File size: {part_file_size} bytes "
+                    f"(Max valid node index: {max_valid_nodes - 1})"
+                )
+                print(f"Requested boundary index count: {num_rows}")
+                print(
+                    f"Indices min/max: "
+                    f"min={indices.min().item()}, "
+                    f"max={indices.max().item()}"
+                )
+
+                # These must be LOCAL row indices into partition i,
+                # exactly as they were for self._tensors[i].index_select().
+                if (
+                    indices.min().item() < 0
+                    or indices.max().item() >= max_valid_nodes
+                ):
+                    raise RuntimeError(
+                        f"Boundary index out of range:\n"
+                        f"  target pid       = {pid}\n"
+                        f"  source pid       = {i}\n"
+                        f"  file             = {part_file}\n"
+                        f"  file size        = {part_file_size}\n"
+                        f"  rows in file     = {max_valid_nodes}\n"
+                        f"  requested rows   = {num_rows}\n"
+                        f"  min index        = {indices.min().item()}\n"
+                        f"  max index        = {indices.max().item()}\n"
+                    )
+
+                fd = None
+
+                for k in range(num_rows):
+
+                    node_idx = indices[k].item()
+
+                    file_offset = node_idx * row_bytes
+
+                    # Exactly one output row, preserving index_select order.
+                    dest_row = gpu_target[
+                        offset : offset + 1
+                    ]
+
+                    if file_offset + row_bytes > part_file_size:
+                        raise RuntimeError(
+                            f"\n[ERROR BOUNDS EXCEEDED]\n"
+                            f"  target pid = {pid}\n"
+                            f"  src_pid = {i}\n"
+                            f"  k = {k}/{num_rows}\n"
+                            f"  node_idx = {node_idx}\n"
+                            f"  file_offset = {file_offset}\n"
+                            f"  row_bytes = {row_bytes}\n"
+                            f"  file end = {file_offset + row_bytes}\n"
+                            f"  actual file size = {part_file_size}\n"
+                            f"  file = {part_file}\n"
+                        )
+
+                    if k < 5 or k >= num_rows - 5:
+                        print(
+                            f"  [Read {k+1}/{num_rows}] "
+                            f"node_idx={node_idx} -> "
+                            f"file_offset={file_offset} "
+                            f"(0x{file_offset:X}), "
+                            f"gpu_target index={offset}, status="
+                            f"{3 if num_rows == 1 else (0 if k == 0 else (2 if k == num_rows - 1 else 1))}"
+                        )
+
+                    if k == 0 and num_rows == 1:
+                        # Single row: open, read, close
+                        fd = self._backend.gpu_read(
+                            status=3,
+                            fd=None,
+                            file_id=part_file,
+                            tensor=dest_row,
+                            file_offset=file_offset,
+                            stream=stream,
+                        )
+
+                    elif k == 0:
+                        # First row: open handle + read
+                        fd = self._backend.gpu_read(
+                            status=0,
+                            fd=None,
+                            file_id=part_file,
+                            tensor=dest_row,
+                            file_offset=file_offset,
+                            stream=stream,
+                        )
+
+                    elif k != num_rows - 1:
+                        # Middle row: use persistent fd
+                        fd = self._backend.gpu_read(
+                            status=1,
+                            fd=fd,
+                            file_id=part_file,
+                            tensor=dest_row,
+                            file_offset=file_offset,
+                            stream=stream,
+                        )
+
+                    else:
+                        # Last row: read + close
+                        fd = self._backend.gpu_read(
+                            status=2,
+                            fd=fd,
+                            file_id=part_file,
+                            tensor=dest_row,
+                            file_offset=file_offset,
+                            stream=stream,
+                        )
+
+                    offset += 1
+
+                print(f"Boundary partition {i} data loaded")
+
+            # --------------------------------------------------------
+            # Final sanity check
+            # --------------------------------------------------------
+
+            expected_offset = (
+                target_partition_nodes +
+                boundary_nodes
+            )
+
+            if offset != expected_offset:
+                raise RuntimeError(
+                    f"Gather offset mismatch:\n"
+                    f"  final offset = {offset}\n"
+                    f"  expected = {expected_offset}"
+                )
+
+        tn = time.perf_counter_ns()
+        stat.load_GPU_timestamp(phase, "copy", t0, tn)
+
+        bt = gpu_target.numel() * gpu_target.element_size()
+        gb = round(bt / (1024**3), 3)
+
+        print(
+            f"\tPartition {pid} loads "
+            f"{gb} GB from other partitions"
+        )
 
     # ------------------------------------------------------------------
     # Scatter: one GPU tensor -> multiple host partitions (with accumulation)
