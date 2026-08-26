@@ -140,43 +140,36 @@ class HostBuffer:
 
     def release(self, pid: int) -> None:
         print("\n========== RELEASE DEBUG ==========", flush=True)
-        print(f"pid                 = {pid}", flush=True)
 
         t = self._tensors[pid]
 
-        print(f"tensor               = {t}", flush=True)
-        print(f"tensor shape         = {t.shape}", flush=True)
-        print(f"tensor dtype         = {t.dtype}", flush=True)
-        print(f"tensor device        = {t.device}", flush=True)
-        print(f"tensor contiguous    = {t.is_contiguous()}", flush=True)
-        print(f"tensor data_ptr      = {t.data_ptr()}", flush=True)
+        print(f"pid             = {pid}", flush=True)
+        print(f"shape           = {t.shape}", flush=True)
+        print(f"dtype           = {t.dtype}", flush=True)
+        print(f"device          = {t.device}", flush=True)
+        print(f"contiguous      = {t.is_contiguous()}", flush=True)
+        print(f"data_ptr        = {t.data_ptr()}", flush=True)
 
+        print("getting untyped_storage...", flush=True)
         storage = t.untyped_storage()
+        print("got untyped_storage", flush=True)
 
-        print(f"storage              = {storage}", flush=True)
-        print(f"storage size         = {storage.size()}", flush=True)
-        print(f"storage nbytes       = {storage.nbytes()}", flush=True)
-        print(f"storage data_ptr     = {storage.data_ptr()}", flush=True)
+        print(f"storage size    = {storage.size()}", flush=True)
+        print(f"storage nbytes  = {storage.nbytes()}", flush=True)
+        print(f"storage ptr     = {storage.data_ptr()}", flush=True)
 
-        print(f"_pin_memory          = {self._pin_memory}", flush=True)
-        print(f"_zero_initialized    = {self._zero_initialized[pid]}", flush=True)
-
-        print("about to resize storage to 0...", flush=True)
-
+        print("about to resize...", flush=True)
         storage.resize_(0)
-
-        print("storage resize DONE", flush=True)
+        print("resize DONE", flush=True)
 
         self._zero_initialized[pid] = False
 
-        print("_zero_initialized DONE", flush=True)
-
         if self._pin_memory:
-            print("about to empty pinned host cache...", flush=True)
+            print("about to empty pinned cache...", flush=True)
             _empty_pinned_host_cache()
-            print("empty pinned host cache DONE", flush=True)
+            print("empty pinned cache DONE", flush=True)
 
-        print("========== RELEASE DONE ==========\n", flush=True)
+        print("========== RELEASE DONE ==========", flush=True)
 
     def release_all(self) -> None:
         """Release host storage for every partition."""
