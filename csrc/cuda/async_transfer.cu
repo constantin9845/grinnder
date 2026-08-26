@@ -68,6 +68,14 @@ void h2d_copy_async(torch::Tensor src, torch::Tensor dst) {
 #include <vector>
 #include <string>
 
+// Helper structure to hold persistent variables required by cuFileReadAsync
+struct GDSAsyncParams {
+  size_t read_bytes;
+  off_t file_offset;
+  off_t buf_offset;
+  ssize_t bytes_read;
+};
+
 void gather_partitions_gds(
     int pid,
     std::vector<std::string> file_paths,
@@ -79,20 +87,24 @@ void gather_partitions_gds(
   AT_ASSERTM(dst.is_contiguous(), "Destination must be contiguous");
 
   const int device_id = dst.get_device();
-  c10::cuda::CUDAGuard device_guard(device_id);
-
-  auto stream = at::cuda::getCurrentCUDAStream(device_id);
-  cudaStream_t raw_stream = stream.stream();
-
-  AT_ASSERTM(stream != at::cuda::getDefaultCUDAStream(device_id), "Async gather requires a non-default CUDA stream");
 
   AT_DISPATCH_ALL_TYPES_AND(at::ScalarType::Half, dst.scalar_type(), "gather_partitions_gds", [&] {
     getH2DPool().run([=] {
+      // 1. Ensure CUDA Device context is active on worker thread
+      c10::cuda::CUDAGuard device_guard(device_id);
+      auto stream = at::cuda::getCurrentCUDAStream(device_id);
+      cudaStream_t raw_stream = stream.stream();
+
       auto dst_data = reinterpret_cast<uint8_t*>(dst.data_ptr<scalar_t>());
       int64_t feat_dim = dst.numel() / dst.size(0);
       int64_t row_bytes = feat_dim * sizeof(scalar_t);
+      size_t total_tensor_bytes = dst.numel() * sizeof(scalar_t);
 
-      // 1. Read full target partition
+      // 2. Register GPU memory with cuFile Driver
+      CUfileError_t buf_status = cuFileBufRegister(dst_data, total_tensor_bytes, 0);
+      AT_ASSERTM(buf_status.err == CU_FILE_SUCCESS, "GDS: cuFileBufRegister failed for target buffer");
+
+      // 3. Read target partition
       int64_t offset = num_nodes[pid];
       int fd_target = open(file_paths[pid].c_str(), O_RDONLY | O_DIRECT);
       AT_ASSERTM(fd_target >= 0, "GDS Gather: Failed to open target partition file");
@@ -106,31 +118,39 @@ void gather_partitions_gds(
       CUfileError_t status = cuFileHandleRegister(&cf_target, &descr_target);
       AT_ASSERTM(status.err == CU_FILE_SUCCESS, "GDS Gather: cuFileHandleRegister failed for target file");
 
-      // Set variables matching cuFileReadAsync exact types
-      size_t target_size = static_cast<size_t>(offset * row_bytes);
-      off_t target_file_offset = 0;
-      off_t target_buf_offset = 0;
-      ssize_t target_bytes_read = 0;
+      // Heap-allocate parameter state so pointers remain valid during async GPU execution
+      auto target_params = std::make_unique<GDSAsyncParams>();
+      target_params->read_bytes = static_cast<size_t>(offset * row_bytes);
+      target_params->file_offset = 0;
+      target_params->buf_offset = 0;
+      target_params->bytes_read = 0;
 
-      cuFileReadAsync(cf_target, dst_data, &target_size, &target_file_offset, &target_buf_offset, &target_bytes_read, raw_stream);
+      cuFileReadAsync(
+          cf_target,
+          dst_data,
+          &target_params->read_bytes,
+          &target_params->file_offset,
+          &target_params->buf_offset,
+          &target_params->bytes_read,
+          raw_stream
+      );
 
-      printf("Target partition loaded");
+      // 4. Read boundary partition chunks
+      // Container to keep async param memory alive until stream synchronization
+      std::vector<std::unique_ptr<GDSAsyncParams>> async_params_keeper;
 
-      // 2. Read boundary partition chunks
       for (size_t i = 0; i < file_paths.size(); i++) {
-        if ((int)i == pid)
-          continue;
+        if ((int)i == pid) continue;
 
         auto bndry = boundaries[i];
-        if (bndry.numel() == 0)
-          continue;
+        if (bndry.numel() == 0) continue;
 
         auto bndry_cpu = bndry.to(torch::kCPU, torch::kLong).contiguous();
         const int64_t* idx_ptr = bndry_cpu.data_ptr<int64_t>();
         int64_t num_indices = bndry_cpu.numel();
 
         int fd = open(file_paths[i].c_str(), O_RDONLY | O_DIRECT);
-        AT_ASSERTM(fd >= 0, "GDS Gather: Failed to open boundary partition file");
+        AT_ASSERTM(fd >= 0, "GDS Gather: Failed to open boundary file");
 
         CUfileDescr_t descr;
         memset(&descr, 0, sizeof(descr));
@@ -141,7 +161,6 @@ void gather_partitions_gds(
         status = cuFileHandleRegister(&cf_handle, &descr);
         AT_ASSERTM(status.err == CU_FILE_SUCCESS, "GDS Gather: cuFileHandleRegister failed for boundary file");
 
-        // Extract exact contiguous chunk runs
         int64_t idx = 0;
         while (idx < num_indices) {
           int64_t start = idx;
@@ -152,37 +171,48 @@ void gather_partitions_gds(
           }
 
           int64_t chunk_len = end - start;
-          size_t read_bytes = static_cast<size_t>(chunk_len * row_bytes);
-          off_t file_offset_bytes = static_cast<off_t>(idx_ptr[start] * row_bytes);
-          off_t buf_offset_bytes = static_cast<off_t>(offset * row_bytes);
-          ssize_t bytes_read = 0;
 
-          // async GDS direct read directly to GPU memory
-          cuFileReadAsync(cf_handle, dst_data, &read_bytes, &file_offset_bytes, &buf_offset_bytes, &bytes_read, raw_stream);
+          auto p = std::make_unique<GDSAsyncParams>();
+          p->read_bytes = static_cast<size_t>(chunk_len * row_bytes);
+          p->file_offset = static_cast<off_t>(idx_ptr[start] * row_bytes);
+          p->buf_offset = static_cast<off_t>(offset * row_bytes);
+          p->bytes_read = 0;
+
+          // Dispatch Async GDS read
+          cuFileReadAsync(
+              cf_handle,
+              dst_data,
+              &p->read_bytes,
+              &p->file_offset,
+              &p->buf_offset,
+              &p->bytes_read,
+              raw_stream
+          );
+
+          async_params_keeper.push_back(std::move(p));
 
           offset += chunk_len;
           idx = end;
         }
 
-        // Wait on stream before closing boundary handle
+        // Must sync stream before closing file handles or deregistering
         cudaStreamSynchronize(raw_stream);
         cuFileHandleDeregister(cf_handle);
         close(fd);
       }
 
-      printf("Boundary partitions loaded");
-
-      AT_ASSERTM(offset == dst.size(0),
-                 "Gather GDS: copied size mismatch with destination");
-
-      // Final synchronization for target file handle cleanup
+      // Final synchronization for target file handle & memory deregistration
       cudaStreamSynchronize(raw_stream);
       cuFileHandleDeregister(cf_target);
       close(fd_target);
+
+      // Clean up GDS buffer registration
+      cuFileBufDeregister(dst_data);
+
+      AT_ASSERTM(offset == dst.size(0), "Gather GDS: copied size mismatch with destination");
     });
   });
 }
-
 
 void scatter_partitions(int pid, torch::Tensor src,
                         std::vector<torch::Tensor> dsts,
