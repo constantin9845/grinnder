@@ -498,6 +498,9 @@ class Trainer:
 
         if not pids:
             return
+        
+        for i, pid in enumerate(pids):
+            self.cache._evict_partition(0, pid)
 
 
         t0 = time.time()
