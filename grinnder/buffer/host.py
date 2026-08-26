@@ -139,37 +139,11 @@ class HostBuffer:
         return t
 
     def release(self, pid: int) -> None:
-        print("\n========== RELEASE DEBUG ==========", flush=True)
-
-        t = self._tensors[pid]
-
-        print(f"pid             = {pid}", flush=True)
-        print(f"shape           = {t.shape}", flush=True)
-        print(f"dtype           = {t.dtype}", flush=True)
-        print(f"device          = {t.device}", flush=True)
-        print(f"contiguous      = {t.is_contiguous()}", flush=True)
-        print(f"data_ptr        = {t.data_ptr()}", flush=True)
-
-        print("getting untyped_storage...", flush=True)
-        storage = t.untyped_storage()
-        print("got untyped_storage", flush=True)
-
-        print(f"storage size    = {storage.size()}", flush=True)
-        print(f"storage nbytes  = {storage.nbytes()}", flush=True)
-        print(f"storage ptr     = {storage.data_ptr()}", flush=True)
-
-        print("about to resize...", flush=True)
-        storage.resize_(0)
-        print("resize DONE", flush=True)
-
+        """Release host storage for one partition while preserving tensor metadata."""
+        self._tensors[pid].untyped_storage().resize_(0)
         self._zero_initialized[pid] = False
-
         if self._pin_memory:
-            print("about to empty pinned cache...", flush=True)
             _empty_pinned_host_cache()
-            print("empty pinned cache DONE", flush=True)
-
-        print("========== RELEASE DONE ==========", flush=True)
 
     def release_all(self) -> None:
         """Release host storage for every partition."""
@@ -870,7 +844,7 @@ class HostBuffer:
                 self._tensors[pid].numel() * self._tensors[pid].element_size(),
             )
             h = self._backend.host_write(self._tensors[pid], file_id)
-            #self._backend.wait(h)
+            self._backend.wait(h)
         else:
             handles = []
             for i in range(self.num_parts):
