@@ -79,7 +79,6 @@ struct GDSAsyncParams {
   ssize_t bytes_read;
 };
 
-// Inline check for 512-byte alignment
 inline bool is_aligned(uintptr_t val) {
   return (val % ALIGN_SIZE) == 0;
 }
@@ -107,20 +106,20 @@ void gather_partitions_gds(
       int64_t row_bytes = feat_dim * sizeof(scalar_t);
       size_t total_tensor_bytes = dst.numel() * sizeof(scalar_t);
 
-      // 1. Register target GPU memory with GDS Driver
+      // Register GPU buffer with GDS
       CUfileError_t buf_status = cuFileBufRegister(dst_data, total_tensor_bytes, 0);
       AT_ASSERTM(buf_status.err == CU_FILE_SUCCESS, "GDS: cuFileBufRegister failed");
 
-      // Helper lambda to dispatch either aligned GDS read or safe fallback
+      std::vector<std::unique_ptr<GDSAsyncParams>> async_params_keeper;
+      std::vector<void*> deferred_free_buffers;
+
       auto perform_read = [&](CUfileHandle_t cf_handle, int raw_fd, off_t raw_file_offset, 
-                              size_t raw_bytes, off_t raw_buf_offset, 
-                              std::vector<std::unique_ptr<GDSAsyncParams>>& keeper) {
+                              size_t raw_bytes, off_t raw_buf_offset) {
         
         uintptr_t target_gpu_ptr = reinterpret_cast<uintptr_t>(dst_data + raw_buf_offset);
 
-        // Check if all parameters satisfy Direct Storage (O_DIRECT) alignment
         if (is_aligned(raw_file_offset) && is_aligned(raw_bytes) && is_aligned(target_gpu_ptr)) {
-          // DIRECT GDS PATH (Zero-copy DMA directly to VRAM)
+          // Direct GDS Path
           auto p = std::make_unique<GDSAsyncParams>();
           p->read_bytes = raw_bytes;
           p->file_offset = raw_file_offset;
@@ -136,35 +135,29 @@ void gather_partitions_gds(
               &p->bytes_read,
               raw_stream
           );
-          keeper.push_back(std::move(p));
+          async_params_keeper.push_back(std::move(p));
         } else {
-          // ALIGNED BOUNCE FALLBACK (Handles non-aligned hidden sizes / arbitrary node IDs safely)
+          // Aligned Fallback Path
           off_t aligned_file_off = (raw_file_offset / ALIGN_SIZE) * ALIGN_SIZE;
           off_t file_head_pad = raw_file_offset - aligned_file_off;
           size_t aligned_read_bytes = ((file_head_pad + raw_bytes + ALIGN_SIZE - 1) / ALIGN_SIZE) * ALIGN_SIZE;
 
-          // Allocate temporary aligned CPU bounce buffer
           void* cpu_aligned_buf = nullptr;
           int ret = posix_memalign(&cpu_aligned_buf, ALIGN_SIZE, aligned_read_bytes);
           AT_ASSERTM(ret == 0, "GDS Gather: Failed to allocate aligned bounce buffer");
 
-          // Read aligned block from file descriptor
           ssize_t bytes_read = pread(raw_fd, cpu_aligned_buf, aligned_read_bytes, aligned_file_off);
           AT_ASSERTM(bytes_read >= 0, "GDS Gather: Fallback pread failed");
 
-          // Non-blocking H2D async copy to exact destination GPU tensor location
           uint8_t* src_payload = reinterpret_cast<uint8_t*>(cpu_aligned_buf) + file_head_pad;
           cudaMemcpyAsync(dst_data + raw_buf_offset, src_payload, raw_bytes, cudaMemcpyHostToDevice, raw_stream);
 
-          // Free bounce buffer once stream completes copy
-          cudaStreamSynchronize(raw_stream);
-          free(cpu_aligned_buf);
+          // Defer freeing buffer until stream synchronization at partition end
+          deferred_free_buffers.push_back(cpu_aligned_buf);
         }
       };
 
-      std::vector<std::unique_ptr<GDSAsyncParams>> async_params_keeper;
-
-      // 2. Read Target Partition
+      // 1. Read Target Partition
       int64_t offset = num_nodes[pid];
       int fd_target = open(file_paths[pid].c_str(), O_RDONLY | O_DIRECT);
       AT_ASSERTM(fd_target >= 0, "GDS Gather: Failed to open target partition file");
@@ -178,9 +171,9 @@ void gather_partitions_gds(
       CUfileError_t status = cuFileHandleRegister(&cf_target, &descr_target);
       AT_ASSERTM(status.err == CU_FILE_SUCCESS, "GDS Gather: cuFileHandleRegister failed for target file");
 
-      perform_read(cf_target, fd_target, 0, static_cast<size_t>(offset * row_bytes), 0, async_params_keeper);
+      perform_read(cf_target, fd_target, 0, static_cast<size_t>(offset * row_bytes), 0);
 
-      // 3. Read Boundary Partition Chunks
+      // 2. Read Boundary Partition Chunks
       for (size_t i = 0; i < file_paths.size(); i++) {
         if ((int)i == pid) continue;
 
@@ -217,7 +210,7 @@ void gather_partitions_gds(
           off_t file_offset_bytes = static_cast<off_t>(idx_ptr[start] * row_bytes);
           off_t buf_offset_bytes = static_cast<off_t>(offset * row_bytes);
 
-          perform_read(cf_handle, fd, file_offset_bytes, read_bytes, buf_offset_bytes, async_params_keeper);
+          perform_read(cf_handle, fd, file_offset_bytes, read_bytes, buf_offset_bytes);
 
           offset += chunk_len;
           idx = end;
@@ -226,6 +219,12 @@ void gather_partitions_gds(
         cudaStreamSynchronize(raw_stream);
         cuFileHandleDeregister(cf_handle);
         close(fd);
+
+        // Safe to free bounce buffers now that stream is synced
+        for (void* buf : deferred_free_buffers) {
+          free(buf);
+        }
+        deferred_free_buffers.clear();
       }
 
       // Cleanup Target Handles
@@ -233,7 +232,10 @@ void gather_partitions_gds(
       cuFileHandleDeregister(cf_target);
       close(fd_target);
 
-      // Deregister PyTorch buffer
+      for (void* buf : deferred_free_buffers) {
+        free(buf);
+      }
+
       cuFileBufDeregister(dst_data);
 
       AT_ASSERTM(offset == dst.size(0), "Gather GDS: copied size mismatch with destination");

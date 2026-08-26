@@ -443,7 +443,8 @@ class HostBuffer:
                 self._ops.gather_partitions_gds(pid, file_paths, num_nodes, gpu_target, bndries)
             else:
                 # Load full target partition --> whole file
-                
+                print("Fallback")
+                exit(1)
                 offset = num_nodes[pid]
                 self._backend.gpu_read(
                     status=3, # read whole file and close
