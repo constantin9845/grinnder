@@ -180,6 +180,7 @@ class DeviceBuffer:
             if self._ops is not None: 
                 print("Async loading")
                 self._ops.gather_partitions_gds(pid, file_paths, num_nodes, gpu_target, bndries)
+                assert gpu_target.abs().sum().item() > 0, "GDS Read Failed: Destination GPU tensor is entirely zero!"
             else:
                 # Load full target partition --> whole file
                 print("Fallback")
