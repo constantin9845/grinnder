@@ -844,7 +844,7 @@ class HostBuffer:
                 self._tensors[pid].numel() * self._tensors[pid].element_size(),
             )
             h = self._backend.host_write(self._tensors[pid], file_id)
-            self._backend.wait(h)
+            #self._backend.wait(h)
         else:
             handles = []
             for i in range(self.num_parts):
