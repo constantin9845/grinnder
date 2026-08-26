@@ -435,6 +435,11 @@ class HostBuffer:
         boundary_gb = (boundary_nodes * row_bytes) / bytes_to_gb
         stat.add_actual_size(target_partition_gb, target_partition_gb + boundary_gb)
 
+        file_sizes = [
+            os.path.getsize(path) if os.path.exists(path) else 0 
+            for path in file_paths
+        ]
+
         t0 = time.perf_counter_ns()
         with torch.cuda.stream(stream):
             if self._ops is not None and 2 == 3: 
@@ -447,6 +452,13 @@ class HostBuffer:
                 # Load full target partition --> whole file
                 print("Fallback")
                 offset = num_nodes[pid]
+
+                print(f"\n--- [DEBUG Target Partition pid={pid}] ---")
+                print(f"File: {file_paths[pid]}")
+                print(f"File size: {file_sizes[pid]} bytes ({num_nodes[pid]} rows)")
+                print(f"Reading target slice: gpu_target[0:{offset}] (file_offset=0)")
+
+
                 self._backend.gpu_read(
                     status=3, # read whole file and close
                     fd=None,
@@ -469,14 +481,42 @@ class HostBuffer:
                     #p_stream.wait_stream(stream)
                     #part_streams.append(p_stream)
 
+                    part_file = file_paths[i]
                     indices = bndries[i]
                     num_rows = indices.size(0)
+                    part_file_size = file_sizes[i]
+                    max_valid_nodes = num_nodes[i]
+
+                    print(f"--- [DEBUG Boundary Partition src_pid={i}] ---")
+                    print(f"File: {part_file}")
+                    print(f"File size: {part_file_size} bytes (Max valid node index: {max_valid_nodes - 1})")
+                    print(f"Requested boundary index count: {num_rows}")
+                    print(f"Indices min/max: min={indices.min().item()}, max={indices.max().item()}")
 
                     fd = None
                     for k in range(num_rows):
                         node_idx = indices[k].item()
                         file_offset = node_idx * row_bytes
                         dest_row = gpu_target[offset : offset + 1]
+
+                        if file_offset + row_bytes > part_file_size:
+                            print(
+                                f"\n[ERROR BOUNDS EXCEEDED] Step k={k}/{num_rows} for src_pid={i}:\n"
+                                f"  Requested node_idx = {node_idx}\n"
+                                f"  Calculated file_offset = {file_offset} bytes\n"
+                                f"  Read length = {row_bytes} bytes\n"
+                                f"  File end boundary = {file_offset + row_bytes} bytes\n"
+                                f"  Actual file size = {part_file_size} bytes\n"
+                                f"  --> READING PAST EOF! <--\n"
+                            )
+
+                        if k < 5 or k >= num_rows - 5 or file_offset + row_bytes > part_file_size:
+                            print(
+                                f"  [Read {k+1}/{num_rows}] node_idx={node_idx} -> "
+                                f"file_offset={file_offset} (0x{file_offset:X}), "
+                                f"gpu_target index={offset}, status="
+                                f"{3 if num_rows==1 else (0 if k==0 else (2 if k==num_rows-1 else 1))}"
+                            )
 
                         if k == 0 and num_rows == 1:
                             # Single row total: open, read 1 row, close
