@@ -122,7 +122,7 @@ class StorageBackend:
         with open(path, "wb") as f:
             print("python write")
             f.write(buffer)
-        return 0
+        return 1
 
         return self._io_engine.submit_write(
             path, tensor, 0, tensor.numel() * tensor.element_size()
