@@ -140,8 +140,41 @@ class HostBuffer:
 
     def release(self, pid: int) -> None:
         """Release host storage for one partition while preserving tensor metadata."""
-        self._tensors[pid].untyped_storage().resize_(0)
+
+        t = self._tensors[pid]
+
+        print("\n========== RELEASE DEBUG ==========")
+        print(f"pid                 = {pid}")
+        print(f"tensor               = {t}")
+        print(f"tensor shape         = {t.shape}")
+        print(f"tensor dtype         = {t.dtype}")
+        print(f"tensor device        = {t.device}")
+        print(f"tensor contiguous    = {t.is_contiguous()}")
+        print(f"tensor data_ptr      = {t.data_ptr()}")
+        print(f"storage              = {t.untyped_storage()}")
+        print(f"storage size         = {t.untyped_storage().size()}")
+        print(f"storage resizable?   = {t.untyped_storage().resizable()}")
+        print(f"expected nbytes      = {self.partition_nbytes(pid)}")
+        print(f"pin_memory           = {self._pin_memory}")
+        print(f"zero_initialized     = {self._zero_initialized[pid]}")
+
+        try:
+            t.untyped_storage().resize_(0)
+            print("resize_(0)           = SUCCESS")
+        except Exception as e:
+            print(f"resize_(0)           = FAILED")
+            print(f"exception type       = {type(e).__name__}")
+            print(f"exception            = {e}")
+            print("===================================\n")
+            raise
+
+        print(f"storage size after   = {t.untyped_storage().size()}")
+        print(f"tensor shape after   = {t.shape}")
+        print(f"tensor data_ptr after= {t.data_ptr()}")
+        print("===================================\n")
+
         self._zero_initialized[pid] = False
+
         if self._pin_memory:
             _empty_pinned_host_cache()
 
