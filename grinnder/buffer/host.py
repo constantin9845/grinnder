@@ -840,6 +840,13 @@ class HostBuffer:
         if pid is not None:
             file_id = f"{self._file_prefix}_p{pid}"
             self.allocate(pid)
+            print(
+                "host tensor:",
+                self._tensors[pid].shape,
+                self._tensors[pid].numel(),
+                self._tensors[pid].element_size(),
+                self._tensors[pid].numel() * self._tensors[pid].element_size(),
+            )
             h = self._backend.host_write(self._tensors[pid], file_id)
             self._backend.wait(h)
         else:
