@@ -86,6 +86,12 @@ public:
       }
     }
 
+
+    std::cerr
+      << "WRITE: path=" << path
+      << " offset=" << file_offset
+      << " nbytes=" << nbytes
+      << std::endl;
     io_uring_prep_write(sqe, fd, buf, nbytes, file_offset);
     io_uring_sqe_set_data(sqe, reinterpret_cast<void *>(handle));
 
@@ -108,6 +114,10 @@ public:
   void wait(int64_t handle) {
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      std::cerr
+        << "CQE: handle=" << h
+        << " res=" << cqe->res
+        << std::endl;
       if (completed_.count(handle)) {
         close_and_remove(handle);
         return;
