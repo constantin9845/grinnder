@@ -511,7 +511,7 @@ class Trainer:
         self.device_features[layer_id].async_gather_direct(
             "forward",
             pid=pids[0],
-            gpu_target=self.device_features[layer_id][pids[0]],
+            host_buffer=self.host_features[layer_id],
             boundaries=self.graph.boundaries[pids[0]],
             stream=self.streams.h2d[0],
         )
@@ -537,7 +537,7 @@ class Trainer:
                     self.device_features[layer_id].async_gather_direct(
                         "forward",
                         pid=next_pid,
-                        gpu_target=self.device_features[layer_id][next_pid],
+                        host_buffer=self.host_features[layer_id],
                         boundaries=self.graph.boundaries[next_pid],
                         stream=self.streams.h2d[next_pool],
                     )
@@ -633,7 +633,7 @@ class Trainer:
                     self.device_features[layer_id].async_gather_direct(
                         "forward",
                         pid=next_pid,
-                        gpu_target=self.device_features[layer_id][next_pid],
+                        host_buffer=self.host_features[layer_id],
                         boundaries=self.graph.boundaries[next_pid],
                         stream=self.streams.h2d[0],
                     )
@@ -846,7 +846,7 @@ class Trainer:
             self.device_features[layer_id].async_gather_direct(
                 "backward",
                 pid=pids[0],
-                gpu_target=self.device_features[layer_id][next_pid],
+                host_buffer=self.host_features[layer_id],
                 boundaries=self.graph.boundaries[pids[0]],
                 stream=self.streams.act_h2d[0],
             )
@@ -875,7 +875,7 @@ class Trainer:
                 self.device_features[layer_id].async_gather_direct(
                     "backward",
                     pid=next_pid,
-                    gpu_target=self.device_features[layer_id][next_pid],
+                    host_buffer=self.host_features[layer_id],
                     boundaries=self.graph.boundaries[next_pid],
                     stream=self.streams.act_h2d[next_pool],
                 )
@@ -936,7 +936,7 @@ class Trainer:
                     self.device_features[layer_id].async_gather_direct(
                         "backward",
                         pid=next_pid,
-                        gpu_target=self.device_features[layer_id][next_pid],
+                        host_buffer=self.host_features[layer_id],
                         boundaries=self.graph.boundaries[next_pid],
                         stream=self.streams.act_h2d[0],
                     )
@@ -1016,7 +1016,7 @@ class Trainer:
             self.device_features[layer_id].async_gather_direct(
                 "backward",
                 pid=first_pid,
-                gpu_target=self.device_features[layer_id][next_pid],
+                host_buffer=self.host_features[layer_id],
                 boundaries=self.graph.boundaries[first_pid],
                 stream=self.streams.act_h2d[0],
             )
@@ -1061,7 +1061,7 @@ class Trainer:
                         self.device_features[layer_id].async_gather_direct(
                             "backward",
                             pid=next_pid,
-                            gpu_target=self.device_features[layer_id][next_pid],
+                            host_buffer=self.host_features[layer_id],
                             boundaries=self.graph.boundaries[next_pid],
                             stream=self.streams.act_h2d[next_pool],
                         )
@@ -1151,7 +1151,7 @@ class Trainer:
                         self.device_features[layer_id].async_gather_direct(
                             "backward",
                             pid=next_pid,
-                            gpu_target=self.device_features[layer_id][next_pid],
+                            host_buffer=self.host_features[layer_id],
                             boundaries=self.graph.boundaries[next_pid],
                             stream=self.streams.act_h2d[next_pool],
                         )
@@ -1208,7 +1208,7 @@ class Trainer:
                         self.device_features[layer_id].async_gather_direct(
                             "backward",
                             pid=next_pid,
-                            gpu_target=self.device_features[layer_id][next_pid],
+                            host_buffer=self.host_features[layer_id],
                             boundaries=self.graph.boundaries[next_pid],
                             stream=self.streams.act_h2d[0],
                         )
