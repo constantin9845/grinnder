@@ -120,6 +120,7 @@ class StorageBackend:
         buffer = tensor.numpy().tobytes() if hasattr(tensor, "numpy") else bytes(tensor.data_ptr())
 
         with open(path, "wb") as f:
+            print("python write")
             f.write(buffer)
         return 0
 
