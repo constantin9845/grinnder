@@ -357,15 +357,17 @@ class HostBuffer:
                 # Python fallback
                 print("Fallback")
                 offset = self._tensors[pid].size(0)
-                gpu_target[:offset].copy_(self._tensors[pid], non_blocking=True)
 
-                for i in range(self.num_parts):
-                    if i == pid or bndries[i].numel() == 0:
-                        continue
-                    selected = self._tensors[i].index_select(0, bndries[i])
-                    n = selected.size(0)
-                    gpu_target[offset : offset + n].copy_(selected, non_blocking=True)
-                    offset += n
+                with torch.no_grad():
+                    gpu_target[:offset].copy_(self._tensors[pid], non_blocking=True)
+
+                    for i in range(self.num_parts):
+                        if i == pid or bndries[i].numel() == 0:
+                            continue
+                        selected = self._tensors[i].index_select(0, bndries[i])
+                        n = selected.size(0)
+                        gpu_target[offset : offset + n].copy_(selected, non_blocking=True)
+                        offset += n
         
         tn = time.perf_counter_ns()
         stat.load_GPU_timestamp(phase, "copy", t0, tn)
