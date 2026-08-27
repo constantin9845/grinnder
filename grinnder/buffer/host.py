@@ -509,6 +509,9 @@ class HostBuffer:
 
         with torch.cuda.stream(stream):
 
+            if self._ops is not None: 
+                self._ops.gather_partitions_gds(pid, file_paths, num_nodes, gpu_target, bndries)
+
             # --------------------------------------------------------
             # Load full target partition
             # Equivalent to:

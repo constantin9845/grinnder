@@ -178,6 +178,8 @@ class StorageBackend:
         assert not tensor.is_cuda, "host_read requires a CPU tensor"
         assert tensor.is_contiguous(), "host_read requires contiguous tensor"
 
+        
+
         return self._io_engine.submit_read(
             path, tensor, 0, tensor.numel() * tensor.element_size()
         )
