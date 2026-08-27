@@ -350,12 +350,26 @@ class HostBuffer:
 
         t0 = time.perf_counter_ns()
         with torch.cuda.stream(stream):
-            if self._ops is not None:
+            if self._ops is not None and 2 == 3:
                 self._ops.gather_partitions(pid, self._tensors, gpu_target, bndries)
                 print("Not a fallback")
             else:
                 # Python fallback
                 print("Fallback")
+                parts = []
+                parts.append(self._tensors[pid].to(gpu_target.device, non_blocking=True))
+
+                for i in range(self.num_parts):
+                    if i == pid or bndries[i].numel() == 0:
+                        continue
+
+                    selected = self._tensors[i].index_select(0, bndries[i])
+                    parts.append(selected.to(gpu_target.device, non_blocking=True))
+
+                result = torch.cat(parts, dim=0)
+                gpu_target.copy_(result)
+
+                '''
                 offset = self._tensors[pid].size(0)
                 gpu_target[:offset].copy_(self._tensors[pid])
                 for i in range(self.num_parts):
@@ -365,6 +379,7 @@ class HostBuffer:
                     n = selected.size(0)
                     gpu_target[offset : offset + n].copy_(selected)
                     offset += n
+                '''
         
         tn = time.perf_counter_ns()
         stat.load_GPU_timestamp(phase, "copy", t0, tn)
