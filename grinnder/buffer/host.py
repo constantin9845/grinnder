@@ -512,6 +512,8 @@ class HostBuffer:
             if self._ops is not None: 
                 self._ops.gather_partitions_gds(pid, file_paths, num_nodes, gpu_target, bndries)
 
+            else:
+
             # --------------------------------------------------------
             # Load full target partition
             # Equivalent to:
@@ -519,154 +521,154 @@ class HostBuffer:
             #   gpu_target[:offset].copy_(self._tensors[pid])
             # --------------------------------------------------------
 
-            print("Fallback")
+                print("Fallback")
 
-            offset = num_nodes[pid]
+                offset = num_nodes[pid]
 
-            print(f"\n--- [DEBUG Target Partition pid={pid}] ---")
+                print(f"\n--- [DEBUG Target Partition pid={pid}] ---")
 
-            self._backend.gpu_read(
-                status=3,
-                fd=None,
-                file_id=file_paths[pid],
-                tensor=gpu_target[:offset],
-                file_offset=0,
-                stream=stream,
-            )
-
-            print("Target partition loaded")
-
-            # --------------------------------------------------------
-            # Load only required boundary rows
-            #
-            # Equivalent to:
-            #
-            #   selected = self._tensors[i].index_select(0, bndries[i])
-            #   gpu_target[offset : offset + n].copy_(selected)
-            # --------------------------------------------------------
-
-            for i in range(self.num_parts):
-
-                if i == pid or bndries[i].numel() == 0:
-                    continue
-
-                part_file = file_paths[i]
-                indices = bndries[i]
-                num_rows = indices.size(0)
-                part_file_size = file_sizes[i]
-                max_valid_nodes = num_nodes[i]
-
-                if indices.device.type != "cpu":
-                    indices = indices.cpu()
-
-                # These must be LOCAL row indices into partition i,
-                # exactly as they were for self._tensors[i].index_select().
-                if (
-                    indices.min().item() < 0
-                    or indices.max().item() >= max_valid_nodes
-                ):
-                    raise RuntimeError(
-                        f"Boundary index out of range:\n"
-                        f"  target pid       = {pid}\n"
-                        f"  source pid       = {i}\n"
-                        f"  file             = {part_file}\n"
-                        f"  file size        = {part_file_size}\n"
-                        f"  rows in file     = {max_valid_nodes}\n"
-                        f"  requested rows   = {num_rows}\n"
-                        f"  min index        = {indices.min().item()}\n"
-                        f"  max index        = {indices.max().item()}\n"
-                    )
-
-                fd = None
-
-                for k in range(num_rows):
-
-                    node_idx = indices[k].item()
-
-                    file_offset = node_idx * row_bytes
-
-                    # Exactly one output row, preserving index_select order.
-                    dest_row = gpu_target[
-                        offset : offset + 1
-                    ]
-
-                    if file_offset + row_bytes > part_file_size:
-                        raise RuntimeError(
-                            f"\n[ERROR BOUNDS EXCEEDED]\n"
-                            f"  target pid = {pid}\n"
-                            f"  src_pid = {i}\n"
-                            f"  k = {k}/{num_rows}\n"
-                            f"  node_idx = {node_idx}\n"
-                            f"  file_offset = {file_offset}\n"
-                            f"  row_bytes = {row_bytes}\n"
-                            f"  file end = {file_offset + row_bytes}\n"
-                            f"  actual file size = {part_file_size}\n"
-                            f"  file = {part_file}\n"
-                        )
-
-                    if k == 0 and num_rows == 1:
-                        # Single row: open, read, close
-                        fd = self._backend.gpu_read(
-                            status=3,
-                            fd=None,
-                            file_id=part_file,
-                            tensor=dest_row,
-                            file_offset=file_offset,
-                            stream=stream,
-                        )
-
-                    elif k == 0:
-                        # First row: open handle + read
-                        fd = self._backend.gpu_read(
-                            status=0,
-                            fd=None,
-                            file_id=part_file,
-                            tensor=dest_row,
-                            file_offset=file_offset,
-                            stream=stream,
-                        )
-
-                    elif k != num_rows - 1:
-                        # Middle row: use persistent fd
-                        fd = self._backend.gpu_read(
-                            status=1,
-                            fd=fd,
-                            file_id=part_file,
-                            tensor=dest_row,
-                            file_offset=file_offset,
-                            stream=stream,
-                        )
-
-                    else:
-                        # Last row: read + close
-                        fd = self._backend.gpu_read(
-                            status=2,
-                            fd=fd,
-                            file_id=part_file,
-                            tensor=dest_row,
-                            file_offset=file_offset,
-                            stream=stream,
-                        )
-
-                    offset += 1
-
-                print(f"Boundary partition {i} data loaded")
-
-            # --------------------------------------------------------
-            # Final sanity check
-            # --------------------------------------------------------
-
-            expected_offset = (
-                target_partition_nodes +
-                boundary_nodes
-            )
-
-            if offset != expected_offset:
-                raise RuntimeError(
-                    f"Gather offset mismatch:\n"
-                    f"  final offset = {offset}\n"
-                    f"  expected = {expected_offset}"
+                self._backend.gpu_read(
+                    status=3,
+                    fd=None,
+                    file_id=file_paths[pid],
+                    tensor=gpu_target[:offset],
+                    file_offset=0,
+                    stream=stream,
                 )
+
+                print("Target partition loaded")
+
+                # --------------------------------------------------------
+                # Load only required boundary rows
+                #
+                # Equivalent to:
+                #
+                #   selected = self._tensors[i].index_select(0, bndries[i])
+                #   gpu_target[offset : offset + n].copy_(selected)
+                # --------------------------------------------------------
+
+                for i in range(self.num_parts):
+
+                    if i == pid or bndries[i].numel() == 0:
+                        continue
+
+                    part_file = file_paths[i]
+                    indices = bndries[i]
+                    num_rows = indices.size(0)
+                    part_file_size = file_sizes[i]
+                    max_valid_nodes = num_nodes[i]
+
+                    if indices.device.type != "cpu":
+                        indices = indices.cpu()
+
+                    # These must be LOCAL row indices into partition i,
+                    # exactly as they were for self._tensors[i].index_select().
+                    if (
+                        indices.min().item() < 0
+                        or indices.max().item() >= max_valid_nodes
+                    ):
+                        raise RuntimeError(
+                            f"Boundary index out of range:\n"
+                            f"  target pid       = {pid}\n"
+                            f"  source pid       = {i}\n"
+                            f"  file             = {part_file}\n"
+                            f"  file size        = {part_file_size}\n"
+                            f"  rows in file     = {max_valid_nodes}\n"
+                            f"  requested rows   = {num_rows}\n"
+                            f"  min index        = {indices.min().item()}\n"
+                            f"  max index        = {indices.max().item()}\n"
+                        )
+
+                    fd = None
+
+                    for k in range(num_rows):
+
+                        node_idx = indices[k].item()
+
+                        file_offset = node_idx * row_bytes
+
+                        # Exactly one output row, preserving index_select order.
+                        dest_row = gpu_target[
+                            offset : offset + 1
+                        ]
+
+                        if file_offset + row_bytes > part_file_size:
+                            raise RuntimeError(
+                                f"\n[ERROR BOUNDS EXCEEDED]\n"
+                                f"  target pid = {pid}\n"
+                                f"  src_pid = {i}\n"
+                                f"  k = {k}/{num_rows}\n"
+                                f"  node_idx = {node_idx}\n"
+                                f"  file_offset = {file_offset}\n"
+                                f"  row_bytes = {row_bytes}\n"
+                                f"  file end = {file_offset + row_bytes}\n"
+                                f"  actual file size = {part_file_size}\n"
+                                f"  file = {part_file}\n"
+                            )
+
+                        if k == 0 and num_rows == 1:
+                            # Single row: open, read, close
+                            fd = self._backend.gpu_read(
+                                status=3,
+                                fd=None,
+                                file_id=part_file,
+                                tensor=dest_row,
+                                file_offset=file_offset,
+                                stream=stream,
+                            )
+
+                        elif k == 0:
+                            # First row: open handle + read
+                            fd = self._backend.gpu_read(
+                                status=0,
+                                fd=None,
+                                file_id=part_file,
+                                tensor=dest_row,
+                                file_offset=file_offset,
+                                stream=stream,
+                            )
+
+                        elif k != num_rows - 1:
+                            # Middle row: use persistent fd
+                            fd = self._backend.gpu_read(
+                                status=1,
+                                fd=fd,
+                                file_id=part_file,
+                                tensor=dest_row,
+                                file_offset=file_offset,
+                                stream=stream,
+                            )
+
+                        else:
+                            # Last row: read + close
+                            fd = self._backend.gpu_read(
+                                status=2,
+                                fd=fd,
+                                file_id=part_file,
+                                tensor=dest_row,
+                                file_offset=file_offset,
+                                stream=stream,
+                            )
+
+                        offset += 1
+
+                    print(f"Boundary partition {i} data loaded")
+
+                # --------------------------------------------------------
+                # Final sanity check
+                # --------------------------------------------------------
+
+                expected_offset = (
+                    target_partition_nodes +
+                    boundary_nodes
+                )
+
+                if offset != expected_offset:
+                    raise RuntimeError(
+                        f"Gather offset mismatch:\n"
+                        f"  final offset = {offset}\n"
+                        f"  expected = {expected_offset}"
+                    )
 
         tn = time.perf_counter_ns()
         stat.load_GPU_timestamp(phase, "copy", t0, tn)
