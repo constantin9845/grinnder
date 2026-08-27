@@ -521,16 +521,6 @@ class HostBuffer:
             offset = num_nodes[pid]
 
             print(f"\n--- [DEBUG Target Partition pid={pid}] ---")
-            print(f"File: {file_paths[pid]}")
-            print(
-                f"File size: {file_sizes[pid]} bytes "
-                f"({num_nodes[pid]} rows)"
-            )
-            print(
-                f"Reading target slice: "
-                f"gpu_target[0:{offset}] "
-                f"(file_offset=0)"
-            )
 
             self._backend.gpu_read(
                 status=3,
@@ -622,16 +612,6 @@ class HostBuffer:
                             f"  file end = {file_offset + row_bytes}\n"
                             f"  actual file size = {part_file_size}\n"
                             f"  file = {part_file}\n"
-                        )
-
-                    if k < 5 or k >= num_rows - 5:
-                        print(
-                            f"  [Read {k+1}/{num_rows}] "
-                            f"node_idx={node_idx} -> "
-                            f"file_offset={file_offset} "
-                            f"(0x{file_offset:X}), "
-                            f"gpu_target index={offset}, status="
-                            f"{3 if num_rows == 1 else (0 if k == 0 else (2 if k == num_rows - 1 else 1))}"
                         )
 
                     if k == 0 and num_rows == 1:
