@@ -114,9 +114,14 @@ class StorageBackend:
         assert not tensor.is_cuda, "host_write requires a CPU tensor"
         assert tensor.is_contiguous(), "host_write requires contiguous tensor"
 
+        tensor_bytes = memoryview(tensor.untyped_storage())
 
-        with open(path, "wb") as f:
-            f.write(tensor.numpy().data)
+        try:
+            with open(path, "wb") as f:
+                f.write(tensor_bytes)
+        finally:
+            # Crucial: Release buffer export reference so untyped_storage remains resizable
+            del tensor_bytes
 
         return 0
 
