@@ -350,7 +350,7 @@ class HostBuffer:
 
         t0 = time.perf_counter_ns()
         with torch.cuda.stream(stream):
-            if self._ops is not None and 2 == 3:
+            if self._ops is not None:
                 self._ops.gather_partitions(pid, self._tensors, gpu_target, bndries)
                 print("Not a fallback")
             else:
