@@ -76,22 +76,39 @@ public:
 
     int64_t handle = next_handle_++;
 
-    struct io_uring_sqe *sqe = io_uring_get_sqe(&ring_);
-    if (!sqe) {
-      drain_completions();
-      sqe = io_uring_get_sqe(&ring_);
-      if (!sqe) {
-        close(fd);
-        throw std::runtime_error("io_uring SQ full after drain");
-      }
-    }
+    // 1GB maximum chunk size to prevent u32 / MAX_RW_COUNT overflow in kernel
+    constexpr int64_t MAX_CHUNK = 1024 * 1024 * 1024;
+    const uint8_t *ptr = static_cast<const uint8_t *>(buf);
+    int64_t bytes_remaining = nbytes;
+    int64_t curr_offset = file_offset;
+    int sub_ops_count = 0;
 
-    io_uring_prep_write(sqe, fd, buf, nbytes, file_offset);
-    io_uring_sqe_set_data(sqe, reinterpret_cast<void *>(handle));
+    while (bytes_remaining > 0) {
+      int64_t chunk_size = std::min(bytes_remaining, MAX_CHUNK);
+
+      struct io_uring_sqe *sqe = io_uring_get_sqe(&ring_);
+      if (!sqe) {
+        drain_completions();
+        sqe = io_uring_get_sqe(&ring_);
+        if (!sqe) {
+          close(fd);
+          throw std::runtime_error("io_uring SQ full after drain");
+        }
+      }
+
+      io_uring_prep_write(sqe, fd, ptr, chunk_size, curr_offset);
+      io_uring_sqe_set_data(sqe, reinterpret_cast<void *>(handle));
+
+      bytes_remaining -= chunk_size;
+      ptr += chunk_size;
+      curr_offset += chunk_size;
+      sub_ops_count++;
+    }
 
     {
       std::lock_guard<std::mutex> lock(mutex_);
       fd_map_[handle] = fd;
+      pending_sub_ops_[handle] = sub_ops_count;
     }
 
     int ret = io_uring_submit(&ring_);
@@ -99,6 +116,7 @@ public:
       std::lock_guard<std::mutex> lock(mutex_);
       close(fd);
       fd_map_.erase(handle);
+      pending_sub_ops_.erase(handle);
       throw std::runtime_error("io_uring_submit failed: " +
                                std::to_string(-ret));
     }
