@@ -9,8 +9,6 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
-#include <algorithm>
-#include <stdexcept>
 
 #include <liburing.h>
 
@@ -39,40 +37,23 @@ public:
 
     int64_t handle = next_handle_++;
 
-    // 1GB maximum chunk size to stay safely below 2GB (INT_MAX / MAX_RW_COUNT) kernel caps
-    constexpr int64_t MAX_CHUNK = 1024 * 1024 * 1024;
-    uint8_t *ptr = static_cast<uint8_t *>(buf);
-    int64_t bytes_remaining = nbytes;
-    int64_t curr_offset = file_offset;
-    int sub_ops_count = 0;
-
-    while (bytes_remaining > 0) {
-      int64_t chunk_size = std::min(bytes_remaining, MAX_CHUNK);
-
-      struct io_uring_sqe *sqe = io_uring_get_sqe(&ring_);
+    struct io_uring_sqe *sqe = io_uring_get_sqe(&ring_);
+    if (!sqe) {
+      // SQ full — drain completions first, then retry
+      drain_completions();
+      sqe = io_uring_get_sqe(&ring_);
       if (!sqe) {
-        drain_completions();
-        sqe = io_uring_get_sqe(&ring_);
-        if (!sqe) {
-          close(fd);
-          throw std::runtime_error("io_uring SQ full after drain");
-        }
+        close(fd);
+        throw std::runtime_error("io_uring SQ full after drain");
       }
-
-      io_uring_prep_read(sqe, fd, ptr, chunk_size, curr_offset);
-      // Encode handle in user data
-      io_uring_sqe_set_data(sqe, reinterpret_cast<void *>(handle));
-
-      bytes_remaining -= chunk_size;
-      ptr += chunk_size;
-      curr_offset += chunk_size;
-      sub_ops_count++;
     }
+
+    io_uring_prep_read(sqe, fd, buf, nbytes, file_offset);
+    io_uring_sqe_set_data(sqe, reinterpret_cast<void *>(handle));
 
     {
       std::lock_guard<std::mutex> lock(mutex_);
       fd_map_[handle] = fd;
-      pending_sub_ops_[handle] = sub_ops_count;
     }
 
     int ret = io_uring_submit(&ring_);
@@ -80,7 +61,6 @@ public:
       std::lock_guard<std::mutex> lock(mutex_);
       close(fd);
       fd_map_.erase(handle);
-      pending_sub_ops_.erase(handle);
       throw std::runtime_error("io_uring_submit failed: " +
                                std::to_string(-ret));
     }
@@ -96,39 +76,22 @@ public:
 
     int64_t handle = next_handle_++;
 
-    // 1GB maximum chunk size to prevent u32 / MAX_RW_COUNT overflow in kernel
-    constexpr int64_t MAX_CHUNK = 1024 * 1024 * 1024;
-    const uint8_t *ptr = static_cast<const uint8_t *>(buf);
-    int64_t bytes_remaining = nbytes;
-    int64_t curr_offset = file_offset;
-    int sub_ops_count = 0;
-
-    while (bytes_remaining > 0) {
-      int64_t chunk_size = std::min(bytes_remaining, MAX_CHUNK);
-
-      struct io_uring_sqe *sqe = io_uring_get_sqe(&ring_);
+    struct io_uring_sqe *sqe = io_uring_get_sqe(&ring_);
+    if (!sqe) {
+      drain_completions();
+      sqe = io_uring_get_sqe(&ring_);
       if (!sqe) {
-        drain_completions();
-        sqe = io_uring_get_sqe(&ring_);
-        if (!sqe) {
-          close(fd);
-          throw std::runtime_error("io_uring SQ full after drain");
-        }
+        close(fd);
+        throw std::runtime_error("io_uring SQ full after drain");
       }
-
-      io_uring_prep_write(sqe, fd, ptr, chunk_size, curr_offset);
-      io_uring_sqe_set_data(sqe, reinterpret_cast<void *>(handle));
-
-      bytes_remaining -= chunk_size;
-      ptr += chunk_size;
-      curr_offset += chunk_size;
-      sub_ops_count++;
     }
+
+    io_uring_prep_write(sqe, fd, buf, nbytes, file_offset);
+    io_uring_sqe_set_data(sqe, reinterpret_cast<void *>(handle));
 
     {
       std::lock_guard<std::mutex> lock(mutex_);
       fd_map_[handle] = fd;
-      pending_sub_ops_[handle] = sub_ops_count;
     }
 
     int ret = io_uring_submit(&ring_);
@@ -136,7 +99,6 @@ public:
       std::lock_guard<std::mutex> lock(mutex_);
       close(fd);
       fd_map_.erase(handle);
-      pending_sub_ops_.erase(handle);
       throw std::runtime_error("io_uring_submit failed: " +
                                std::to_string(-ret));
     }
@@ -152,6 +114,7 @@ public:
       }
     }
 
+    // Reap completions until we find our handle
     while (true) {
       struct io_uring_cqe *cqe;
       int ret = io_uring_wait_cqe(&ring_, &cqe);
@@ -160,24 +123,14 @@ public:
                                  std::to_string(-ret));
 
       int64_t h = reinterpret_cast<int64_t>(io_uring_cqe_get_data(cqe));
-      int res = cqe->res;
       io_uring_cqe_seen(&ring_, cqe);
 
-      if (res < 0) {
-        throw std::runtime_error("io_uring operation failed with error code: " +
-                                 std::to_string(-res));
-      }
-
       std::lock_guard<std::mutex> lock(mutex_);
-      if (--pending_sub_ops_[h] == 0) {
-        completed_.insert(h);
-        pending_sub_ops_.erase(h);
-      }
-
-      if (h == handle && completed_.count(handle)) {
+      if (h == handle) {
         close_and_remove(h);
         return;
       }
+      completed_.insert(h);
     }
   }
 
@@ -196,12 +149,12 @@ public:
       for (int64_t h : pending)
         wait(h);
     }
+    // Close any remaining completed FDs
     std::lock_guard<std::mutex> lock(mutex_);
     for (auto &kv : fd_map_)
       close(kv.second);
     fd_map_.clear();
     completed_.clear();
-    pending_sub_ops_.clear();
   }
 
   bool poll(int64_t handle) {
@@ -211,10 +164,16 @@ public:
         return true;
     }
 
-    drain_completions();
-
-    std::lock_guard<std::mutex> lock(mutex_);
-    return completed_.count(handle) > 0;
+    struct io_uring_cqe *cqe;
+    int ret = io_uring_peek_cqe(&ring_, &cqe);
+    if (ret == 0) {
+      int64_t h = reinterpret_cast<int64_t>(io_uring_cqe_get_data(cqe));
+      io_uring_cqe_seen(&ring_, cqe);
+      std::lock_guard<std::mutex> lock(mutex_);
+      completed_.insert(h);
+      return h == handle;
+    }
+    return false;
   }
 
   int pending() const {
@@ -228,39 +187,59 @@ public:
 
 private:
   void drain_completions() {
+    // Non-blocking drain of all available completions
     struct io_uring_cqe *cqe;
     while (io_uring_peek_cqe(&ring_, &cqe) == 0) {
       int64_t h = reinterpret_cast<int64_t>(io_uring_cqe_get_data(cqe));
-      int res = cqe->res;
       io_uring_cqe_seen(&ring_, cqe);
-
-      if (res < 0) {
-        throw std::runtime_error("io_uring operation failed with error code: " +
-                                 std::to_string(-res));
-      }
-
       std::lock_guard<std::mutex> lock(mutex_);
-      if (--pending_sub_ops_[h] == 0) {
-        completed_.insert(h);
-        pending_sub_ops_.erase(h);
-      }
+      completed_.insert(h);
     }
   }
 
   void close_and_remove(int64_t handle) {
+    // Must be called with mutex_ held
     auto it = fd_map_.find(handle);
     if (it != fd_map_.end()) {
       close(it->second);
       fd_map_.erase(it);
     }
     completed_.erase(handle);
-    pending_sub_ops_.erase(handle);
   }
 
   struct io_uring ring_;
   std::atomic<int64_t> next_handle_;
   mutable std::mutex mutex_;
   std::unordered_map<int64_t, int> fd_map_;
-  std::unordered_map<int64_t, int> pending_sub_ops_;
   std::unordered_set<int64_t> completed_;
 };
+
+// ============================================================
+// Public API
+// ============================================================
+
+IoUringEngine::IoUringEngine(int queue_depth)
+    : impl(new IoUringEngineImpl(queue_depth)) {}
+
+IoUringEngine::~IoUringEngine() { delete impl; }
+
+bool IoUringEngine::has_io_uring() const { return impl->has_io_uring(); }
+
+int64_t IoUringEngine::submit_read(const std::string &path, torch::Tensor dst,
+                                   int64_t file_offset, int64_t nbytes) {
+  AT_ASSERTM(!dst.is_cuda(), "submit_read: tensor must be on CPU");
+  AT_ASSERTM(dst.is_contiguous(), "submit_read: tensor must be contiguous");
+  return impl->submit_read(path, dst.data_ptr(), file_offset, nbytes);
+}
+
+int64_t IoUringEngine::submit_write(const std::string &path, torch::Tensor src,
+                                    int64_t file_offset, int64_t nbytes) {
+  AT_ASSERTM(!src.is_cuda(), "submit_write: tensor must be on CPU");
+  AT_ASSERTM(src.is_contiguous(), "submit_write: tensor must be contiguous");
+  return impl->submit_write(path, src.data_ptr(), file_offset, nbytes);
+}
+
+void IoUringEngine::wait(int64_t handle) { impl->wait(handle); }
+void IoUringEngine::wait_all() { impl->wait_all(); }
+bool IoUringEngine::poll(int64_t handle) { return impl->poll(handle); }
+int IoUringEngine::pending() const { return impl->pending(); }
