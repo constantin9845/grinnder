@@ -154,10 +154,7 @@ class StorageBackend:
         data = data.tobytes()
 
         with open(path, "wb") as f:
-            print("file opened", flush=True)
-            print("writing...", flush=True)
             f.write(data)
-            print("write completed", flush=True)
 
         import gc
         del data
