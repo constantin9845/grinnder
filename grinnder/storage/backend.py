@@ -108,20 +108,19 @@ class StorageBackend:
     # ------------------------------------------------------------------
 
     def host_write(self, tensor: Tensor, file_id: str, async_: bool = True) -> int:
+        import ctypes
         """Write a CPU tensor to NVMe synchronously."""
         path = self._path(file_id)
 
         assert not tensor.is_cuda, "host_write requires a CPU tensor"
         assert tensor.is_contiguous(), "host_write requires contiguous tensor"
 
-        tensor_bytes = memoryview(tensor.untyped_storage())
+        ptr = tensor.data_ptr()
+        nbytes = tensor.numel() * tensor.element_size()
+        buffer = (ctypes.c_char * nbytes).from_address(ptr)
 
-        try:
-            with open(path, "wb") as f:
-                f.write(tensor_bytes)
-        finally:
-            # Crucial: Release buffer export reference so untyped_storage remains resizable
-            del tensor_bytes
+        with open(path, "wb") as f:
+            f.write(buffer)
 
         return 0
 
