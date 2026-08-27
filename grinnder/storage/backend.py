@@ -149,98 +149,20 @@ class StorageBackend:
         assert not tensor.is_cuda, "host_write requires a CPU tensor"
         assert tensor.is_contiguous(), "host_write requires contiguous tensor"
 
-        print("========== HOST WRITE DEBUG ==========", flush=True)
-        print("path                 =", path, flush=True)
-        print("tensor shape         =", tensor.shape, flush=True)
-        print("tensor dtype         =", tensor.dtype, flush=True)
-        print("tensor device        =", tensor.device, flush=True)
-        print("tensor contiguous    =", tensor.is_contiguous(), flush=True)
-        print("tensor data_ptr      =", tensor.data_ptr(), flush=True)
-        print(
-            "tensor storage size  =",
-            tensor.untyped_storage().size(),
-            flush=True,
-        )
-        print(
-            "tensor storage ptr   =",
-            tensor.untyped_storage().data_ptr(),
-            flush=True,
-        )
-        print(
-            "tensor resizable     =",
-            tensor.untyped_storage().resizable(),
-            flush=True,
-        )
-
-        print("creating CPU copy...", flush=True)
         buffer = tensor.clone()
-
-        print("CPU copy created", flush=True)
-        print("buffer shape         =", buffer.shape, flush=True)
-        print("buffer dtype         =", buffer.dtype, flush=True)
-        print("buffer data_ptr      =", buffer.data_ptr(), flush=True)
-        print(
-            "buffer storage size  =",
-            buffer.untyped_storage().size(),
-            flush=True,
-        )
-        print(
-            "buffer resizable     =",
-            buffer.untyped_storage().resizable(),
-            flush=True,
-        )
-        print(
-            "original resizable   =",
-            tensor.untyped_storage().resizable(),
-            flush=True,
-        )
-
-        print("converting copy to numpy...", flush=True)
         data = buffer.numpy()
-
-        print("numpy conversion done", flush=True)
-        print(
-            "original resizable   =",
-            tensor.untyped_storage().resizable(),
-            flush=True,
-        )
-        print(
-            "buffer resizable     =",
-            buffer.untyped_storage().resizable(),
-            flush=True,
-        )
-
-        print("converting numpy to bytes...", flush=True)
         data = data.tobytes()
 
-        print("bytes conversion done", flush=True)
-        print("bytes size           =", len(data), flush=True)
-        print(
-            "original resizable   =",
-            tensor.untyped_storage().resizable(),
-            flush=True,
-        )
-
-        print("opening file...", flush=True)
         with open(path, "wb") as f:
             print("file opened", flush=True)
             print("writing...", flush=True)
             f.write(data)
             print("write completed", flush=True)
 
-        print("closing file...", flush=True)
-
         import gc
         del data
         del buffer
         gc.collect()
-
-        print(
-            "original resizable after write =",
-            tensor.untyped_storage().resizable(),
-            flush=True,
-        )
-        print("========== HOST WRITE DONE ==========", flush=True)
 
         return 1
 
