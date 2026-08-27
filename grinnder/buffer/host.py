@@ -556,19 +556,6 @@ class HostBuffer:
                 if indices.device.type != "cpu":
                     indices = indices.cpu()
 
-                print(f"--- [DEBUG Boundary Partition src_pid={i}] ---")
-                print(f"File: {part_file}")
-                print(
-                    f"File size: {part_file_size} bytes "
-                    f"(Max valid node index: {max_valid_nodes - 1})"
-                )
-                print(f"Requested boundary index count: {num_rows}")
-                print(
-                    f"Indices min/max: "
-                    f"min={indices.min().item()}, "
-                    f"max={indices.max().item()}"
-                )
-
                 # These must be LOCAL row indices into partition i,
                 # exactly as they were for self._tensors[i].index_select().
                 if (
