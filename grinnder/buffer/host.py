@@ -843,8 +843,11 @@ class HostBuffer:
                 self._tensors[pid].element_size(),
                 self._tensors[pid].numel() * self._tensors[pid].element_size(),
             )
+            print("resizable before write:", self._tensors[pid].untyped_storage().resizable())
             h = self._backend.host_write(self._tensors[pid], file_id)
             self._backend.wait(h)
+            storage = self._tensors[pid].untyped_storage()
+            print("resizable before release:", storage.resizable())
         else:
             handles = []
             for i in range(self.num_parts):
