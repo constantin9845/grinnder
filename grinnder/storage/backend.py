@@ -114,6 +114,13 @@ class StorageBackend:
         assert not tensor.is_cuda, "host_write requires a CPU tensor"
         assert tensor.is_contiguous(), "host_write requires contiguous tensor"
 
+        tensor_bytes = tensor.untyped_storage().bytes()
+
+        with open(path, "wb") as f:
+            f.write(tensor_bytes)
+
+        return 0
+
         return self._io_engine.submit_write(
             path, tensor, 0, tensor.numel() * tensor.element_size()
         )
