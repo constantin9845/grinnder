@@ -447,28 +447,6 @@ class HostBuffer:
             for i in range(self.num_parts)
         ]
 
-        # ------------------------------------------------------------
-        # Fast Path: Native C++ Direct GDS Engine
-        # ------------------------------------------------------------
-        if self._ops is not None:
-            with torch.cuda.stream(stream):
-                self._ops.gather_partitions_direct(
-                    pid,
-                    file_paths,
-                    gpu_target,
-                    bndries,
-                )
-
-            tn = time.perf_counter_ns()
-            stat.load_GPU_timestamp(phase, "gather", t0, tn)
-            stat.load_GPU_timestamp(phase, "copy", t0, tn)
-            return
-
-        # ------------------------------------------------------------
-        # Fallback Python / KvikIO Path
-        # ------------------------------------------------------------
-        current_stream = torch.cuda.current_stream(device)
-
         feature_dim = gpu_target.size(1)
         bytes_per_elem = gpu_target.element_size()
         row_bytes = feature_dim * bytes_per_elem
@@ -483,6 +461,34 @@ class HostBuffer:
             file_sizes[i] // row_bytes
             for i in range(self.num_parts)
         ]
+
+        # ------------------------------------------------------------
+        # Fast Path: Native C++ Direct GDS Engine
+        # int pid,
+        # std::vector<std::string> file_paths,
+        # std::vector<int64_t> num_nodes,
+        # torch::Tensor dst,
+        # std::vector<torch::Tensor> boundaries
+        # ------------------------------------------------------------
+        if self._ops is not None:
+            with torch.cuda.stream(stream):
+                self._ops.gather_partitions_direct(
+                    pid,
+                    file_paths,
+                    num_nodes,
+                    gpu_target,
+                    bndries,
+                )
+
+            tn = time.perf_counter_ns()
+            stat.load_GPU_timestamp(phase, "gather", t0, tn)
+            stat.load_GPU_timestamp(phase, "copy", t0, tn)
+            return
+
+        # ------------------------------------------------------------
+        # Fallback Python / KvikIO Path
+        # ------------------------------------------------------------
+        current_stream = torch.cuda.current_stream(device)
 
         for i in range(self.num_parts):
             if file_sizes[i] == 0:
