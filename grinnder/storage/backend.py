@@ -119,6 +119,7 @@ class StorageBackend:
             # Single read cycle (full file, etc) : open - read - close
             if status == 0:
                 path = self._path(file_id)
+                print(path)
                 f = self._kvikio.CuFile(path, "r")
                 f.read(tensor, file_offset=offset)
                 f.close()
@@ -127,6 +128,7 @@ class StorageBackend:
             # First read : open - read
             elif status == 1:
                 path = self._path(file_id)
+                print(path)
                 f = self._kvikio.CuFile(path, "r")
                 f.read(tensor, file_offset=offset)
                 return f
