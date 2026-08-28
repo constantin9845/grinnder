@@ -114,13 +114,14 @@ class StorageBackend:
         ) -> None:
             """Read from NVMe directly into GPU tensor via GDS."""
             assert tensor.is_cuda, "gpu_read requires a CUDA tensor"
-            assert tensor.is_contiguous(), "gpu_read requires contiguous tensor"
+            tensor_detached = tensor.detach()
+            assert tensor_detached.is_contiguous(), "gpu_read requires contiguous tensor"
     
             # Single read cycle (full file, etc) : open - read - close
             if status == 0:
                 path = self._path(file_id)
                 f = self._kvikio.CuFile(path, "r")
-                f.read(tensor, file_offset=offset)
+                f.read(tensor_detached, file_offset=offset)
                 f.close()
                 return None
     
@@ -128,17 +129,17 @@ class StorageBackend:
             elif status == 1:
                 path = self._path(file_id)
                 f = self._kvikio.CuFile(path, "r")
-                f.read(tensor, file_offset=offset)
+                f.read(tensor_detached, file_offset=offset)
                 return f
     
             # Intermediate read : read
             elif status == 2:
-                fd.read(tensor, file_offset=offset)
+                fd.read(tensor_detached, file_offset=offset)
                 return fd
     
             # last read : read - close
             elif status == 3:
-                fd.read(tensor, file_offset=offset)
+                fd.read(tensor_detached, file_offset=offset)
                 fd.close()
                 return None
     

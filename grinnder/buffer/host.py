@@ -520,120 +520,118 @@ class HostBuffer:
 
             offset = num_nodes[pid]
 
-            with torch.no_grad():
+            # read full target partition fill
+            self._backend.gpu_read_direct(
+                status=0,
+                fd=None,
+                file_id=f"{self._backend._storage_dir}/{self._file_prefix}_p{pid}",
+                tensor=gpu_target[:offset],
+                offset=0,
+                stream=stream,
+            )
 
-                # read full target partition fill
-                self._backend.gpu_read_direct(
-                    status=0,
-                    fd=None,
-                    file_id=f"{self._backend._storage_dir}/{self._file_prefix}_p{pid}",
-                    tensor=gpu_target[:offset],
-                    offset=0,
-                    stream=stream,
+            print("Target partition loaded")
+
+            # --------------------------------------------------------
+            # Load only required boundary rows
+            #
+            # Equivalent to:
+            #
+            #   selected = self._tensors[i].index_select(0, bndries[i])
+            #   gpu_target[offset : offset + n].copy_(selected)
+            # --------------------------------------------------------
+
+            for i in range(self.num_parts):
+
+                if i == pid or bndries[i].numel() == 0:
+                    continue
+
+                part_file = file_paths[i]
+                indices = bndries[i]
+                num_rows = indices.size(0)
+                part_file_size = file_sizes[i]
+                max_valid_nodes = num_nodes[i]
+
+                if indices.device.type != "cpu":
+                    indices = indices.cpu()
+
+
+                fd = None
+
+                # iterate nodes from partition
+                for k in range(num_rows):
+
+                    node_idx = indices[k].item()
+                    file_offset = node_idx * row_bytes
+
+                    # Exactly one output row, preserving index_select order.
+                    dest_row = gpu_target[
+                        offset : offset + 1
+                    ]
+
+                    if k == 0 and num_rows == 1:
+                        # Single row: open, read, close
+                        fd = self._backend.gpu_read_direct(
+                            status=0,
+                            fd=None,
+                            file_id=f"{self._backend._storage_dir}/{self._file_prefix}_p{i}",
+                            tensor=dest_row,
+                            offset=file_offset,
+                            stream=stream,
+                        )
+
+                    elif k == 0:
+                        # First row: open handle + read
+                        fd = self._backend.gpu_read_direct(
+                            status=1,
+                            fd=None,
+                            file_id=f"{self._backend._storage_dir}/{self._file_prefix}_p{i}",
+                            tensor=dest_row,
+                            offset=file_offset,
+                            stream=stream,
+                        )
+
+                    elif k != num_rows - 1:
+                        # Middle row: use persistent fd
+                        fd = self._backend.gpu_read_direct(
+                            status=2,
+                            fd=fd,
+                            file_id=f"{self._backend._storage_dir}/{self._file_prefix}_p{i}",
+                            tensor=dest_row,
+                            offset=file_offset,
+                            stream=stream,
+                        )
+
+                    else:
+                        # Last row: read + close
+                        fd = self._backend.gpu_read_direct(
+                            status=3,
+                            fd=fd,
+                            file_id=f"{self._backend._storage_dir}/{self._file_prefix}_p{i}",
+                            tensor=dest_row,
+                            offset=file_offset,
+                            stream=stream,
+                        )
+
+                    offset += 1
+
+                print(f"Boundary partition {i} data loaded")
+
+            # --------------------------------------------------------
+            # Final sanity check
+            # --------------------------------------------------------
+
+            expected_offset = (
+                target_partition_nodes +
+                boundary_nodes
+            )
+
+            if offset != expected_offset:
+                raise RuntimeError(
+                    f"Gather offset mismatch:\n"
+                    f"  final offset = {offset}\n"
+                    f"  expected = {expected_offset}"
                 )
-
-                print("Target partition loaded")
-
-                # --------------------------------------------------------
-                # Load only required boundary rows
-                #
-                # Equivalent to:
-                #
-                #   selected = self._tensors[i].index_select(0, bndries[i])
-                #   gpu_target[offset : offset + n].copy_(selected)
-                # --------------------------------------------------------
-
-                for i in range(self.num_parts):
-
-                    if i == pid or bndries[i].numel() == 0:
-                        continue
-
-                    part_file = file_paths[i]
-                    indices = bndries[i]
-                    num_rows = indices.size(0)
-                    part_file_size = file_sizes[i]
-                    max_valid_nodes = num_nodes[i]
-
-                    if indices.device.type != "cpu":
-                        indices = indices.cpu()
-
-
-                    fd = None
-
-                    # iterate nodes from partition
-                    for k in range(num_rows):
-
-                        node_idx = indices[k].item()
-                        file_offset = node_idx * row_bytes
-
-                        # Exactly one output row, preserving index_select order.
-                        dest_row = gpu_target[
-                            offset : offset + 1
-                        ]
-
-                        if k == 0 and num_rows == 1:
-                            # Single row: open, read, close
-                            fd = self._backend.gpu_read_direct(
-                                status=0,
-                                fd=None,
-                                file_id=f"{self._backend._storage_dir}/{self._file_prefix}_p{i}",
-                                tensor=dest_row,
-                                offset=file_offset,
-                                stream=stream,
-                            )
-
-                        elif k == 0:
-                            # First row: open handle + read
-                            fd = self._backend.gpu_read_direct(
-                                status=1,
-                                fd=None,
-                                file_id=f"{self._backend._storage_dir}/{self._file_prefix}_p{i}",
-                                tensor=dest_row,
-                                offset=file_offset,
-                                stream=stream,
-                            )
-
-                        elif k != num_rows - 1:
-                            # Middle row: use persistent fd
-                            fd = self._backend.gpu_read_direct(
-                                status=2,
-                                fd=fd,
-                                file_id=f"{self._backend._storage_dir}/{self._file_prefix}_p{i}",
-                                tensor=dest_row,
-                                offset=file_offset,
-                                stream=stream,
-                            )
-
-                        else:
-                            # Last row: read + close
-                            fd = self._backend.gpu_read_direct(
-                                status=3,
-                                fd=fd,
-                                file_id=f"{self._backend._storage_dir}/{self._file_prefix}_p{i}",
-                                tensor=dest_row,
-                                offset=file_offset,
-                                stream=stream,
-                            )
-
-                        offset += 1
-
-                    print(f"Boundary partition {i} data loaded")
-
-                # --------------------------------------------------------
-                # Final sanity check
-                # --------------------------------------------------------
-
-                expected_offset = (
-                    target_partition_nodes +
-                    boundary_nodes
-                )
-
-                if offset != expected_offset:
-                    raise RuntimeError(
-                        f"Gather offset mismatch:\n"
-                        f"  final offset = {offset}\n"
-                        f"  expected = {expected_offset}"
-                    )
 
         tn = time.perf_counter_ns()
         stat.load_GPU_timestamp(phase, "copy", t0, tn)
