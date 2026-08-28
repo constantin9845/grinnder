@@ -423,7 +423,7 @@ class HostBuffer:
 
         # File paths
         file_paths = [
-            f"{self._backend._storage_dir}/{self._file_prefix}_p{i}"
+            f"{self._backend._storage_dir}/{self._file_prefix}_p{i}.pt"
             for i in range(self.num_parts)
         ]
 

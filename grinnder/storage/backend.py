@@ -60,7 +60,7 @@ class StorageBackend:
             )
 
     def _path(self, file_id: str) -> str:
-        return os.path.join(self._storage_dir, f"{file_id}.pt")
+        return os.path.join(self._storage_dir, f"{file_id}")
 
     # ------------------------------------------------------------------
     # GPU <-> Storage (kvikio / GPUDirect Storage)
