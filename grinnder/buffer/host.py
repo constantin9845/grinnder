@@ -535,12 +535,12 @@ class HostBuffer:
             '''
 
             # read full target partition fill
-            self._backend.gpu_read(
+            self._backend.gpu_read_direct(
                 status=0,
                 fd=None,
                 file_id=file_paths[pid],
                 tensor=gpu_target[:offset],
-                file_offset=0,
+                offset=0,
                 stream=stream,
             )
 
@@ -585,45 +585,45 @@ class HostBuffer:
 
                     if k == 0 and num_rows == 1:
                         # Single row: open, read, close
-                        fd = self._backend.gpu_read(
+                        fd = self._backend.gpu_read_direct(
                             status=0,
                             fd=None,
                             file_id=part_file,
                             tensor=dest_row,
-                            file_offset=file_offset,
+                            offset=file_offset,
                             stream=stream,
                         )
 
                     elif k == 0:
                         # First row: open handle + read
-                        fd = self._backend.gpu_read(
+                        fd = self._backend.gpu_read_direct(
                             status=1,
                             fd=None,
                             file_id=part_file,
                             tensor=dest_row,
-                            file_offset=file_offset,
+                            offset=file_offset,
                             stream=stream,
                         )
 
                     elif k != num_rows - 1:
                         # Middle row: use persistent fd
-                        fd = self._backend.gpu_read(
+                        fd = self._backend.gpu_read_direct(
                             status=2,
                             fd=fd,
                             file_id=part_file,
                             tensor=dest_row,
-                            file_offset=file_offset,
+                            offset=file_offset,
                             stream=stream,
                         )
 
                     else:
                         # Last row: read + close
-                        fd = self._backend.gpu_read(
+                        fd = self._backend.gpu_read_direct(
                             status=3,
                             fd=fd,
                             file_id=part_file,
                             tensor=dest_row,
-                            file_offset=file_offset,
+                            offset=file_offset,
                             stream=stream,
                         )
 

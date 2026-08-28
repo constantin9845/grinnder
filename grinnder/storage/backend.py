@@ -88,48 +88,66 @@ class StorageBackend:
 
     def gpu_read(
         self,
-        status: int,
-        fd,
         file_id: str,
         tensor: Tensor,
-        offset: int,
         stream: Optional[torch.cuda.Stream] = None,
     ) -> None:
         """Read from NVMe directly into GPU tensor via GDS."""
+        path = self._path(file_id)
         assert tensor.is_cuda, "gpu_read requires a CUDA tensor"
         assert tensor.is_contiguous(), "gpu_read requires contiguous tensor"
 
-        # Single read cycle (full file, etc) : open - read - close
-        if status == 0:
-            path = self._path(file_id)
-            f = self._kvikio.CuFile(path, "r")
-            f.read(tensor, file_offset=offset)
-            f.close()
-            return None
-
-        # First read : open - read
-        elif status == 1:
-            path = self._path(file_id)
-            f = self._kvikio.CuFile(path, "r")
-            f.read(tensor, file_offset=offset)
-            return f
-
-        # Intermediate read : read
-        elif status == 2:
-            fd.read(tensor, file_offset=offset)
-            return fd
-
-        # last read : read - close
-        elif status == 3:
-            fd.read(tensor, file_offset=offset)
-            fd.close()
-            return None
-
-        else: 
-            print("Unknown gpu read status")
-            exit(1)
+        f = self._kvikio.CuFile(path, "r")
+        f.read(tensor, file_offset=0)
+        f.close()
 
         stat.load_GDS_timestamp()
+
+    def gpu_read_direct(
+            self,
+            status: int,
+            fd,
+            file_id: str,
+            tensor: Tensor,
+            offset: int,
+            stream: Optional[torch.cuda.Stream] = None,
+        ) -> None:
+            """Read from NVMe directly into GPU tensor via GDS."""
+            assert tensor.is_cuda, "gpu_read requires a CUDA tensor"
+            assert tensor.is_contiguous(), "gpu_read requires contiguous tensor"
+    
+            # Single read cycle (full file, etc) : open - read - close
+            if status == 0:
+                path = self._path(file_id)
+                f = self._kvikio.CuFile(path, "r")
+                f.read(tensor, file_offset=offset)
+                f.close()
+                return None
+    
+            # First read : open - read
+            elif status == 1:
+                path = self._path(file_id)
+                f = self._kvikio.CuFile(path, "r")
+                f.read(tensor, file_offset=offset)
+                return f
+    
+            # Intermediate read : read
+            elif status == 2:
+                fd.read(tensor, file_offset=offset)
+                return fd
+    
+            # last read : read - close
+            elif status == 3:
+                fd.read(tensor, file_offset=offset)
+                fd.close()
+                return None
+    
+            else: 
+                print("Unknown gpu read status")
+                exit(1)
+    
+            stat.load_GDS_timestamp()
+    
 
     # ------------------------------------------------------------------
     # Host <-> Storage (io_uring)
