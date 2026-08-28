@@ -404,28 +404,11 @@ class HostBuffer:
         GPU layout:
             [intra(pid) | boundary_from_p0 | ... | boundary_from_pN]
 
-        The native C++ implementation submits individual cuFileReadAsync()
-        operations without contiguous-block grouping.
-
-        Args:
-            phase:
-                Current execution phase name for statistics.
-
-            pid:
-                Target partition index.
-
-            gpu_target:
-                Pre-allocated CUDA tensor [total_nodes, feature_dim].
-
-            boundaries:
-                boundaries[src_pid] is an index tensor into partition src_pid.
-                boundaries[pid] should be None.
-
-            stream:
-                CUDA stream on which the GDS operations are submitted.
+        The native C++ implementation performs one async GDS read per
+        requested boundary row. No contiguous-row grouping is performed.
         """
+
         import os
-        import time
 
         t0 = time.perf_counter_ns()
 
@@ -439,12 +422,9 @@ class HostBuffer:
 
         device = gpu_target.device
 
-        # ------------------------------------------------------------
-        # Normalize boundaries.
-        #
-        # Keep them on CPU because the C++ implementation copies them
-        # to CPU anyway, and this avoids unnecessary GPU indexing work.
-        # ------------------------------------------------------------
+        # ============================================================
+        # Normalize boundaries
+        # ============================================================
 
         bndries = []
 
@@ -461,36 +441,26 @@ class HostBuffer:
                         device="cpu",
                     )
                 )
-
             else:
-                b = boundaries[i]
-
-                if b.device.type != "cpu":
-                    b = b.cpu()
-
                 bndries.append(
-                    b.to(
-                        dtype=torch.long
-                    ).contiguous()
+                    boundaries[i]
                 )
 
 
-        # ------------------------------------------------------------
+        # ============================================================
         # File paths
-        # ------------------------------------------------------------
+        # ============================================================
 
         file_paths = [
-            os.path.join(
-                self._backend._storage_dir,
-                f"{self._file_prefix}_p{i}.pt",
-            )
+            f"{self._backend._storage_dir}/"
+            f"{self._file_prefix}_p{i}.pt"
             for i in range(self.num_parts)
         ]
 
 
-        # ------------------------------------------------------------
-        # Tensor information
-        # ------------------------------------------------------------
+        # ============================================================
+        # Tensor geometry
+        # ============================================================
 
         feature_dim = gpu_target.size(1)
 
@@ -503,10 +473,12 @@ class HostBuffer:
             bytes_per_elem
         )
 
+        bytes_to_gb = 1024 ** 3
 
-        # ------------------------------------------------------------
-        # Validate files and determine number of rows.
-        # ------------------------------------------------------------
+
+        # ============================================================
+        # Determine partition sizes without loading files
+        # ============================================================
 
         file_sizes = []
 
@@ -526,7 +498,7 @@ class HostBuffer:
 
             if size % row_bytes != 0:
                 raise RuntimeError(
-                    "Partition file size is not divisible "
+                    f"Partition file size is not divisible "
                     f"by row_bytes:\n"
                     f"  file={path}\n"
                     f"  file_size={size}\n"
@@ -542,27 +514,19 @@ class HostBuffer:
         ]
 
 
-        # ------------------------------------------------------------
-        # Target partition
-        # ------------------------------------------------------------
+        # ============================================================
+        # Boundary statistics
+        # ============================================================
 
         target_partition_nodes = (
             num_nodes[pid]
         )
-
-
-        # ------------------------------------------------------------
-        # Boundary statistics
-        # ------------------------------------------------------------
 
         boundary_nodes = sum(
             b.numel()
             for i, b in enumerate(bndries)
             if i != pid
         )
-
-
-        bytes_to_gb = 1024 ** 3
 
 
         target_partition_gb = (
@@ -579,8 +543,7 @@ class HostBuffer:
 
         stat.add_actual_size(
             target_partition_gb,
-            target_partition_gb +
-            boundary_gb,
+            target_partition_gb + boundary_gb,
         )
 
 
@@ -597,7 +560,7 @@ class HostBuffer:
         overall_pct = (
             boundary_nodes /
             total_boundary_parts_nodes *
-            100.0
+            100
             if total_boundary_parts_nodes > 0
             else 0.0
         )
@@ -608,9 +571,9 @@ class HostBuffer:
         )
 
 
-        # ------------------------------------------------------------
-        # Validate GPU destination.
-        # ------------------------------------------------------------
+        # ============================================================
+        # Destination size
+        # ============================================================
 
         required_nodes = (
             target_partition_nodes +
@@ -633,28 +596,69 @@ class HostBuffer:
             )
 
 
-        # ------------------------------------------------------------
-        # Make sure native ops exist.
-        # ------------------------------------------------------------
+        # ============================================================
+        # Convert boundaries to CPU tensors.
+        #
+        # C++ will copy them again if necessary, but keeping them CPU
+        # here avoids passing CUDA index tensors into the extension.
+        # ============================================================
+
+        native_boundaries = []
+
+        for i in range(self.num_parts):
+
+            bnd = bndries[i]
+
+            if bnd.numel() == 0:
+                native_boundaries.append(
+                    torch.empty(
+                        0,
+                        dtype=torch.long,
+                        device="cpu",
+                    )
+                )
+
+            else:
+
+                if bnd.device.type != "cpu":
+                    bnd = bnd.cpu()
+
+                native_boundaries.append(
+                    bnd.to(
+                        dtype=torch.long
+                    ).contiguous()
+                )
+
+
+        # ============================================================
+        # Native GDS path
+        # ============================================================
 
         if self._ops is None:
             raise RuntimeError(
-                "Native GDS ops are not available. "
-                "This function is configured for the "
-                "native gather_partitions_direct path."
+                "Native GDS extension is not available "
+                "(self._ops is None)"
             )
 
 
-        # ------------------------------------------------------------
-        # Submit native GDS operations.
-        #
-        # IMPORTANT:
-        #
-        # Do not synchronize here.
-        #
-        # The C++ function submits all cuFileReadAsync operations
-        # and performs the final synchronization itself.
-        # ------------------------------------------------------------
+        # Make the native operation wait for work already submitted
+        # on the current stream, while the native C++ code itself uses
+        # the current CUDA stream.
+        current_stream = (
+            torch.cuda.current_stream(
+                device
+            )
+        )
+
+
+        stream.wait_stream(
+            current_stream
+        )
+
+
+        # ============================================================
+        # Launch native GDS gather on requested stream
+        # ============================================================
 
         with torch.cuda.stream(stream):
 
@@ -663,13 +667,22 @@ class HostBuffer:
                 file_paths,
                 num_nodes,
                 gpu_target,
-                bndries,
+                native_boundaries,
             )
 
 
-        # ------------------------------------------------------------
-        # Timing
-        # ------------------------------------------------------------
+        # ============================================================
+        # IMPORTANT:
+        #
+        # The C++ implementation currently synchronizes internally
+        # before returning because it needs to:
+        #
+        #   - verify bytes_read
+        #   - close cuFile handles
+        #   - deregister GPU memory safely
+        #
+        # Therefore returning here is safe.
+        # ============================================================
 
         tn = time.perf_counter_ns()
 
@@ -688,9 +701,9 @@ class HostBuffer:
         )
 
 
-        # ------------------------------------------------------------
-        # Statistics / logging
-        # ------------------------------------------------------------
+        # ============================================================
+        # Stats / logging
+        # ============================================================
 
         total_bytes = (
             required_nodes *
@@ -705,11 +718,9 @@ class HostBuffer:
 
         print(
             f"\tPartition {pid} loads "
-            f"{gb} GB from NVMe via "
-            f"async GDS "
+            f"{gb} GB from NVMe via native GDS "
             f"({boundary_nodes} boundary rows)"
         )
-
 
 
     # ------------------------------------------------------------------
