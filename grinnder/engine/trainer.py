@@ -1061,7 +1061,7 @@ class Trainer:
 
                     if self.config.mode == "grinnder" and prefetch_next_feature:
                         #self._prepare_cache_partition(layer_id, next_pid, "backward")
-                        self.device_features[layer_id].async_gather_gather(
+                        self.device_features[layer_id].async_gather_direct(
                             "backward",
                             pid=next_pid,
                             host_buffer=self.host_features[layer_id],
