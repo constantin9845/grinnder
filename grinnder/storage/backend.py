@@ -121,7 +121,7 @@ class StorageBackend:
             if status == 0:
                 path = self._path(file_id)
                 f = self._kvikio.CuFile(path, "r")
-                f.read(tensor_detached, file_offset=offset)
+                f.read(tensor_detached, file_offset=offset, stream=stream)
                 f.close()
                 return None
     
@@ -129,17 +129,17 @@ class StorageBackend:
             elif status == 1:
                 path = self._path(file_id)
                 f = self._kvikio.CuFile(path, "r")
-                f.read(tensor_detached, file_offset=offset)
+                f.read(tensor_detached, file_offset=offset, stream=stream)
                 return f
     
             # Intermediate read : read
             elif status == 2:
-                fd.read(tensor_detached, file_offset=offset)
+                fd.read(tensor_detached, file_offset=offset, stream=stream)
                 return fd
     
             # last read : read - close
             elif status == 3:
-                fd.read(tensor_detached, file_offset=offset)
+                fd.read(tensor_detached, file_offset=offset, stream=stream)
                 fd.close()
                 return None
     
