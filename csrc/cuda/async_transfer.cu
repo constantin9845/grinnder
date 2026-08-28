@@ -120,6 +120,7 @@ void gather_partitions(int pid, std::vector<torch::Tensor> srcs,
 }
 
 
+
 #include <torch/extension.h>
 #include <c10/cuda/CUDAStream.h>
 #include <cuda_runtime.h>
@@ -177,7 +178,7 @@ void gather_partitions_direct(
         off_t dev_offset = 0;
         ssize_t bytes_read = 0;
 
-        ssize_t ret = cuFileReadAsync(
+        CUfileError_t read_status = cuFileReadAsync(
             cf_handle,
             dst_ptr,
             &file_bytes,
@@ -186,7 +187,7 @@ void gather_partitions_direct(
             &bytes_read,
             stream.stream()
         );
-        AT_ASSERTM(ret >= 0, "cuFileReadAsync failed on target partition");
+        AT_ASSERTM(read_status.err == CU_FILE_SUCCESS, "cuFileReadAsync failed on target partition");
 
         cuFileHandleDeregister(cf_handle);
         close(fd);
@@ -234,7 +235,7 @@ void gather_partitions_direct(
             }
             contiguous_blocks.push_back({block_start, block_len});
 
-            // Issue cuFileReadAsync calls using pointers for offset and byte size parameters
+            // Issue cuFileReadAsync calls using CUfileError_t for status checks
             for (const auto& block : contiguous_blocks) {
                 int64_t start_row = block.first;
                 int64_t length = block.second;
@@ -244,7 +245,7 @@ void gather_partitions_direct(
                 off_t block_dev_offset = current_row_offset * row_bytes;
                 ssize_t block_bytes_read = 0;
 
-                ret = cuFileReadAsync(
+                CUfileError_t block_status = cuFileReadAsync(
                     b_handle,
                     dst_ptr,
                     &bytes_to_read,
@@ -253,7 +254,7 @@ void gather_partitions_direct(
                     &block_bytes_read,
                     stream.stream()
                 );
-                AT_ASSERTM(ret >= 0, "cuFileReadAsync failed on boundary block read");
+                AT_ASSERTM(block_status.err == CU_FILE_SUCCESS, "cuFileReadAsync failed on boundary block read");
 
                 current_row_offset += length;
             }
@@ -268,6 +269,7 @@ void gather_partitions_direct(
         cudaStreamSynchronize(stream.stream());
     });
 }
+
 
 void scatter_partitions(int pid, torch::Tensor src,
                         std::vector<torch::Tensor> dsts,
