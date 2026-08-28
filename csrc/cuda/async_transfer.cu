@@ -131,28 +131,35 @@ void gather_partitions(int pid, std::vector<torch::Tensor> srcs,
 #include <fcntl.h>
 #include <unistd.h>
 
-#include <vector>
-#include <string>
-#include <memory>
-#include <algorithm>
-#include <iostream>
-#include <cstring>
 #include <cerrno>
+#include <cstring>
+#include <iostream>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <vector>
 
 constexpr size_t ALIGN_SIZE = 512;
 
+
 struct GDSAsyncParams {
-    size_t read_bytes;
-    off_t file_offset;
-    off_t buf_offset;
-    ssize_t bytes_read;
-    bool is_direct_gds;
+    size_t read_bytes = 0;
+    off_t file_offset = 0;
+    off_t buf_offset = 0;
+    ssize_t bytes_read = 0;
+    bool is_direct_gds = false;
     std::string file_name;
 };
+
+
+// ------------------------------------------------------------
+// Helpers
+// ------------------------------------------------------------
 
 inline bool is_aligned(uintptr_t val) {
     return (val % ALIGN_SIZE) == 0;
 }
+
 
 inline void check_cufile(
     CUfileError_t status,
@@ -162,11 +169,9 @@ inline void check_cufile(
         std::cerr
             << "[GDS ERROR] "
             << operation
-            << " failed: "
-            << cuFileGetErrorString(status)
-            << " (err="
-            << status.err
-            << ")"
+            << " failed"
+            << " | error_code="
+            << static_cast<int>(status.err)
             << std::endl;
 
         throw std::runtime_error(
@@ -174,6 +179,30 @@ inline void check_cufile(
         );
     }
 }
+
+
+inline void check_cuda(
+    cudaError_t status,
+    const char* operation
+) {
+    if (status != cudaSuccess) {
+        std::cerr
+            << "[CUDA ERROR] "
+            << operation
+            << ": "
+            << cudaGetErrorString(status)
+            << std::endl;
+
+        throw std::runtime_error(
+            std::string("CUDA error in ") + operation
+        );
+    }
+}
+
+
+// ------------------------------------------------------------
+// Main GDS gather
+// ------------------------------------------------------------
 
 void gather_partitions_direct(
     int pid,
@@ -192,399 +221,480 @@ void gather_partitions_direct(
         "Destination must be contiguous"
     );
 
+    AT_ASSERTM(
+        static_cast<size_t>(pid) < file_paths.size(),
+        "Invalid pid"
+    );
+
+    AT_ASSERTM(
+        file_paths.size() == num_nodes.size(),
+        "file_paths and num_nodes size mismatch"
+    );
+
+    AT_ASSERTM(
+        boundaries.size() == file_paths.size(),
+        "boundaries and file_paths size mismatch"
+    );
+
     const int device_id = dst.get_device();
 
     c10::cuda::CUDAGuard device_guard(device_id);
 
-    auto stream = at::cuda::getCurrentCUDAStream(device_id);
-    cudaStream_t raw_stream = stream.stream();
-
     // ------------------------------------------------------------
-    // IMPORTANT:
+    // Use the current CUDA stream.
     //
-    // Do NOT launch this entire function through getH2DPool().
+    // Python puts this operation inside:
     //
-    // We want to control the lifetime of:
-    //   - dst
-    //   - CuFile handles
-    //   - async parameter structures
-    //   - registered buffers
+    //     with torch.cuda.stream(stream):
     //
-    // while the CUDA stream is active.
+    // so this should be the requested stream.
     // ------------------------------------------------------------
 
-    AT_DISPATCH_ALL_TYPES_AND(
-        at::ScalarType::Half,
-        dst.scalar_type(),
-        "gather_partitions_gds",
-        [&] {
+    auto stream =
+        at::cuda::getCurrentCUDAStream(device_id);
 
-        auto dst_data =
-            reinterpret_cast<uint8_t*>(
-                dst.data_ptr<scalar_t>()
-            );
+    cudaStream_t raw_stream =
+        stream.stream();
 
-        const int64_t feat_dim =
-            dst.numel() / dst.size(0);
 
-        const int64_t row_bytes =
-            feat_dim * sizeof(scalar_t);
+    // ------------------------------------------------------------
+    // Tensor information
+    // ------------------------------------------------------------
 
-        const size_t total_tensor_bytes =
-            dst.numel() * sizeof(scalar_t);
+    uint8_t* dst_data =
+        reinterpret_cast<uint8_t*>(dst.data_ptr());
 
-        std::cout
-            << "[GDS] pid=" << pid
-            << " device=" << device_id
-            << " rows=" << dst.size(0)
-            << " feature_dim=" << feat_dim
-            << " row_bytes=" << row_bytes
-            << " total_bytes=" << total_tensor_bytes
-            << std::endl;
+    const int64_t total_rows =
+        dst.size(0);
 
-        // --------------------------------------------------------
-        // Register the ENTIRE GPU buffer.
-        // --------------------------------------------------------
+    const int64_t feat_dim =
+        dst.numel() / total_rows;
 
-        CUfileError_t buf_status =
-            cuFileBufRegister(
-                dst_data,
-                total_tensor_bytes,
-                0
-            );
+    const int64_t element_size =
+        static_cast<int64_t>(dst.element_size());
 
-        check_cufile(
-            buf_status,
-            "cuFileBufRegister"
+    const int64_t row_bytes =
+        feat_dim * element_size;
+
+    const size_t total_tensor_bytes =
+        static_cast<size_t>(dst.numel()) *
+        static_cast<size_t>(dst.element_size());
+
+
+    std::cout
+        << "[GDS]"
+        << " pid=" << pid
+        << " device=" << device_id
+        << " rows=" << total_rows
+        << " feature_dim=" << feat_dim
+        << " element_size=" << element_size
+        << " row_bytes=" << row_bytes
+        << " total_bytes=" << total_tensor_bytes
+        << std::endl;
+
+
+    // ------------------------------------------------------------
+    // Register entire GPU destination buffer.
+    // ------------------------------------------------------------
+
+    CUfileError_t buf_status =
+        cuFileBufRegister(
+            dst_data,
+            total_tensor_bytes,
+            0
         );
 
-        std::cout
-            << "[GDS] GPU buffer registered: "
-            << static_cast<void*>(dst_data)
-            << " size="
-            << total_tensor_bytes
-            << std::endl;
+    check_cufile(
+        buf_status,
+        "cuFileBufRegister"
+    );
 
-        // Keep these alive until all async operations finish.
-        std::vector<
-            std::unique_ptr<GDSAsyncParams>
-        > async_params_keeper;
+    std::cout
+        << "[GDS] GPU buffer registered"
+        << " ptr=" << static_cast<void*>(dst_data)
+        << " bytes=" << total_tensor_bytes
+        << std::endl;
 
-        std::vector<void*> deferred_free_buffers;
 
-        // ========================================================
-        // READ FUNCTION
-        // ========================================================
+    // ------------------------------------------------------------
+    // Keep all async state alive until the final synchronize.
+    // ------------------------------------------------------------
 
-        auto perform_read =
-            [&](CUfileHandle_t cf_handle,
-                int raw_fd,
-                off_t raw_file_offset,
-                size_t raw_bytes,
-                off_t raw_buf_offset,
-                const std::string& path_tag) {
+    std::vector<std::unique_ptr<GDSAsyncParams>>
+        async_params_keeper;
 
-            uintptr_t target_gpu_ptr =
-                reinterpret_cast<uintptr_t>(
-                    dst_data + raw_buf_offset
-                );
+    std::vector<void*>
+        deferred_free_buffers;
 
-            const bool file_aligned =
-                is_aligned(
-                    static_cast<uintptr_t>(
-                        raw_file_offset
-                    )
-                );
 
-            const bool size_aligned =
-                is_aligned(raw_bytes);
+    // ------------------------------------------------------------
+    // Read helper
+    // ------------------------------------------------------------
 
-            const bool gpu_aligned =
-                is_aligned(target_gpu_ptr);
-
-            // ----------------------------------------------------
-            // DIRECT GDS
-            // ----------------------------------------------------
-
-            if (
-                file_aligned &&
-                size_aligned &&
-                gpu_aligned
-            ) {
-
-                auto p =
-                    std::make_unique<GDSAsyncParams>();
-
-                p->read_bytes = raw_bytes;
-                p->file_offset = raw_file_offset;
-                p->buf_offset = raw_buf_offset;
-                p->bytes_read = 0;
-                p->is_direct_gds = true;
-                p->file_name = path_tag;
-
-                // IMPORTANT:
-                //
-                // Since dst_data was registered with:
-                //
-                //   cuFileBufRegister(dst_data, ...)
-                //
-                // devPtr_base MUST be dst_data.
-                //
-                // raw_buf_offset goes into devPtr_offset.
-
-                off_t dev_ptr_offset =
-                    raw_buf_offset;
-
-                CUfileError_t status =
-                    cuFileReadAsync(
-                        cf_handle,
-
-                        // IMPORTANT:
-                        // registered base pointer
-                        dst_data,
-
-                        &p->read_bytes,
-
-                        &p->file_offset,
-
-                        // IMPORTANT:
-                        // offset within registered buffer
-                        &dev_ptr_offset,
-
-                        &p->bytes_read,
-
-                        raw_stream
-                    );
-
-                if (
-                    status.err !=
-                    CU_FILE_SUCCESS
-                ) {
-
-                    std::cerr
-                        << "[GDS ERROR] "
-                        << "cuFileReadAsync failed\n"
-                        << "  file="
-                        << path_tag
-                        << "\n"
-                        << "  file_offset="
-                        << raw_file_offset
-                        << "\n"
-                        << "  buf_offset="
-                        << raw_buf_offset
-                        << "\n"
-                        << "  bytes="
-                        << raw_bytes
-                        << "\n"
-                        << "  gpu_ptr="
-                        << static_cast<void*>(
-                            dst_data +
-                            raw_buf_offset
-                        )
-                        << "\n"
-                        << "  error="
-                        << cuFileGetErrorString(
-                            status
-                        )
-                        << std::endl;
-
-                    throw std::runtime_error(
-                        "cuFileReadAsync failed"
-                    );
-                }
-
-                std::cout
-                    << "[GDS SUBMIT] "
-                    << path_tag
-                    << " file_off="
-                    << raw_file_offset
-                    << " buf_off="
-                    << raw_buf_offset
-                    << " bytes="
-                    << raw_bytes
-                    << std::endl;
-
-                async_params_keeper.push_back(
-                    std::move(p)
-                );
-
-            } else {
-
-                // ------------------------------------------------
-                // FALLBACK
-                // ------------------------------------------------
-
-                std::cerr
-                    << "[GDS FALLBACK] "
-                    << path_tag
-                    << "\n"
-                    << "  file_offset="
-                    << raw_file_offset
-                    << "\n"
-                    << "  bytes="
-                    << raw_bytes
-                    << "\n"
-                    << "  gpu_aligned="
-                    << gpu_aligned
-                    << "\n"
-                    << "  file_aligned="
-                    << file_aligned
-                    << "\n"
-                    << "  size_aligned="
-                    << size_aligned
-                    << std::endl;
-
-                off_t aligned_file_off =
-                    (raw_file_offset /
-                     ALIGN_SIZE) *
-                    ALIGN_SIZE;
-
-                size_t file_head_pad =
-                    raw_file_offset -
-                    aligned_file_off;
-
-                size_t aligned_read_bytes =
-                    (
-                        file_head_pad +
-                        raw_bytes +
-                        ALIGN_SIZE - 1
-                    ) /
-                    ALIGN_SIZE *
-                    ALIGN_SIZE;
-
-                void* cpu_aligned_buf = nullptr;
-
-                int ret =
-                    posix_memalign(
-                        &cpu_aligned_buf,
-                        ALIGN_SIZE,
-                        aligned_read_bytes
-                    );
-
-                AT_ASSERTM(
-                    ret == 0,
-                    "Failed to allocate bounce buffer"
-                );
-
-                ssize_t bytes_read =
-                    pread(
-                        raw_fd,
-                        cpu_aligned_buf,
-                        aligned_read_bytes,
-                        aligned_file_off
-                    );
-
-                AT_ASSERTM(
-                    bytes_read >=
-                        static_cast<ssize_t>(
-                            file_head_pad +
-                            raw_bytes
-                        ),
-                    "Fallback pread failed"
-                );
-
-                uint8_t* src_payload =
-                    reinterpret_cast<uint8_t*>(
-                        cpu_aligned_buf
-                    ) + file_head_pad;
-
-                cudaError_t cuda_status =
-                    cudaMemcpyAsync(
-                        dst_data +
-                            raw_buf_offset,
-                        src_payload,
-                        raw_bytes,
-                        cudaMemcpyHostToDevice,
-                        raw_stream
-                    );
-
-                AT_ASSERTM(
-                    cuda_status == cudaSuccess,
-                    "cudaMemcpyAsync failed"
-                );
-
-                auto p =
-                    std::make_unique<GDSAsyncParams>();
-
-                p->read_bytes = raw_bytes;
-                p->file_offset = raw_file_offset;
-                p->buf_offset = raw_buf_offset;
-                p->bytes_read = raw_bytes;
-                p->is_direct_gds = false;
-                p->file_name = path_tag;
-
-                async_params_keeper.push_back(
-                    std::move(p)
-                );
-
-                deferred_free_buffers.push_back(
-                    cpu_aligned_buf
-                );
-            }
-        };
-
-        // ========================================================
-        // TARGET PARTITION
-        // ========================================================
-
-        int64_t offset = num_nodes[pid];
-
-        int fd_target =
-            open(
-                file_paths[pid].c_str(),
-                O_RDONLY | O_DIRECT
-            );
+    auto perform_read =
+        [&](
+            CUfileHandle_t cf_handle,
+            int raw_fd,
+            off_t raw_file_offset,
+            size_t raw_bytes,
+            off_t raw_buf_offset,
+            const std::string& path_tag
+        ) {
 
         AT_ASSERTM(
-            fd_target >= 0,
+            raw_bytes > 0,
+            "GDS read size must be > 0"
+        );
+
+
+        uintptr_t target_gpu_ptr =
+            reinterpret_cast<uintptr_t>(
+                dst_data + raw_buf_offset
+            );
+
+
+        const bool file_aligned =
+            is_aligned(
+                static_cast<uintptr_t>(
+                    raw_file_offset
+                )
+            );
+
+        const bool size_aligned =
+            is_aligned(raw_bytes);
+
+        const bool gpu_aligned =
+            is_aligned(target_gpu_ptr);
+
+
+        // ========================================================
+        // DIRECT GDS
+        // ========================================================
+
+        if (
+            file_aligned &&
+            size_aligned &&
+            gpu_aligned
+        ) {
+
+            auto p =
+                std::make_unique<GDSAsyncParams>();
+
+            p->read_bytes =
+                raw_bytes;
+
+            p->file_offset =
+                raw_file_offset;
+
+            p->buf_offset =
+                raw_buf_offset;
+
+            p->bytes_read =
+                0;
+
+            p->is_direct_gds =
+                true;
+
+            p->file_name =
+                path_tag;
+
+
+            // IMPORTANT:
+            //
+            // cuFileReadAsync receives:
+            //
+            //   base registered GPU pointer
+            //
+            // and a device pointer offset.
+            //
+            // The GPU buffer itself was registered above.
+
+            off_t dev_ptr_offset =
+                raw_buf_offset;
+
+
+            CUfileError_t status =
+                cuFileReadAsync(
+                    cf_handle,
+                    dst_data,
+                    &p->read_bytes,
+                    &p->file_offset,
+                    &dev_ptr_offset,
+                    &p->bytes_read,
+                    raw_stream
+                );
+
+
+            if (status.err != CU_FILE_SUCCESS) {
+
+                std::cerr
+                    << "\n[GDS ERROR] cuFileReadAsync failed"
+                    << "\n  file="
+                    << path_tag
+                    << "\n  file_offset="
+                    << raw_file_offset
+                    << "\n  gpu_offset="
+                    << raw_buf_offset
+                    << "\n  bytes="
+                    << raw_bytes
+                    << "\n  gpu_ptr="
+                    << static_cast<void*>(
+                        dst_data + raw_buf_offset
+                    )
+                    << "\n  error_code="
+                    << static_cast<int>(status.err)
+                    << std::endl;
+
+                throw std::runtime_error(
+                    "cuFileReadAsync failed"
+                );
+            }
+
+
+            std::cout
+                << "[GDS SUBMIT]"
+                << " file=" << path_tag
+                << " file_off=" << raw_file_offset
+                << " gpu_off=" << raw_buf_offset
+                << " bytes=" << raw_bytes
+                << std::endl;
+
+
+            async_params_keeper.push_back(
+                std::move(p)
+            );
+
+        }
+
+        // ========================================================
+        // ALIGNED CPU FALLBACK
+        //
+        // This exists only for cases where the file offset,
+        // size, or GPU address isn't 512-byte aligned.
+        // ========================================================
+
+        else {
+
+            std::cerr
+                << "[GDS FALLBACK]"
+                << " file=" << path_tag
+                << " file_offset=" << raw_file_offset
+                << " bytes=" << raw_bytes
+                << " gpu_offset=" << raw_buf_offset
+                << " gpu_aligned=" << gpu_aligned
+                << " file_aligned=" << file_aligned
+                << " size_aligned=" << size_aligned
+                << std::endl;
+
+
+            const off_t aligned_file_off =
+                (
+                    raw_file_offset /
+                    static_cast<off_t>(ALIGN_SIZE)
+                ) *
+                static_cast<off_t>(ALIGN_SIZE);
+
+
+            const size_t file_head_pad =
+                static_cast<size_t>(
+                    raw_file_offset -
+                    aligned_file_off
+                );
+
+
+            const size_t aligned_read_bytes =
+                (
+                    file_head_pad +
+                    raw_bytes +
+                    ALIGN_SIZE -
+                    1
+                ) /
+                ALIGN_SIZE *
+                ALIGN_SIZE;
+
+
+            void* cpu_aligned_buf =
+                nullptr;
+
+
+            int ret =
+                posix_memalign(
+                    &cpu_aligned_buf,
+                    ALIGN_SIZE,
+                    aligned_read_bytes
+                );
+
+
+            AT_ASSERTM(
+                ret == 0,
+                "Failed to allocate aligned bounce buffer"
+            );
+
+
+            ssize_t bytes_read =
+                pread(
+                    raw_fd,
+                    cpu_aligned_buf,
+                    aligned_read_bytes,
+                    aligned_file_off
+                );
+
+
+            if (
+                bytes_read <
+                static_cast<ssize_t>(
+                    file_head_pad +
+                    raw_bytes
+                )
+            ) {
+
+                free(cpu_aligned_buf);
+
+                throw std::runtime_error(
+                    "GDS fallback pread failed"
+                );
+            }
+
+
+            uint8_t* src_payload =
+                reinterpret_cast<uint8_t*>(
+                    cpu_aligned_buf
+                ) +
+                file_head_pad;
+
+
+            cudaError_t cuda_status =
+                cudaMemcpyAsync(
+                    dst_data + raw_buf_offset,
+                    src_payload,
+                    raw_bytes,
+                    cudaMemcpyHostToDevice,
+                    raw_stream
+                );
+
+
+            check_cuda(
+                cuda_status,
+                "cudaMemcpyAsync"
+            );
+
+
+            auto p =
+                std::make_unique<GDSAsyncParams>();
+
+            p->read_bytes =
+                raw_bytes;
+
+            p->file_offset =
+                raw_file_offset;
+
+            p->buf_offset =
+                raw_buf_offset;
+
+            p->bytes_read =
+                static_cast<ssize_t>(
+                    raw_bytes
+                );
+
+            p->is_direct_gds =
+                false;
+
+            p->file_name =
+                path_tag;
+
+
+            async_params_keeper.push_back(
+                std::move(p)
+            );
+
+
+            // Must remain alive until the CUDA copy completes.
+            deferred_free_buffers.push_back(
+                cpu_aligned_buf
+            );
+        }
+    };
+
+
+    // ============================================================
+    // 1. TARGET PARTITION
+    // ============================================================
+
+    int64_t offset =
+        num_nodes[pid];
+
+
+    const size_t target_bytes =
+        static_cast<size_t>(
+            num_nodes[pid] *
+            row_bytes
+        );
+
+
+    int fd_target =
+        open(
+            file_paths[pid].c_str(),
+            O_RDONLY | O_DIRECT
+        );
+
+
+    if (fd_target < 0) {
+
+        std::cerr
+            << "[GDS ERROR] Failed to open target"
+            << " file=" << file_paths[pid]
+            << " errno=" << errno
+            << " (" << std::strerror(errno) << ")"
+            << std::endl;
+
+        throw std::runtime_error(
             "Failed to open target partition"
         );
+    }
 
-        std::cout
-            << "[GDS] Open target: "
-            << file_paths[pid]
-            << " fd="
-            << fd_target
-            << std::endl;
 
-        CUfileDescr_t descr_target;
+    CUfileDescr_t descr_target;
 
-        std::memset(
-            &descr_target,
-            0,
-            sizeof(descr_target)
+    std::memset(
+        &descr_target,
+        0,
+        sizeof(descr_target)
+    );
+
+
+    descr_target.type =
+        CU_FILE_HANDLE_TYPE_OPAQUE_FD;
+
+    descr_target.handle.fd =
+        fd_target;
+
+
+    CUfileHandle_t cf_target =
+        nullptr;
+
+
+    CUfileError_t status =
+        cuFileHandleRegister(
+            &cf_target,
+            &descr_target
         );
 
-        descr_target.type =
-            CU_FILE_HANDLE_TYPE_OPAQUE_FD;
 
-        descr_target.handle.fd =
-            fd_target;
+    check_cufile(
+        status,
+        "cuFileHandleRegister(target)"
+    );
 
-        CUfileHandle_t cf_target =
-            nullptr;
 
-        CUfileError_t status =
-            cuFileHandleRegister(
-                &cf_target,
-                &descr_target
-            );
+    std::cout
+        << "[GDS] Target partition"
+        << " pid=" << pid
+        << " rows=" << num_nodes[pid]
+        << " bytes=" << target_bytes
+        << std::endl;
 
-        check_cufile(
-            status,
-            "cuFileHandleRegister(target)"
-        );
 
-        const size_t target_bytes =
-            static_cast<size_t>(
-                offset * row_bytes
-            );
-
-        std::cout
-            << "[GDS] Submitting target read: "
-            << target_bytes
-            << " bytes"
-            << std::endl;
+    if (target_bytes > 0) {
 
         perform_read(
             cf_target,
@@ -594,261 +704,389 @@ void gather_partitions_direct(
             0,
             file_paths[pid]
         );
+    }
 
-        // ========================================================
-        // BOUNDARY PARTITIONS
-        // ========================================================
 
-        for (
-            size_t i = 0;
-            i < file_paths.size();
-            ++i
-        ) {
+    // ============================================================
+    // 2. BOUNDARY PARTITIONS
+    //
+    // NO contiguous grouping.
+    //
+    // Every boundary index becomes one async read.
+    //
+    // We intentionally DO NOT synchronize here.
+    // ============================================================
 
-            if (
-                static_cast<int>(i) == pid
-            ) {
-                continue;
-            }
+    for (
+        size_t i = 0;
+        i < file_paths.size();
+        ++i
+    ) {
 
-            auto bndry =
-                boundaries[i];
-
-            if (bndry.numel() == 0) {
-                continue;
-            }
-
-            auto bndry_cpu =
-                bndry
-                    .to(torch::kCPU, torch::kLong)
-                    .contiguous();
-
-            const int64_t* idx_ptr =
-                bndry_cpu.data_ptr<int64_t>();
-
-            const int64_t num_indices =
-                bndry_cpu.numel();
-
-            int fd =
-                open(
-                    file_paths[i].c_str(),
-                    O_RDONLY | O_DIRECT
-                );
-
-            AT_ASSERTM(
-                fd >= 0,
-                "Failed to open boundary partition"
-            );
-
-            CUfileDescr_t descr;
-
-            std::memset(
-                &descr,
-                0,
-                sizeof(descr)
-            );
-
-            descr.type =
-                CU_FILE_HANDLE_TYPE_OPAQUE_FD;
-
-            descr.handle.fd =
-                fd;
-
-            CUfileHandle_t cf_handle =
-                nullptr;
-
-            status =
-                cuFileHandleRegister(
-                    &cf_handle,
-                    &descr
-                );
-
-            check_cufile(
-                status,
-                "cuFileHandleRegister(boundary)"
-            );
-
-            std::cout
-                << "[GDS] Boundary pid="
-                << i
-                << " rows="
-                << num_indices
-                << std::endl;
-
-            // ----------------------------------------------------
-            // NO CONTIGUOUS GROUPING.
-            //
-            // One read per boundary row.
-            // ----------------------------------------------------
-
-            for (
-                int64_t k = 0;
-                k < num_indices;
-                ++k
-            ) {
-
-                const int64_t node_idx =
-                    idx_ptr[k];
-
-                const size_t read_bytes =
-                    static_cast<size_t>(
-                        row_bytes
-                    );
-
-                const off_t file_offset_bytes =
-                    static_cast<off_t>(
-                        node_idx *
-                        row_bytes
-                    );
-
-                const off_t buf_offset_bytes =
-                    static_cast<off_t>(
-                        offset *
-                        row_bytes
-                    );
-
-                perform_read(
-                    cf_handle,
-                    fd,
-                    file_offset_bytes,
-                    read_bytes,
-                    buf_offset_bytes,
-                    file_paths[i]
-                );
-
-                ++offset;
-            }
-
-            // ----------------------------------------------------
-            // WAIT before closing/deregistering.
-            // ----------------------------------------------------
-
-            cudaError_t sync_status =
-                cudaStreamSynchronize(
-                    raw_stream
-                );
-
-            AT_ASSERTM(
-                sync_status == cudaSuccess,
-                "cudaStreamSynchronize failed"
-            );
-
-            cuFileHandleDeregister(
-                cf_handle
-            );
-
-            close(fd);
-
-            // ----------------------------------------------------
-            // Free fallback buffers only after the stream has
-            // consumed them.
-            // ----------------------------------------------------
-
-            for (
-                void* buf :
-                deferred_free_buffers
-            ) {
-                free(buf);
-            }
-
-            deferred_free_buffers.clear();
+        if (static_cast<int>(i) == pid) {
+            continue;
         }
 
-        // ========================================================
-        // FINAL SYNC
-        // ========================================================
 
-        cudaError_t sync_status =
-            cudaStreamSynchronize(
-                raw_stream
+        torch::Tensor bndry =
+            boundaries[i];
+
+
+        if (!bndry.defined()) {
+            continue;
+        }
+
+
+        if (bndry.numel() == 0) {
+            continue;
+        }
+
+
+        // --------------------------------------------------------
+        // Make indices CPU contiguous.
+        // --------------------------------------------------------
+
+        torch::Tensor bndry_cpu =
+            bndry
+                .to(torch::kCPU, torch::kLong)
+                .contiguous();
+
+
+        const int64_t* idx_ptr =
+            bndry_cpu.data_ptr<int64_t>();
+
+
+        const int64_t num_indices =
+            bndry_cpu.numel();
+
+
+        // --------------------------------------------------------
+        // Open boundary partition once.
+        // --------------------------------------------------------
+
+        int fd =
+            open(
+                file_paths[i].c_str(),
+                O_RDONLY | O_DIRECT
             );
 
-        AT_ASSERTM(
-            sync_status == cudaSuccess,
-            "Final cudaStreamSynchronize failed"
+
+        if (fd < 0) {
+
+            std::cerr
+                << "[GDS ERROR] Failed to open boundary"
+                << " pid=" << i
+                << " file=" << file_paths[i]
+                << " errno=" << errno
+                << " (" << std::strerror(errno) << ")"
+                << std::endl;
+
+            throw std::runtime_error(
+                "Failed to open boundary partition"
+            );
+        }
+
+
+        CUfileDescr_t descr;
+
+        std::memset(
+            &descr,
+            0,
+            sizeof(descr)
         );
 
-        // ========================================================
-        // VERIFY ASYNC GDS COMPLETION
-        // ========================================================
 
-        size_t total_gds_bytes = 0;
-        size_t total_fallback_bytes = 0;
+        descr.type =
+            CU_FILE_HANDLE_TYPE_OPAQUE_FD;
+
+        descr.handle.fd =
+            fd;
+
+
+        CUfileHandle_t cf_handle =
+            nullptr;
+
+
+        status =
+            cuFileHandleRegister(
+                &cf_handle,
+                &descr
+            );
+
+
+        check_cufile(
+            status,
+            "cuFileHandleRegister(boundary)"
+        );
+
+
+        std::cout
+            << "[GDS] Boundary"
+            << " pid=" << i
+            << " rows=" << num_indices
+            << std::endl;
+
+
+        // --------------------------------------------------------
+        // One read per boundary row.
+        //
+        // No grouping.
+        // --------------------------------------------------------
 
         for (
-            const auto& item :
-            async_params_keeper
+            int64_t k = 0;
+            k < num_indices;
+            ++k
         ) {
 
-            if (item->is_direct_gds) {
+            const int64_t node_idx =
+                idx_ptr[k];
 
-                std::cout
-                    << "[GDS COMPLETE] "
-                    << item->file_name
+
+            if (
+                node_idx < 0 ||
+                node_idx >= num_nodes[i]
+            ) {
+
+                cuFileHandleDeregister(
+                    cf_handle
+                );
+
+                close(fd);
+
+                throw std::runtime_error(
+                    "Boundary index out of range"
+                );
+            }
+
+
+            const size_t read_bytes =
+                static_cast<size_t>(
+                    row_bytes
+                );
+
+
+            const off_t file_offset_bytes =
+                static_cast<off_t>(
+                    node_idx *
+                    row_bytes
+                );
+
+
+            const off_t buf_offset_bytes =
+                static_cast<off_t>(
+                    offset *
+                    row_bytes
+                );
+
+
+            perform_read(
+                cf_handle,
+                fd,
+                file_offset_bytes,
+                read_bytes,
+                buf_offset_bytes,
+                file_paths[i]
+            );
+
+
+            ++offset;
+        }
+
+
+        // --------------------------------------------------------
+        // IMPORTANT:
+        //
+        // DO NOT synchronize here.
+        //
+        // The reads from this partition remain queued while
+        // subsequent partitions are submitted.
+        // --------------------------------------------------------
+
+        cuFileHandleDeregister(
+            cf_handle
+        );
+
+        close(fd);
+
+
+        std::cout
+            << "[GDS] Submitted boundary"
+            << " pid=" << i
+            << " rows=" << num_indices
+            << std::endl;
+    }
+
+
+    // ============================================================
+    // 3. Verify destination size before waiting.
+    // ============================================================
+
+    AT_ASSERTM(
+        offset == total_rows,
+        "Gather GDS: copied size mismatch"
+    );
+
+
+    std::cout
+        << "[GDS] All reads submitted"
+        << " pid=" << pid
+        << " total_rows=" << offset
+        << std::endl;
+
+
+    // ============================================================
+    // 4. ONE FINAL SYNCHRONIZATION
+    // ============================================================
+
+    cudaError_t sync_status =
+        cudaStreamSynchronize(
+            raw_stream
+        );
+
+
+    check_cuda(
+        sync_status,
+        "cudaStreamSynchronize"
+    );
+
+
+    std::cout
+        << "[GDS] Stream synchronized"
+        << " pid=" << pid
+        << std::endl;
+
+
+    // ============================================================
+    // 5. Verify async read results
+    // ============================================================
+
+    size_t total_gds_bytes = 0;
+    size_t total_fallback_bytes = 0;
+
+
+    for (
+        const auto& item :
+        async_params_keeper
+    ) {
+
+        if (item->is_direct_gds) {
+
+            std::cout
+                << "[GDS COMPLETE]"
+                << " file=" << item->file_name
+                << " requested=" << item->read_bytes
+                << " completed=" << item->bytes_read
+                << std::endl;
+
+
+            if (
+                item->bytes_read !=
+                static_cast<ssize_t>(
+                    item->read_bytes
+                )
+            ) {
+
+                std::cerr
+                    << "[GDS ERROR]"
+                    << " Read byte mismatch"
+                    << " file=" << item->file_name
                     << " requested="
                     << item->read_bytes
                     << " completed="
                     << item->bytes_read
                     << std::endl;
 
-                AT_ASSERTM(
-                    item->bytes_read ==
-                        static_cast<ssize_t>(
-                            item->read_bytes
-                        ),
+                throw std::runtime_error(
                     "GDS read byte count mismatch"
                 );
-
-                total_gds_bytes +=
-                    item->bytes_read;
-
-            } else {
-
-                total_fallback_bytes +=
-                    item->bytes_read;
             }
+
+
+            total_gds_bytes +=
+                static_cast<size_t>(
+                    item->bytes_read
+                );
+
+        } else {
+
+            total_fallback_bytes +=
+                static_cast<size_t>(
+                    item->bytes_read
+                );
         }
+    }
 
-        std::cout
-            << "[GDS Verification] "
-            << "Pid: "
-            << pid
-            << " | Direct GDS: "
-            << total_gds_bytes
-            << " bytes"
-            << " | Fallback: "
-            << total_fallback_bytes
-            << " bytes"
-            << std::endl;
 
-        // ========================================================
-        // CLEANUP
-        // ========================================================
+    std::cout
+        << "[GDS Verification]"
+        << " Pid=" << pid
+        << " Direct GDS="
+        << total_gds_bytes
+        << " bytes"
+        << " Fallback="
+        << total_fallback_bytes
+        << " bytes"
+        << std::endl;
 
-        cuFileHandleDeregister(
-            cf_target
-        );
 
-        close(fd_target);
+    // ============================================================
+    // 6. Free fallback buffers AFTER CUDA synchronization.
+    // ============================================================
 
-        for (
-            void* buf :
-            deferred_free_buffers
-        ) {
-            free(buf);
-        }
+    for (
+        void* buf :
+        deferred_free_buffers
+    ) {
+        free(buf);
+    }
 
-        deferred_free_buffers.clear();
+    deferred_free_buffers.clear();
 
+
+    // ============================================================
+    // 7. Cleanup target handle
+    // ============================================================
+
+    cuFileHandleDeregister(
+        cf_target
+    );
+
+    close(fd_target);
+
+
+    // ============================================================
+    // 8. Deregister GPU buffer
+    // ============================================================
+
+    cuFileError_t dummy;
+
+    dummy =
         cuFileBufDeregister(
             dst_data
         );
 
-        AT_ASSERTM(
-            offset == dst.size(0),
-            "Gather GDS: copied size mismatch"
-        );
-    });
+    if (dummy.err != CU_FILE_SUCCESS) {
+
+        std::cerr
+            << "[GDS WARNING]"
+            << " cuFileBufDeregister failed"
+            << " error_code="
+            << static_cast<int>(
+                dummy.err
+            )
+            << std::endl;
+    }
+
+
+    std::cout
+        << "[GDS DONE]"
+        << " pid=" << pid
+        << " direct_bytes="
+        << total_gds_bytes
+        << " fallback_bytes="
+        << total_fallback_bytes
+        << std::endl;
 }
 
 
