@@ -119,6 +119,153 @@ void gather_partitions(int pid, std::vector<torch::Tensor> srcs,
   });
 }
 
+#include <torch/extension.h>
+#include <c10/cuda/CUDAStream.h>
+#include <cuda_runtime.h>
+#include <cufile.h>
+
+#include <fcntl.h>
+#include <unistd.h>
+#include <vector>
+#include <string>
+#include <algorithm>
+
+void gather_partitions_direct(
+    int pid,
+    const std::vector<std::string>& file_paths,
+    torch::Tensor dst,
+    const std::vector<torch::Tensor>& boundaries) 
+{
+    AT_ASSERTM(dst.is_cuda(), "Destination must be a CUDA tensor");
+    AT_ASSERTM(dst.is_contiguous(), "Destination must be contiguous");
+
+    auto stream = at::cuda::getCurrentCUDAStream(dst.get_device());
+    AT_ASSERTM(stream != at::cuda::getDefaultCUDAStream(dst.get_device()),
+               "Async gather requires a non-default CUDA stream");
+
+    // Launch worker execution on host thread pool
+    getH2DPool().run([=]() {
+        void* dst_ptr = dst.data_ptr();
+        int64_t feat_dim = dst.numel() / dst.size(0);
+        int64_t row_bytes = feat_dim * dst.element_size();
+        size_t num_parts = file_paths.size();
+
+        // Target partition reads first (contiguous chunk at the beginning of dst)
+        int64_t current_row_offset = 0;
+
+        // --------------------------------------------------------------------
+        // 1. Read Target Partition directly via cuFile
+        // --------------------------------------------------------------------
+        std::string target_path = file_paths[pid];
+        int fd = open(target_path.c_str(), O_RDONLY | O_DIRECT);
+        AT_ASSERTM(fd >= 0, "Failed to open target partition file for GDS direct read");
+
+        CUfileDescr_t descr;
+        memset(&descr, 0, sizeof(CUfileDescr_t));
+        descr.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
+        descr.handle.fd = fd;
+
+        CUfileHandle_t cf_handle;
+        CUfileError_t status = cuFileHandleRegister(&cf_handle, &descr);
+        AT_ASSERTM(status.err == CU_FILE_SUCCESS, "cuFileHandleRegister failed on target partition");
+
+        // Obtain target file size to determine target row count
+        off_t file_size = lseek(fd, 0, SEEK_END);
+        int64_t target_rows = file_size / row_bytes;
+
+        // Issue async Direct I/O read for full local target partition
+        ssize_t ret = cuFileReadAsync(
+            cf_handle,
+            dst_ptr,
+            &file_size,
+            /*file_offset=*/0,
+            /*dev_offset=*/0,
+            stream.stream()
+        );
+        AT_ASSERTM(ret >= 0, "cuFileReadAsync failed on target partition");
+
+        cuFileHandleDeregister(cf_handle);
+        close(fd);
+
+        current_row_offset += target_rows;
+
+        // --------------------------------------------------------------------
+        // 2. Read Boundary Rows directly with contiguous index grouping
+        // --------------------------------------------------------------------
+        for (size_t i = 0; i < num_parts; ++i) {
+            if (static_cast<int>(i) == pid) continue;
+
+            auto bndry = boundaries[i];
+            if (bndry.numel() == 0) continue;
+
+            // Ensure boundary tensor is CPU LongTensor
+            torch::Tensor bndry_cpu = bndry.to(torch::kCPU, torch::kLong).contiguous();
+            const int64_t* indices = bndry_cpu.data_ptr<int64_t>();
+            int64_t num_indices = bndry_cpu.size(0);
+
+            // Open boundary partition file
+            int b_fd = open(file_paths[i].c_str(), O_RDONLY | O_DIRECT);
+            AT_ASSERTM(b_fd >= 0, "Failed to open boundary partition file");
+
+            CUfileDescr_t b_descr;
+            memset(&b_descr, 0, sizeof(CUfileDescr_t));
+            b_descr.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
+            b_descr.handle.fd = b_fd;
+
+            CUfileHandle_t b_handle;
+            status = cuFileHandleRegister(&b_handle, &b_descr);
+            AT_ASSERTM(status.err == CU_FILE_SUCCESS, "cuFileHandleRegister failed on boundary partition");
+
+            // Group consecutive indices into contiguous block intervals [start_row, num_rows]
+            std::vector<std::pair<int64_t, int64_t>> contiguous_blocks;
+            int64_t block_start = indices[0];
+            int64_t block_len = 1;
+
+            for (int64_t k = 1; k < num_indices; ++k) {
+                if (indices[k] == block_start + block_len) {
+                    block_len++;
+                } else {
+                    contiguous_blocks.push_back({block_start, block_len});
+                    block_start = indices[k];
+                    block_len = 1;
+                }
+            }
+            contiguous_blocks.push_back({block_start, block_len});
+
+            // Dispatch async reads for each contiguous block
+            for (const auto& block : contiguous_blocks) {
+                int64_t start_row = block.first;
+                int64_t length = block.second;
+
+                off_t file_offset = start_row * row_bytes;
+                size_t bytes_to_read = length * row_bytes;
+                off_t dev_offset = current_row_offset * row_bytes;
+
+                ret = cuFileReadAsync(
+                    b_handle,
+                    dst_ptr,
+                    &bytes_to_read,
+                    file_offset,
+                    dev_offset,
+                    stream.stream()
+                );
+                AT_ASSERTM(ret >= 0, "cuFileReadAsync failed on boundary block read");
+
+                current_row_offset += length;
+            }
+
+            cuFileHandleDeregister(b_handle);
+            close(b_fd);
+        }
+
+        AT_ASSERTM(current_row_offset == dst.size(0),
+                   "Gather: total copied size mismatch with destination CUDA tensor");
+
+        // Synchronize stream within worker thread to complete I/O before returning
+        cudaStreamSynchronize(stream.stream());
+    });
+}
+
 void scatter_partitions(int pid, torch::Tensor src,
                         std::vector<torch::Tensor> dsts,
                         std::vector<torch::Tensor> boundaries) {

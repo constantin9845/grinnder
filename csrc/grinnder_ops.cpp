@@ -14,6 +14,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // Partition gather/scatter
   m.def("gather_partitions", &gather_partitions,
         "Gather features from host partitions to GPU tensor");
+  m.def("gather_partitions_direct", &gather_partitions_direct,
+        "Gather features from storage files to GPU tensor");
   m.def("scatter_partitions", &scatter_partitions,
         "Scatter GPU gradient to host partitions with accumulation");
 
