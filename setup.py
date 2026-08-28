@@ -79,6 +79,7 @@ def get_extensions():
         name="grinnder._C",
         sources=sources,
         define_macros=define_macros,
+        libraries=["cufile"],
         extra_compile_args={
             "cxx": extra_cxx_flags,
             "nvcc": extra_nvcc_flags,
