@@ -95,6 +95,16 @@ class HostBuffer:
         self._pin_memory = pin_memory
         self._zero_initialized = [False] * num_parts
 
+        # GPU <-> Storage: kvikio required
+        try:
+            import kvikio
+            self._kvikio = kvikio
+        except ImportError:
+            raise ImportError(
+                "kvikio is required for GriNNder's grinnder mode. "
+                "Install with: pip install kvikio-cu12"
+            )
+
         # Tensor objects keep their logical shape, while storage is allocated
         # only for partitions resident in host memory.
         self._tensors: List[Tensor] = []
