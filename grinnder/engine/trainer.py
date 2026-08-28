@@ -505,11 +505,11 @@ class Trainer:
 
         t0 = time.time()
         # Storage_to_Host: load layer activations into cache
-        self._prepare_cache_layer(layer_id)
+        #self._prepare_cache_layer(layer_id)
 
         # Prologue: prefetch first assigned partition
-        self._prepare_cache_partition(layer_id, pids[0], "forward")
-        self.device_features[layer_id].async_gather(
+        #self._prepare_cache_partition(layer_id, pids[0], "forward")
+        self.device_features[layer_id].async_gather_direct(
             "forward",
             pid=pids[0],
             host_buffer=self.host_features[layer_id],
@@ -536,8 +536,8 @@ class Trainer:
                 if i < len(pids) - 1 and pool_size > 1:
                     next_pid = pids[i + 1]
                     next_pool = (i + 1) % pool_size
-                    self._prepare_cache_partition(layer_id, next_pid, "forward")
-                    self.device_features[layer_id].async_gather(
+                    #self._prepare_cache_partition(layer_id, next_pid, "forward")
+                    self.device_features[layer_id].async_gather_direct(
                         "forward",
                         pid=next_pid,
                         host_buffer=self.host_features[layer_id],
@@ -632,8 +632,8 @@ class Trainer:
 
                 if i < len(pids) - 1:
                     next_pid = pids[i + 1]
-                    self._prepare_cache_partition(layer_id, next_pid, "forward")
-                    self.device_features[layer_id].async_gather(
+                    #self._prepare_cache_partition(layer_id, next_pid, "forward")
+                    self.device_features[layer_id].async_gather_direct(
                         "forward",
                         pid=next_pid,
                         host_buffer=self.host_features[layer_id],

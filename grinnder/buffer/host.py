@@ -515,16 +515,14 @@ class HostBuffer:
         with torch.cuda.stream(stream):
 
             # --------------------------------------------------------
-            # Load full target partition
-            # Equivalent to:
-            #
-            #   gpu_target[:offset].copy_(self._tensors[pid])
+            # Fallback
             # --------------------------------------------------------
 
             print("Fallback")
 
             offset = num_nodes[pid]
 
+            '''
             print(f"\n--- [DEBUG Target Partition pid={pid}] ---")
             print(f"File: {file_paths[pid]}")
             print(
@@ -536,9 +534,11 @@ class HostBuffer:
                 f"gpu_target[0:{offset}] "
                 f"(file_offset=0)"
             )
+            '''
 
+            # read full target partition fill
             self._backend.gpu_read(
-                status=3,
+                status=0,
                 fd=None,
                 file_id=file_paths[pid],
                 tensor=gpu_target[:offset],
@@ -571,43 +571,13 @@ class HostBuffer:
                 if indices.device.type != "cpu":
                     indices = indices.cpu()
 
-                print(f"--- [DEBUG Boundary Partition src_pid={i}] ---")
-                print(f"File: {part_file}")
-                print(
-                    f"File size: {part_file_size} bytes "
-                    f"(Max valid node index: {max_valid_nodes - 1})"
-                )
-                print(f"Requested boundary index count: {num_rows}")
-                print(
-                    f"Indices min/max: "
-                    f"min={indices.min().item()}, "
-                    f"max={indices.max().item()}"
-                )
-
-                # These must be LOCAL row indices into partition i,
-                # exactly as they were for self._tensors[i].index_select().
-                if (
-                    indices.min().item() < 0
-                    or indices.max().item() >= max_valid_nodes
-                ):
-                    raise RuntimeError(
-                        f"Boundary index out of range:\n"
-                        f"  target pid       = {pid}\n"
-                        f"  source pid       = {i}\n"
-                        f"  file             = {part_file}\n"
-                        f"  file size        = {part_file_size}\n"
-                        f"  rows in file     = {max_valid_nodes}\n"
-                        f"  requested rows   = {num_rows}\n"
-                        f"  min index        = {indices.min().item()}\n"
-                        f"  max index        = {indices.max().item()}\n"
-                    )
 
                 fd = None
 
+                # iterate nodes from partition
                 for k in range(num_rows):
 
                     node_idx = indices[k].item()
-
                     file_offset = node_idx * row_bytes
 
                     # Exactly one output row, preserving index_select order.
@@ -615,34 +585,10 @@ class HostBuffer:
                         offset : offset + 1
                     ]
 
-                    if file_offset + row_bytes > part_file_size:
-                        raise RuntimeError(
-                            f"\n[ERROR BOUNDS EXCEEDED]\n"
-                            f"  target pid = {pid}\n"
-                            f"  src_pid = {i}\n"
-                            f"  k = {k}/{num_rows}\n"
-                            f"  node_idx = {node_idx}\n"
-                            f"  file_offset = {file_offset}\n"
-                            f"  row_bytes = {row_bytes}\n"
-                            f"  file end = {file_offset + row_bytes}\n"
-                            f"  actual file size = {part_file_size}\n"
-                            f"  file = {part_file}\n"
-                        )
-
-                    if k < 5 or k >= num_rows - 5:
-                        print(
-                            f"  [Read {k+1}/{num_rows}] "
-                            f"node_idx={node_idx} -> "
-                            f"file_offset={file_offset} "
-                            f"(0x{file_offset:X}), "
-                            f"gpu_target index={offset}, status="
-                            f"{3 if num_rows == 1 else (0 if k == 0 else (2 if k == num_rows - 1 else 1))}"
-                        )
-
                     if k == 0 and num_rows == 1:
                         # Single row: open, read, close
                         fd = self._backend.gpu_read(
-                            status=3,
+                            status=0,
                             fd=None,
                             file_id=part_file,
                             tensor=dest_row,
@@ -653,7 +599,7 @@ class HostBuffer:
                     elif k == 0:
                         # First row: open handle + read
                         fd = self._backend.gpu_read(
-                            status=0,
+                            status=1,
                             fd=None,
                             file_id=part_file,
                             tensor=dest_row,
@@ -664,7 +610,7 @@ class HostBuffer:
                     elif k != num_rows - 1:
                         # Middle row: use persistent fd
                         fd = self._backend.gpu_read(
-                            status=1,
+                            status=2,
                             fd=fd,
                             file_id=part_file,
                             tensor=dest_row,
@@ -675,7 +621,7 @@ class HostBuffer:
                     else:
                         # Last row: read + close
                         fd = self._backend.gpu_read(
-                            status=2,
+                            status=3,
                             fd=fd,
                             file_id=part_file,
                             tensor=dest_row,
