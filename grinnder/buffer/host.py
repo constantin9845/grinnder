@@ -538,7 +538,7 @@ class HostBuffer:
             self._backend.gpu_read_direct(
                 status=0,
                 fd=None,
-                file_id=file_paths[pid],
+                file_id=f"{self._backend._storage_dir}/{self._file_prefix}_p{pid}",
                 tensor=gpu_target[:offset],
                 offset=0,
                 stream=stream,
@@ -588,7 +588,7 @@ class HostBuffer:
                         fd = self._backend.gpu_read_direct(
                             status=0,
                             fd=None,
-                            file_id=part_file,
+                            file_id=f"{self._backend._storage_dir}/{self._file_prefix}_p{i}",
                             tensor=dest_row,
                             offset=file_offset,
                             stream=stream,
@@ -599,7 +599,7 @@ class HostBuffer:
                         fd = self._backend.gpu_read_direct(
                             status=1,
                             fd=None,
-                            file_id=part_file,
+                            file_id=f"{self._backend._storage_dir}/{self._file_prefix}_p{i}",
                             tensor=dest_row,
                             offset=file_offset,
                             stream=stream,
@@ -610,7 +610,7 @@ class HostBuffer:
                         fd = self._backend.gpu_read_direct(
                             status=2,
                             fd=fd,
-                            file_id=part_file,
+                            file_id=f"{self._backend._storage_dir}/{self._file_prefix}_p{i}",
                             tensor=dest_row,
                             offset=file_offset,
                             stream=stream,
@@ -621,7 +621,7 @@ class HostBuffer:
                         fd = self._backend.gpu_read_direct(
                             status=3,
                             fd=fd,
-                            file_id=part_file,
+                            file_id=f"{self._backend._storage_dir}/{self._file_prefix}_p{i}",
                             tensor=dest_row,
                             offset=file_offset,
                             stream=stream,
