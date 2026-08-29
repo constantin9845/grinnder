@@ -536,8 +536,6 @@ class HostBuffer:
 
                 offset = num_nodes[pid]
 
-                from concurrent.futures import ThreadPoolExecutor
-
                 # read full target partition fill
                 self._backend.gpu_read_direct(
                     status=0,
@@ -553,91 +551,6 @@ class HostBuffer:
                 # --------------------------------------------------------
                 # Load only required boundary file rows
                 # --------------------------------------------------------
-
-                # precompute offset map
-                part_offsets = {}
-                curr_offset = offset
-                for i in range(self.num_parts):
-                    if i != pid and bndries[i].numel() > 0:
-                        part_offsets[i] = curr_offset
-                        curr_offset += bndries[i].numel()
-
-                def _read_partition_boundary(i: int, start_offset: int):
-
-                    with torch.cuda.stream(stream):
-                        indices = bndries[i]
-                        if indices.device.type != "cpu":
-                            indices = indices.cpu()
-
-                        num_rows = indices.size(0)
-                        file_id_str = f"{self._backend._storage_dir}/{self._file_prefix}_p{i}"
-                        fd = None
-
-                        for k in range(num_rows):
-                            node_idx = indices[k].item()
-                            file_offset = node_idx * row_bytes
-
-                            # Pin target row slice using the partition's offset base + k
-                            row_dest = start_offset + k
-                            dest_row = gpu_target[row_dest : row_dest + 1]
-
-                            if k == 0 and num_rows == 1:
-                                fd = self._backend.gpu_read_direct(
-                                    status=0,
-                                    fd=None,
-                                    file_id=file_id_str,
-                                    tensor=dest_row,
-                                    offset=file_offset,
-                                    stream=stream,
-                                )
-                            elif k == 0:
-                                fd = self._backend.gpu_read_direct(
-                                    status=1,
-                                    fd=None,
-                                    file_id=file_id_str,
-                                    tensor=dest_row,
-                                    offset=file_offset,
-                                    stream=stream,
-                                )
-                            elif k != num_rows - 1:
-                                fd = self._backend.gpu_read_direct(
-                                    status=2,
-                                    fd=fd,
-                                    file_id=file_id_str,
-                                    tensor=dest_row,
-                                    offset=file_offset,
-                                    stream=stream,
-                                )
-                            else:
-                                fd = self._backend.gpu_read_direct(
-                                    status=3,
-                                    fd=fd,
-                                    file_id=file_id_str,
-                                    tensor=dest_row,
-                                    offset=file_offset,
-                                    stream=stream,
-                                )
-
-                    print(f"Boundary partition {i} data loaded")
-
-                valid_pids = [
-                    i for i in range(self.num_parts) 
-                    if i != pid and bndries[i].numel() > 0
-                ]
-
-                if valid_pids:
-                    with ThreadPoolExecutor(max_workers=min(len(valid_pids), 4)) as executor:
-                        futures = [
-                            executor.submit(_read_partition_boundary, part_id, part_offsets[part_id])
-                            for part_id in valid_pids
-                        ]
-                        # Block until all partition reads finish
-                        for future in futures:
-                            future.result()
-
-                offset = curr_offset
-                '''
-                
 
                 for i in range(self.num_parts):
 
@@ -714,9 +627,7 @@ class HostBuffer:
                         offset += 1
 
                     print(f"Boundary partition {i} data loaded")
-                '''
-            
-            
+
             # --------------------------------------------------------
             # Final sanity check
             # --------------------------------------------------------
