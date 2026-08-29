@@ -628,21 +628,21 @@ class HostBuffer:
 
                     print(f"Boundary partition {i} data loaded")
 
-            # --------------------------------------------------------
-            # Final sanity check
-            # --------------------------------------------------------
+                # --------------------------------------------------------
+                # Final sanity check
+                # --------------------------------------------------------
 
-            expected_offset = (
-                target_partition_nodes +
-                boundary_nodes
-            )
-
-            if offset != expected_offset:
-                raise RuntimeError(
-                    f"Gather offset mismatch:\n"
-                    f"  final offset = {offset}\n"
-                    f"  expected = {expected_offset}"
+                expected_offset = (
+                    target_partition_nodes +
+                    boundary_nodes
                 )
+
+                if offset != expected_offset:
+                    raise RuntimeError(
+                        f"Gather offset mismatch:\n"
+                        f"  final offset = {offset}\n"
+                        f"  expected = {expected_offset}"
+                    )
 
         tn = time.perf_counter_ns()
         stat.load_GPU_timestamp(phase, "copy", t0, tn)
