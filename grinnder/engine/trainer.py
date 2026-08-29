@@ -499,8 +499,6 @@ class Trainer:
         if not pids:
             return
         
-        for i, pid in enumerate(pids):
-            self.cache._evict_partition(0, pid)
 
 
         t0 = time.time()
@@ -619,7 +617,6 @@ class Trainer:
                     if act_prev is not None:
                         act_prev.untyped_storage().resize_(0)
 
-            #self.cache._evict_partition(2, pid)
 
             if pool_size == 1:
                 self.streams.compute.wait_stream(self.streams.d2h[0])
@@ -974,12 +971,6 @@ class Trainer:
 
         tn = time.perf_counter_ns()
         stat.write_timestamp("backward", "SSD", t0, tn)
-
-        # evict from host cache : Output activations + gradients
-        for i, pid in enumerate(pids):
-            self.cache._evict_partition(2, pid)
-            self.cache._evict_partition(1, pid)
-            self.cache._evict_partition(0, pid)
 
 
     def _backward_layer(self, layer_id: int) -> None:
