@@ -64,7 +64,7 @@ def main():
     parser.add_argument("--hidden", type=int, default=256)
     parser.add_argument("--num_layers", type=int, default=3)
     parser.add_argument("--heads", type=int, default=1, help="GAT attention heads")
-    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--lr", type=float, default=0.01)
     parser.add_argument("--dropout", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=42)
