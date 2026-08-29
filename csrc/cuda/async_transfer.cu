@@ -120,7 +120,7 @@ void gather_partitions(int pid, std::vector<torch::Tensor> srcs,
 }
 
 
-#include <c10/cuda/CUDAStreamGuard.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <torch/extension.h>
 #include <c10/cuda/CUDAStream.h>
 #include <cuda_runtime.h>
@@ -147,7 +147,7 @@ void gather_partitions_direct(
 
   // Offload to background host thread pool to keep the main Python thread non-blocking
   getH2DPool().run([=] {
-    at::cuda::CUDAStreamGuard guard(stream);
+    c10::cuda::CUDAStreamGuard guard(stream);
 
     int64_t total_rows = dst.size(0);
     int64_t feat_dim = dst.numel() / total_rows;
