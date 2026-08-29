@@ -120,9 +120,9 @@ void gather_partitions(int pid, std::vector<torch::Tensor> srcs,
 }
 
 
-#include <c10/cuda/CUDAGuard.h>
 #include <torch/extension.h>
 #include <c10/cuda/CUDAStream.h>
+#include <c10/cuda/CUDAGuard.h> // Correct header for CUDAStreamGuard
 #include <cuda_runtime.h>
 #include <cufile.h>
 #include <fcntl.h>
@@ -130,7 +130,7 @@ void gather_partitions(int pid, std::vector<torch::Tensor> srcs,
 #include <vector>
 #include <string>
 #include <future>
-#include <algorithm>
+#include <cstring>
 
 void gather_partitions_direct(
     int pid,
@@ -145,7 +145,6 @@ void gather_partitions_direct(
   AT_ASSERTM(stream != at::cuda::getDefaultCUDAStream(dst.get_device()),
              "Async gather requires a non-default CUDA stream");
 
-  // Offload to background host thread pool to keep the main Python thread non-blocking
   getH2DPool().run([=] {
     c10::cuda::CUDAStreamGuard guard(stream);
 
@@ -154,14 +153,12 @@ void gather_partitions_direct(
     int64_t row_bytes = feat_dim * dst.element_size();
     uint8_t* dst_raw = reinterpret_cast<uint8_t*>(dst.data_ptr());
 
-    // 1. Calculate file sizes and destination row offsets for each partition
     size_t num_parts = file_paths.size();
     std::vector<int64_t> part_offsets(num_parts, 0);
-    
-    // Get target partition size from file size
+
     int target_fd = open(file_paths[pid].c_str(), O_RDONLY | O_DIRECT);
     AT_ASSERTM(target_fd >= 0, "Failed to open target partition file");
-    
+
     off_t target_file_size = lseek(target_fd, 0, SEEK_END);
     int64_t target_nodes = target_file_size / row_bytes;
 
@@ -175,22 +172,23 @@ void gather_partitions_direct(
 
     AT_ASSERTM(curr_offset == total_rows, "Gather offset mismatch with destination size");
 
-    // 2. Read full target partition directly into GPU destination memory via GDS
-    CUfileDescr_t cfr_desc;
-    memset(&cfr_desc, 0, sizeof(CUfileDescr_t));
-    cfr_desc.handle.fd = target_fd;
-    cfr_desc.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
+    // 1. Read target partition
+    CUfileDescr_t target_desc;
+    memset(&target_desc, 0, sizeof(CUfileDescr_t));
+    target_desc.handle.fd = target_fd;
+    target_desc.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
 
-    CUfileHandle_t cfr_handle;
-    cuFileHandleRegister(&cfr_handle, &cfr_desc);
+    CUfileHandle_t target_handle;
+    CUfileError_t target_status = cuFileHandleRegister(&target_handle, &target_desc);
+    AT_ASSERTM(target_status.err == CU_FILE_SUCCESS, "cuFileHandleRegister failed for target partition");
 
-    ssize_t ret = cuFileRead(cfr_handle, dst_raw, target_file_size, 0, 0);
+    ssize_t ret = cuFileRead(target_handle, dst_raw, target_file_size, 0, 0);
     AT_ASSERTM(ret == target_file_size, "GDS Read failed for target partition");
 
-    cuFileHandleDeregister(cfr_handle);
+    cuFileHandleDeregister(target_handle);
     close(target_fd);
 
-    // 3. Concurrently read boundary partition files
+    // 2. Read boundary partitions
     std::vector<std::future<void>> futures;
 
     for (size_t i = 0; i < num_parts; ++i) {
@@ -207,10 +205,12 @@ void gather_partitions_direct(
         desc.handle.fd = fd;
         desc.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
 
-        CUfileError_t status = cuFileHandleRegister(&handle, &desc);
-        if (status.err != CU_FILE_SUCCESS) {
-            close(fd);
-            return;
+        // Declare handle before passing reference to cuFileHandleRegister
+        CUfileHandle_t handle;
+        CUfileError_t reg_status = cuFileHandleRegister(&handle, &desc);
+        if (reg_status.err != CU_FILE_SUCCESS) {
+          close(fd);
+          return;
         }
 
         auto bndry = boundaries[i].to(at::kCPU).contiguous();
@@ -218,7 +218,6 @@ void gather_partitions_direct(
         int64_t num_boundary_nodes = bndry.numel();
         int64_t start_row_offset = part_offsets[i];
 
-        // Merge contiguous boundary indices to minimize cuFileRead I/O calls
         int64_t idx = 0;
         while (idx < num_boundary_nodes) {
           int64_t range_start_node = idx_ptr[idx];
@@ -233,7 +232,6 @@ void gather_partitions_direct(
           size_t read_bytes = range_len * row_bytes;
           uint8_t* dst_ptr = dst_raw + ((start_row_offset + idx) * row_bytes);
 
-          // Direct NVMe -> GPU DMA transfer for the range block
           cuFileRead(handle, dst_ptr, read_bytes, file_offset, 0);
 
           idx += range_len;
@@ -244,16 +242,13 @@ void gather_partitions_direct(
       }));
     }
 
-    // Wait for all boundary threads to complete
     for (auto& f : futures) {
       f.get();
     }
 
-    // Ensure all Direct I/O streams synchronize before returning
     cudaStreamSynchronize(stream);
   });
 }
-
 
 void scatter_partitions(int pid, torch::Tensor src,
                         std::vector<torch::Tensor> dsts,
