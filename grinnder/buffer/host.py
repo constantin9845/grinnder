@@ -626,7 +626,7 @@ class HostBuffer:
                 ]
 
                 if valid_pids:
-                    with ThreadPoolExecutor(max_workers=min(len(valid_pids), 15)) as executor:
+                    with ThreadPoolExecutor(max_workers=min(len(valid_pids), 4)) as executor:
                         futures = [
                             executor.submit(_read_partition_boundary, part_id, part_offsets[part_id])
                             for part_id in valid_pids
