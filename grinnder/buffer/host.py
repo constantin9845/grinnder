@@ -522,7 +522,7 @@ class HostBuffer:
 
         with torch.cuda.stream(stream):
 
-            if self._ops is not None:
+            if self._ops is not None and 2 == 3:
                 self._ops.gather_partitions_direct(pid, file_paths, gpu_target, bndries)
                 print("Not a fallback")
 
