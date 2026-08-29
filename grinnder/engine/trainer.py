@@ -500,7 +500,7 @@ class Trainer:
             return
         
         for i, pid in enumerate(pids):
-            self.cache._evict_partition(0, pid)
+            self.cache._evict_partition(layer_id, pid)
 
 
         t0 = time.time()
@@ -1002,6 +1002,9 @@ class Trainer:
 
         if not pids:
             return
+        
+        for i, pid in enumerate(pids):
+            self.cache._evict_partition(layer_id, pid)
 
         self._prepare_cache_layer(layer_id)
 
