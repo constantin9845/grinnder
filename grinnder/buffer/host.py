@@ -563,58 +563,60 @@ class HostBuffer:
                         curr_offset += bndries[i].numel()
 
                 def _read_partition_boundary(i: int, start_offset: int):
-                    indices = bndries[i]
-                    if indices.device.type != "cpu":
-                        indices = indices.cpu()
 
-                    num_rows = indices.size(0)
-                    file_id_str = f"{self._backend._storage_dir}/{self._file_prefix}_p{i}"
-                    fd = None
+                    with torch.cuda.stream(stream):
+                        indices = bndries[i]
+                        if indices.device.type != "cpu":
+                            indices = indices.cpu()
 
-                    for k in range(num_rows):
-                        node_idx = indices[k].item()
-                        file_offset = node_idx * row_bytes
+                        num_rows = indices.size(0)
+                        file_id_str = f"{self._backend._storage_dir}/{self._file_prefix}_p{i}"
+                        fd = None
 
-                        # Pin target row slice using the partition's offset base + k
-                        row_dest = start_offset + k
-                        dest_row = gpu_target[row_dest : row_dest + 1]
+                        for k in range(num_rows):
+                            node_idx = indices[k].item()
+                            file_offset = node_idx * row_bytes
 
-                        if k == 0 and num_rows == 1:
-                            fd = self._backend.gpu_read_direct(
-                                status=0,
-                                fd=None,
-                                file_id=file_id_str,
-                                tensor=dest_row,
-                                offset=file_offset,
-                                stream=stream,
-                            )
-                        elif k == 0:
-                            fd = self._backend.gpu_read_direct(
-                                status=1,
-                                fd=None,
-                                file_id=file_id_str,
-                                tensor=dest_row,
-                                offset=file_offset,
-                                stream=stream,
-                            )
-                        elif k != num_rows - 1:
-                            fd = self._backend.gpu_read_direct(
-                                status=2,
-                                fd=fd,
-                                file_id=file_id_str,
-                                tensor=dest_row,
-                                offset=file_offset,
-                                stream=stream,
-                            )
-                        else:
-                            fd = self._backend.gpu_read_direct(
-                                status=3,
-                                fd=fd,
-                                file_id=file_id_str,
-                                tensor=dest_row,
-                                offset=file_offset,
-                                stream=stream,
-                            )
+                            # Pin target row slice using the partition's offset base + k
+                            row_dest = start_offset + k
+                            dest_row = gpu_target[row_dest : row_dest + 1]
+
+                            if k == 0 and num_rows == 1:
+                                fd = self._backend.gpu_read_direct(
+                                    status=0,
+                                    fd=None,
+                                    file_id=file_id_str,
+                                    tensor=dest_row,
+                                    offset=file_offset,
+                                    stream=stream,
+                                )
+                            elif k == 0:
+                                fd = self._backend.gpu_read_direct(
+                                    status=1,
+                                    fd=None,
+                                    file_id=file_id_str,
+                                    tensor=dest_row,
+                                    offset=file_offset,
+                                    stream=stream,
+                                )
+                            elif k != num_rows - 1:
+                                fd = self._backend.gpu_read_direct(
+                                    status=2,
+                                    fd=fd,
+                                    file_id=file_id_str,
+                                    tensor=dest_row,
+                                    offset=file_offset,
+                                    stream=stream,
+                                )
+                            else:
+                                fd = self._backend.gpu_read_direct(
+                                    status=3,
+                                    fd=fd,
+                                    file_id=file_id_str,
+                                    tensor=dest_row,
+                                    offset=file_offset,
+                                    stream=stream,
+                                )
 
                     print(f"Boundary partition {i} data loaded")
 
@@ -633,9 +635,9 @@ class HostBuffer:
                         for future in futures:
                             future.result()
 
-
-                '''
                 offset = curr_offset
+                '''
+                
 
                 for i in range(self.num_parts):
 
