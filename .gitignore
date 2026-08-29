@@ -212,3 +212,4 @@ marimo/_lsp/
 __marimo__/
 
 data/
+timesteps_output.py
