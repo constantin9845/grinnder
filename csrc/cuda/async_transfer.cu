@@ -122,7 +122,7 @@ void gather_partitions(int pid, std::vector<torch::Tensor> srcs,
 
 #include <torch/extension.h>
 #include <c10/cuda/CUDAStream.h>
-#include <c10/cuda/CUDAGuard.h> // Correct header for CUDAStreamGuard
+#include <c10/cuda/CUDAGuard.h>
 #include <cuda_runtime.h>
 #include <cufile.h>
 #include <fcntl.h>
@@ -136,7 +136,8 @@ void gather_partitions_direct(
     int pid,
     std::vector<std::string> file_paths,
     torch::Tensor dst,
-    std::vector<torch::Tensor> boundaries) {
+    std::vector<torch::Tensor> boundaries
+  ) {
 
   AT_ASSERTM(dst.is_cuda(), "Destination must be a CUDA tensor");
   AT_ASSERTM(dst.is_contiguous(), "Destination must be contiguous");
@@ -155,6 +156,18 @@ void gather_partitions_direct(
 
     size_t num_parts = file_paths.size();
     std::vector<int64_t> part_offsets(num_parts, 0);
+
+    std::vector<int> open_fds;
+    std::vector<CUfileHandle_t> registered_handles;
+
+    auto cleanup_resources = [&]() {
+      for (auto handle : registered_handles) {
+        cuFileHandleDeregister(handle);
+      }
+      for (int fd : open_fds) {
+        close(fd);
+      }
+    };
 
     int target_fd = open(file_paths[pid].c_str(), O_RDONLY | O_DIRECT);
     AT_ASSERTM(target_fd >= 0, "Failed to open target partition file");
@@ -182,71 +195,66 @@ void gather_partitions_direct(
     CUfileError_t target_status = cuFileHandleRegister(&target_handle, &target_desc);
     AT_ASSERTM(target_status.err == CU_FILE_SUCCESS, "cuFileHandleRegister failed for target partition");
 
-    ssize_t ret = cuFileRead(target_handle, dst_raw, target_file_size, 0, 0);
-    AT_ASSERTM(ret == target_file_size, "GDS Read failed for target partition");
+    open_fds.push_back(target_fd);
+    registered_handles.push_back(target_handle);
 
-    cuFileHandleDeregister(target_handle);
-    close(target_fd);
+    ssize_t ret = cuFileReadAsync(target_handle, dst_raw, target_file_size, 0, 0, stream);
+
 
     // 2. Read boundary partitions
-    std::vector<std::future<void>> futures;
+    std::vector<torch::Tensor> host_boundaries(num_parts);
 
     for (size_t i = 0; i < num_parts; ++i) {
       if (static_cast<int>(i) == pid || !boundaries[i].defined() || boundaries[i].numel() == 0) {
         continue;
       }
 
-      futures.push_back(std::async(std::launch::async, [=, &boundaries]() {
-        int fd = open(file_paths[i].c_str(), O_RDONLY | O_DIRECT);
-        if (fd < 0) return;
+      int fd = open(file_paths[i].c_str(), O_RDONLY | O_DIRECT);
+      if (fd < 0) continue;
 
-        CUfileDescr_t desc;
-        memset(&desc, 0, sizeof(CUfileDescr_t));
-        desc.handle.fd = fd;
-        desc.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
+      CUfileDescr_t desc;
+      memset(&desc, 0, sizeof(CUfileDescr_t));
+      desc.handle.fd = fd;
+      desc.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
 
-        // Declare handle before passing reference to cuFileHandleRegister
-        CUfileHandle_t handle;
-        CUfileError_t reg_status = cuFileHandleRegister(&handle, &desc);
-        if (reg_status.err != CU_FILE_SUCCESS) {
-          close(fd);
-          return;
-        }
-
-        auto bndry = boundaries[i].to(at::kCPU).contiguous();
-        const int64_t* idx_ptr = bndry.data_ptr<int64_t>();
-        int64_t num_boundary_nodes = bndry.numel();
-        int64_t start_row_offset = part_offsets[i];
-
-        int64_t idx = 0;
-        while (idx < num_boundary_nodes) {
-          int64_t range_start_node = idx_ptr[idx];
-          int64_t range_len = 1;
-
-          while (idx + range_len < num_boundary_nodes && 
-                 idx_ptr[idx + range_len] == range_start_node + range_len) {
-            range_len++;
-          }
-
-          off_t file_offset = range_start_node * row_bytes;
-          size_t read_bytes = range_len * row_bytes;
-          uint8_t* dst_ptr = dst_raw + ((start_row_offset + idx) * row_bytes);
-
-          cuFileRead(handle, dst_ptr, read_bytes, file_offset, 0);
-
-          idx += range_len;
-        }
-
-        cuFileHandleDeregister(handle);
+      CUfileHandle_t handle;
+      CUfileError_t reg_status = cuFileHandleRegister(&handle, &desc);
+      if (reg_status.err != CU_FILE_SUCCESS) {
         close(fd);
-      }));
-    }
+        continue;
+      }
 
-    for (auto& f : futures) {
-      f.get();
+      open_fds.push_back(fd);
+      registered_handles.push_back(handle);
+
+      host_boundaries[i] = boundaries[i].to(at::kCPU).contiguous();
+      const int64_t* idx_ptr = host_boundaries[i].data_ptr<int64_t>();
+      int64_t num_boundary_nodes = host_boundaries[i].numel();
+      int64_t start_row_offset = part_offsets[i];
+
+      int64_t idx = 0;
+      while (idx < num_boundary_nodes){
+        int64_t range_start_node = idx_ptr[idx];
+        int64_t range_len = 1;
+
+        while (idx + range_len < num_boundary_nodes && 
+               idx_ptr[idx + range_len] == range_start_node + range_len) {
+          range_len++;
+        }
+
+        off_t file_offset = range_start_node * row_bytes;
+        size_t read_bytes = range_len * row_bytes;
+        uint8_t* dst_ptr = dst_raw + ((start_row_offset + idx) * row_bytes);
+
+        cuFileReadAsync(handle, dst_ptr, read_bytes, file_offset, 0, stream);
+
+        idx += range_len;
+      }
     }
 
     cudaStreamSynchronize(stream);
+
+    cleanup_resources();
   });
 }
 
