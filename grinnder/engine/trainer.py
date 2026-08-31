@@ -521,6 +521,10 @@ class Trainer:
         for i, pid in enumerate(pids):
             pool_idx = i % pool_size
 
+            # Wait for H2D of current partition
+            self.device_features[layer_id].h2d_synchronize(
+                self.streams.h2d[pool_idx]
+            )
             self.streams.compute.wait_stream(self.streams.h2d[pool_idx])
             if self.config.mode == "grinnder":
                 self.streams.compute.wait_stream(self.streams.act_h2d[pool_idx])
@@ -535,7 +539,6 @@ class Trainer:
                     next_pool = (i + 1) % pool_size
                     #self._prepare_cache_partition(layer_id, next_pid, "forward")
                     t0 = time.perf_counter_ns()
-                    print("Async call")
                     self.device_features[layer_id].async_gather_direct(
                         "forward",
                         pid=next_pid,
@@ -543,7 +546,6 @@ class Trainer:
                         boundaries=self.graph.boundaries[next_pid],
                         stream=self.streams.h2d[next_pool],
                     )
-                    print("Async call passed")
                     tn = time.perf_counter_ns()
                     stat.load_GPU_timestamp("forward", "gather", t0, tn)
 
@@ -649,6 +651,9 @@ class Trainer:
         if pool_size > 1:
             last_pool = (len(pids) - 1) % pool_size
             self.streams.compute.wait_stream(self.streams.d2h[last_pool])
+            self.host_features[layer_id + 1].d2h_synchronize(
+                self.streams.d2h[last_pool]
+            )
             last_pid = pids[-1]
             act_last = self.activations[layer_id][last_pid]
             if act_last is not None:
