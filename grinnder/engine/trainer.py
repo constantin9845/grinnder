@@ -508,6 +508,7 @@ class Trainer:
         # Prologue: prefetch first assigned partition
         #self._prepare_cache_partition(layer_id, pids[0], "forward")
         t0 = time.perf_counter_ns()
+        print("Async call")
         self.device_features[layer_id].async_gather_direct(
             "forward",
             pid=pids[0],
@@ -515,6 +516,7 @@ class Trainer:
             boundaries=self.graph.boundaries[pids[0]],
             stream=self.streams.h2d[0],
         )
+        print("Async call passed")
         tn = time.perf_counter_ns()
         stat.load_GPU_timestamp("forward", "gather", t0, tn)
 
@@ -539,6 +541,7 @@ class Trainer:
                     next_pool = (i + 1) % pool_size
                     #self._prepare_cache_partition(layer_id, next_pid, "forward")
                     t0 = time.perf_counter_ns()
+                    print("Async call")
                     self.device_features[layer_id].async_gather_direct(
                         "forward",
                         pid=next_pid,
@@ -546,6 +549,7 @@ class Trainer:
                         boundaries=self.graph.boundaries[next_pid],
                         stream=self.streams.h2d[next_pool],
                     )
+                    print("Async call passed")
                     tn = time.perf_counter_ns()
                     stat.load_GPU_timestamp("forward", "gather", t0, tn)
 
@@ -637,6 +641,7 @@ class Trainer:
                     next_pid = pids[i + 1]
                     #self._prepare_cache_partition(layer_id, next_pid, "forward")
                     t0 = time.perf_counter_ns()
+                    print("Async call")
                     self.device_features[layer_id].async_gather_direct(
                         "forward",
                         pid=next_pid,
@@ -644,6 +649,7 @@ class Trainer:
                         boundaries=self.graph.boundaries[next_pid],
                         stream=self.streams.h2d[0],
                     )
+                    print("Async call passed")
                     tn = time.perf_counter_ns()
                     stat.load_GPU_timestamp("forward", "gather", t0, tn)
 
