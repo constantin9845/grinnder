@@ -172,7 +172,7 @@ void gather_partitions_direct(
 
     AT_ASSERTM(curr_offset == total_rows, "Gather offset mismatch with destination size");
 
-    // 1. Read target partition (contiguous large read)
+    // 1. Read target partition
     CUfileDescr_t target_desc;
     memset(&target_desc, 0, sizeof(CUfileDescr_t));
     target_desc.handle.fd = target_fd;
@@ -217,7 +217,6 @@ void gather_partitions_direct(
         int64_t num_boundary_nodes = bndry.numel();
         int64_t start_row_offset = part_offsets[i];
 
-        // --- Step A: Build batch IO parameters ---
         std::vector<CUfileIOParams_t> io_params;
         int64_t idx = 0;
 
@@ -236,17 +235,16 @@ void gather_partitions_direct(
 
           CUfileIOParams_t param;
           memset(&param, 0, sizeof(CUfileIOParams_t));
-          param.mode = CU_FILE_LSEEK;
+          param.mode = CU_FILE_BATCH_READ;
           param.fh = handle;
-          param.u.lseek.offset = file_offset;
-          param.devPtr_base = dst_ptr;
-          param.size = read_bytes;
+          param.u.batch.devPtr_base = dst_ptr;
+          param.u.batch.file_offset = file_offset;
+          param.u.batch.size = read_bytes;
 
           io_params.push_back(param);
           idx += range_len;
         }
 
-        // --- Step B: Submit as a single GDS batch ---
         uint32_t num_ios = static_cast<uint32_t>(io_params.size());
         if (num_ios > 0) {
           CUfileBatchHandle_t batch_handle;
@@ -258,9 +256,11 @@ void gather_partitions_direct(
             uint32_t num_completed = num_ios;
             std::vector<CUfileIOEvents_t> io_events(num_ios);
 
-            // Wait for all queued batch reads to finish
-            cuFileBatchIOWait(batch_handle, num_ios, &num_completed, io_events.data(), NULL);
-            cuFileBatchNODestroy(batch_handle);
+            // cuFileBatchIOWait takes 4 parameters (batch_handle, min_nr, nr, io_events)
+            cuFileBatchIOWait(batch_handle, num_ios, &num_completed, io_events.data());
+            
+            // Corrected function name
+            cuFileBatchDestroy(batch_handle);
           }
         }
 
@@ -276,6 +276,7 @@ void gather_partitions_direct(
     cudaStreamSynchronize(stream);
   });
 }
+
 
 void scatter_partitions(int pid, torch::Tensor src,
                         std::vector<torch::Tensor> dsts,
