@@ -131,6 +131,7 @@ void gather_partitions(int pid, std::vector<torch::Tensor> srcs,
 #include <string>
 #include <future>
 #include <cstring>
+#include <cufile_batch.h>
 
 void gather_partitions_direct(
     int pid,
