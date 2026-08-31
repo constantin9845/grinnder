@@ -515,8 +515,6 @@ class Trainer:
             boundaries=self.graph.boundaries[pids[0]],
             stream=self.streams.h2d[0],
         )
-        tn = time.perf_counter_ns()
-        stat.load_GPU_timestamp("forward", "gather", t0, tn)
 
         for i, pid in enumerate(pids):
             pool_idx = i % pool_size
@@ -525,6 +523,9 @@ class Trainer:
             self.device_features[layer_id].h2d_synchronize(
                 self.streams.h2d[pool_idx]
             )
+            tn = time.perf_counter_ns()
+            stat.load_GPU_timestamp("forward", "gather", t0, tn)
+
             self.streams.compute.wait_stream(self.streams.h2d[pool_idx])
             if self.config.mode == "grinnder":
                 self.streams.compute.wait_stream(self.streams.act_h2d[pool_idx])
@@ -546,8 +547,6 @@ class Trainer:
                         boundaries=self.graph.boundaries[next_pid],
                         stream=self.streams.h2d[next_pool],
                     )
-                    tn = time.perf_counter_ns()
-                    stat.load_GPU_timestamp("forward", "gather", t0, tn)
 
                 x = self.device_features[layer_id][pid]
                 x.requires_grad_(True)
@@ -556,7 +555,7 @@ class Trainer:
 
                 # saved_tensors_hooks wraps checkpoint(fn, x).
                 # checkpoint only saves x. adj loaded inside fn (not passed).
-                t0 = time.perf_counter_ns()
+                t00 = time.perf_counter_ns()
                 if self.config.mode == "hongtu":
                     with HongtuCheckpoint(pid, self.device_features[layer_id]):
                         out = checkpoint(
@@ -576,7 +575,7 @@ class Trainer:
                             use_reentrant=True,
                         )
                 tn = time.perf_counter_ns()
-                stat.compute_timestamp("forward", t0, tn)
+                stat.compute_timestamp("forward", t00, tn)
 
                 # Keep activation reference
                 self.activations[layer_id][pid] = out
@@ -595,12 +594,12 @@ class Trainer:
                 if use_bypass:
                     print(f"[Layer {layer_id} | PID {pid}] Writing {size_mb:.2f} MB of output activations to Storage (NVMe bypass)...")
                     
-                    t0 = time.perf_counter_ns()
+                    t00 = time.perf_counter_ns()
                     self.host_features[layer_id + 1].async_bypass_to_storage(
                         pid, out, self.streams.d2h[pool_idx]
                     )
                     tn = time.perf_counter_ns()
-                    stat.write_timestamp("forward", "none", t0, tn)
+                    stat.write_timestamp("forward", "none", t00, tn)
 
                 else:
                     print(f"[Layer {layer_id} | PID {pid}] Writing {size_mb:.2f} MB to Host RAM...")
@@ -644,8 +643,6 @@ class Trainer:
                         boundaries=self.graph.boundaries[next_pid],
                         stream=self.streams.h2d[0],
                     )
-                    tn = time.perf_counter_ns()
-                    stat.load_GPU_timestamp("forward", "gather", t0, tn)
 
         # Epilogue: free last assigned partition's activation
         if pool_size > 1:
