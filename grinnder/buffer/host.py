@@ -428,9 +428,6 @@ class HostBuffer:
 
         stream.wait_stream(torch.cuda.current_stream(gpu_target.device))
 
-        tn = time.perf_counter_ns()
-        stat.load_GPU_timestamp(phase, "gather", t0, tn)
-
         # File paths
         file_paths = [
             f"{self._backend._storage_dir}/{self._file_prefix}_p{i}.pt"
@@ -644,8 +641,6 @@ class HostBuffer:
                         f"  expected = {expected_offset}"
                     )
 
-        tn = time.perf_counter_ns()
-        stat.load_GPU_timestamp(phase, "copy", t0, tn)
 
         bt = gpu_target.numel() * gpu_target.element_size()
         gb = round(bt / (1024**3), 3)
@@ -654,6 +649,9 @@ class HostBuffer:
             f"\tPartition {pid} loads "
             f"{gb} GB from other partitions"
         )
+
+        tn = time.perf_counter_ns()
+        stat.load_GPU_timestamp(phase, "gather", t0, tn)
 
     # ------------------------------------------------------------------
     # Scatter: one GPU tensor -> multiple host partitions (with accumulation)

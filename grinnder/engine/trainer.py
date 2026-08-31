@@ -507,6 +507,7 @@ class Trainer:
 
         # Prologue: prefetch first assigned partition
         #self._prepare_cache_partition(layer_id, pids[0], "forward")
+        
         self.device_features[layer_id].async_gather_direct(
             "forward",
             pid=pids[0],
