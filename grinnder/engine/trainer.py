@@ -508,7 +508,6 @@ class Trainer:
         # Prologue: prefetch first assigned partition
         #self._prepare_cache_partition(layer_id, pids[0], "forward")
         t0 = time.perf_counter_ns()
-        print("Async call")
         self.device_features[layer_id].async_gather_direct(
             "forward",
             pid=pids[0],
@@ -516,26 +515,15 @@ class Trainer:
             boundaries=self.graph.boundaries[pids[0]],
             stream=self.streams.h2d[0],
         )
-        print("Async call passed")
         tn = time.perf_counter_ns()
         stat.load_GPU_timestamp("forward", "gather", t0, tn)
 
         for i, pid in enumerate(pids):
             pool_idx = i % pool_size
 
-            # Wait for H2D of current partition
-            print("h2d sync start")
-            self.device_features[layer_id].h2d_synchronize(
-                self.streams.h2d[pool_idx]
-            )
-            print("h2d sync end")
-
-            print("compute sync start")
             self.streams.compute.wait_stream(self.streams.h2d[pool_idx])
             if self.config.mode == "grinnder":
                 self.streams.compute.wait_stream(self.streams.act_h2d[pool_idx])
-
-            print("compute sync end")
 
             t_load = time.time() - t0
             print(f"Time to load partitions + gather to GPU = {t_load}")
@@ -647,7 +635,6 @@ class Trainer:
                     next_pid = pids[i + 1]
                     #self._prepare_cache_partition(layer_id, next_pid, "forward")
                     t0 = time.perf_counter_ns()
-                    print("Async call")
                     self.device_features[layer_id].async_gather_direct(
                         "forward",
                         pid=next_pid,
@@ -655,7 +642,6 @@ class Trainer:
                         boundaries=self.graph.boundaries[next_pid],
                         stream=self.streams.h2d[0],
                     )
-                    print("Async call passed")
                     tn = time.perf_counter_ns()
                     stat.load_GPU_timestamp("forward", "gather", t0, tn)
 
@@ -663,9 +649,6 @@ class Trainer:
         if pool_size > 1:
             last_pool = (len(pids) - 1) % pool_size
             self.streams.compute.wait_stream(self.streams.d2h[last_pool])
-            self.host_features[layer_id + 1].d2h_synchronize(
-                self.streams.d2h[last_pool]
-            )
             last_pid = pids[-1]
             act_last = self.activations[layer_id][last_pid]
             if act_last is not None:
