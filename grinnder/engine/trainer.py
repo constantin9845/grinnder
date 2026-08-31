@@ -524,12 +524,18 @@ class Trainer:
             pool_idx = i % pool_size
 
             # Wait for H2D of current partition
+            print("h2d sync start")
             self.device_features[layer_id].h2d_synchronize(
                 self.streams.h2d[pool_idx]
             )
+            print("h2d sync end")
+
+            print("compute sync start")
             self.streams.compute.wait_stream(self.streams.h2d[pool_idx])
             if self.config.mode == "grinnder":
                 self.streams.compute.wait_stream(self.streams.act_h2d[pool_idx])
+
+            print("compute sync end")
 
             t_load = time.time() - t0
             print(f"Time to load partitions + gather to GPU = {t_load}")
