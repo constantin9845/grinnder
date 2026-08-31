@@ -141,7 +141,7 @@ void gather_partitions_direct(
   AT_ASSERTM(dst.is_contiguous(), "Destination must be contiguous");
 
   auto stream_obj = at::cuda::getCurrentCUDAStream(dst.get_device());
-  cudaStream_t stream = stream_obj.stream(); // Extract raw cudaStream_t handle
+  cudaStream_t stream = stream_obj.stream();
 
   AT_ASSERTM(stream_obj != at::cuda::getDefaultCUDAStream(dst.get_device()),
              "Async gather requires a non-default CUDA stream");
@@ -157,11 +157,9 @@ void gather_partitions_direct(
     size_t num_parts = file_paths.size();
     std::vector<int64_t> part_offsets(num_parts, 0);
 
-    // Track handles and fds to close AFTER stream sync
     std::vector<int> open_fds;
     std::vector<CUfileHandle_t> registered_handles;
 
-    // cleanup helper lambda
     auto cleanup_resources = [&]() {
       for (auto handle : registered_handles) {
         cuFileHandleDeregister(handle);
@@ -179,14 +177,32 @@ void gather_partitions_direct(
     int64_t target_nodes = target_file_size / row_bytes;
 
     int64_t curr_offset = target_nodes;
+    size_t total_ops = 1; // 1 operation for target partition
+
     for (size_t i = 0; i < num_parts; ++i) {
       if (static_cast<int>(i) != pid && boundaries[i].defined() && boundaries[i].numel() > 0) {
         part_offsets[i] = curr_offset;
         curr_offset += boundaries[i].numel();
+        total_ops += boundaries[i].numel(); // Upper-bound on chunk count for allocation
       }
     }
 
     AT_ASSERTM(curr_offset == total_rows, "Gather offset mismatch with destination size");
+
+    // Pre-allocate argument buffers to guarantee pointer stability across async reads
+    std::vector<size_t> size_args;
+    std::vector<off_t> file_off_args;
+    std::vector<off_t> dev_off_args;
+    std::vector<ssize_t> bytes_read_args;
+
+    size_args.reserve(total_ops);
+    file_off_args.reserve(total_ops);
+    dev_off_args.reserve(total_ops);
+    bytes_read_args.reserve(total_ops);
+
+    // Register stream with cuFile to prevent internal state collision
+    CUfileError_t stream_reg_status = cuFileStreamRegister(stream, 0);
+    AT_ASSERTM(stream_reg_status.err == CU_FILE_SUCCESS, "cuFileStreamRegister failed");
 
     // 1. Enqueue Target Partition Read (Async)
     CUfileDescr_t target_desc;
@@ -198,26 +214,18 @@ void gather_partitions_direct(
     CUfileError_t target_status = cuFileHandleRegister(&target_handle, &target_desc);
     if (target_status.err != CU_FILE_SUCCESS) {
       close(target_fd);
+      cuFileStreamDeregister(stream);
       AT_ERROR("cuFileHandleRegister failed for target partition");
     }
 
     open_fds.push_back(target_fd);
     registered_handles.push_back(target_handle);
 
-    // Dynamic state variables needed for pointer arguments to cuFileReadAsync
-    // These must stay in scope until cudaStreamSynchronize completes
-    std::vector<size_t> size_args;
-    std::vector<off_t> file_off_args;
-    std::vector<off_t> dev_off_args;
-    std::vector<ssize_t> bytes_read_args;
-
-    // Allocate storage for target partition arguments
     size_args.push_back(static_cast<size_t>(target_file_size));
     file_off_args.push_back(0);
     dev_off_args.push_back(0);
     bytes_read_args.push_back(0);
 
-    // Asynchronously queue target read onto stream
     cuFileReadAsync(
         target_handle,
         dst_raw,
@@ -273,13 +281,11 @@ void gather_partitions_direct(
         size_t read_bytes = range_len * row_bytes;
         uint8_t* dst_ptr = dst_raw + ((start_row_offset + idx) * row_bytes);
 
-        // Append parameter values to vectors so addresses remain valid
         size_args.push_back(read_bytes);
         file_off_args.push_back(file_offset);
-        dev_off_args.push_back(0); // devPtr_offset relative to dst_ptr
+        dev_off_args.push_back(0);
         bytes_read_args.push_back(0);
 
-        // Queue async read operation
         cuFileReadAsync(
             handle,
             dst_ptr,
@@ -294,14 +300,14 @@ void gather_partitions_direct(
       }
     }
 
-    // 3. Synchronize stream to complete all queued GDS transfers
+    // 3. Synchronize stream and unregister cuFile stream state
     cudaStreamSynchronize(stream);
+    cuFileStreamDeregister(stream);
 
-    // 4. Clean up descriptors & file handles after completion
+    // 4. Clean up handles and file descriptors
     cleanup_resources();
   });
 }
-
 
 void scatter_partitions(int pid, torch::Tensor src,
                         std::vector<torch::Tensor> dsts,
