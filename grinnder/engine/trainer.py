@@ -520,9 +520,9 @@ class Trainer:
             pool_idx = i % pool_size
 
             # Wait for H2D of current partition
-            self.device_features[layer_id].h2d_synchronize(
-                self.streams.h2d[pool_idx]
-            )
+            #self.device_features[layer_id].h2d_synchronize(
+            #    self.streams.h2d[pool_idx]
+            #)
             self.streams.compute.wait_stream(self.streams.h2d[pool_idx])
             if self.config.mode == "grinnder":
                 self.streams.compute.wait_stream(self.streams.act_h2d[pool_idx])
@@ -857,10 +857,10 @@ class Trainer:
             loss_idx = self._pid_to_loss_idx[pid]
 
             # Wait for re-gather to complete
-            if self.config.mode == "grinnder" and layer_id > 0:
-                self.device_features[layer_id].h2d_synchronize(
-                    self.streams.act_h2d[pool_idx]
-                )
+            #if self.config.mode == "grinnder" and layer_id > 0:
+                #self.device_features[layer_id].h2d_synchronize(
+                #    self.streams.act_h2d[pool_idx]
+                #)
             self.streams.compute.wait_stream(self.streams.act_h2d[pool_idx])
 
             # Prefetch re-gather for NEXT partition
@@ -888,7 +888,7 @@ class Trainer:
                     prev_pool = (i - 1) % pool_size
                     if layer_id > 0 and self.host_gradients[layer_id] is not None:
                         t0 = time.perf_counter_ns()
-                        self.host_gradients[layer_id].d2h_synchronize(self.streams.d2h[prev_pool])
+                        #self.host_gradients[layer_id].d2h_synchronize(self.streams.d2h[prev_pool])
                         tn = time.perf_counter_ns()
                         stat.write_timestamp("backward", "CPU", t0, tn)
 
@@ -995,7 +995,7 @@ class Trainer:
         if not pids:
             return
 
-        self._prepare_cache_layer(layer_id)
+        #self._prepare_cache_layer(layer_id)
 
         # Initialize gradient write-back buffer for THIS layer
         if self.host_gradients[layer_id] is not None:
@@ -1038,10 +1038,10 @@ class Trainer:
             pool_idx = i % pool_size
 
             # Wait for H2D of gradient and regathered features
-            if self.config.mode == "grinnder":
-                self.device_features[layer_id].h2d_synchronize(
-                    self.streams.act_h2d[pool_idx]
-                )
+            #if self.config.mode == "grinnder":
+            #    self.device_features[layer_id].h2d_synchronize(
+            #        self.streams.act_h2d[pool_idx]
+            #    )
             self.streams.compute.wait_stream(self.streams.h2d[pool_idx])
             self.streams.compute.wait_stream(self.streams.act_h2d[pool_idx])
 
@@ -1089,9 +1089,9 @@ class Trainer:
                     prev_pool = (i - 1) % pool_size
                     if self.host_gradients[layer_id] is not None:
                         t0 = time.perf_counter_ns()
-                        self.host_gradients[layer_id].d2h_synchronize(
-                            self.streams.d2h[prev_pool]
-                        )
+                        #self.host_gradients[layer_id].d2h_synchronize(
+                        #    self.streams.d2h[prev_pool]
+                        #)
                         tn = time.perf_counter_ns()
                         stat.write_timestamp("backward", "CPU", t0, tn)
 
