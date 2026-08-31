@@ -515,8 +515,6 @@ class HostBuffer:
                 f"  gpu_target.size(0)={gpu_target.size(0)}"
             )
 
-        t0 = time.perf_counter_ns()
-
         with torch.cuda.stream(stream):
 
             if self._ops is not None:
@@ -649,9 +647,6 @@ class HostBuffer:
             f"\tPartition {pid} loads "
             f"{gb} GB from other partitions"
         )
-
-        tn = time.perf_counter_ns()
-        stat.load_GPU_timestamp(phase, "gather", t0, tn)
 
     # ------------------------------------------------------------------
     # Scatter: one GPU tensor -> multiple host partitions (with accumulation)
