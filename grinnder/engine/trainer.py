@@ -531,6 +531,7 @@ class Trainer:
             t_load = time.time() - t0
             print(f"Time to load partitions + gather to GPU = {t_load}")
             print(f"loading time : {t_load}")
+            exit(1)
 
             with torch.cuda.stream(self.streams.compute):
                 # Prefetch next partition (overlap I/O with compute)
