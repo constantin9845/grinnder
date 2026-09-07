@@ -525,6 +525,8 @@ class Trainer:
             )
             tn = time.perf_counter_ns()
             stat.load_GPU_timestamp("forward", "gather", t0, tn)
+            print(f"Load time  = {tn}")
+            exit(1)
 
             self.streams.compute.wait_stream(self.streams.h2d[pool_idx])
             if self.config.mode == "grinnder":
