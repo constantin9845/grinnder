@@ -3,10 +3,6 @@ import ctypes
 import time
 import random
 
-FILENAME = "/mnt/nvme/feat_l0_p0.pt"
-ALIGNMENT = 4096
-CHUNK_SIZE = 4096
-
 libc = ctypes.CDLL(None)
 
 
@@ -14,6 +10,10 @@ libc = ctypes.CDLL(None)
 # 1. FULL FILE SINGLE-BUFFER READ
 # =====================================================================
 print("--- Test 1: Full File Read ---")
+FILENAME = "/mnt/nvme/feat_l0_p0.pt"
+ALIGNMENT = 4096
+CHUNK_SIZE = 64 * 1024 * 1024  # 64 MB chunks saturate NVMe hardware speed
+
 flags = os.O_RDONLY | os.O_DIRECT
 fd = os.open(FILENAME, flags)
 
@@ -21,30 +21,34 @@ try:
     file_size = os.lseek(fd, 0, os.SEEK_END)
     os.lseek(fd, 0, os.SEEK_SET)
 
-    # Allocate aligned buffer for the full file (rounded up to nearest 4096)
-    alloc_size = ((file_size + ALIGNMENT - 1) // ALIGNMENT) * ALIGNMENT
-
+    # Allocate 1 aligned 64 MB memory buffer
+    libc = ctypes.CDLL(None)
     buf_ptr = ctypes.c_void_p()
-    if libc.posix_memalign(ctypes.byref(buf_ptr), ALIGNMENT, alloc_size) != 0:
-        raise OSError("posix_memalign failed")
+    if libc.posix_memalign(ctypes.byref(buf_ptr), ALIGNMENT, CHUNK_SIZE) != 0:
+        raise OSError("Memory allocation failed")
 
-    aligned_memview = memoryview((ctypes.c_char * alloc_size).from_address(buf_ptr.value))
+    memview = memoryview((ctypes.c_char * CHUNK_SIZE).from_address(buf_ptr.value))
+
+    offset = 0
+    total_bytes_read = 0
 
     t0 = time.perf_counter_ns()
-    
-    # Low-level Direct I/O read into aligned memory
-    bytes_read = os.preadv(fd, [aligned_memview], 0)
+
+    while offset < file_size:
+        bytes_read = os.preadv(fd, [memview], offset)
+        if bytes_read == 0:
+            break
+
+        offset += bytes_read
+        total_bytes_read += bytes_read
 
     tn = time.perf_counter_ns()
-
-    elapsed_sec = (tn - t0) / 1e9
-    throughput_mb = (bytes_read / (1024 * 1024)) / elapsed_sec if elapsed_sec > 0 else 0
-
-    print(f"Successfully read {bytes_read:,} / {file_size:,} bytes using O_DIRECT.")
-    print(f"Time Taken  : {elapsed_sec:.6f} seconds")
-    print(f"Throughput  : {throughput_mb:.2f} MB/s\n")
-
     libc.free(buf_ptr)
+
+    elapsed = (tn - t0) / 1e9
+    mb_per_sec = (total_bytes_read / (1024 * 1024)) / elapsed
+
+    print(f"Read {total_bytes_read / (1024**3):.2f} GB in {elapsed:.4f} seconds ({mb_per_sec:.2f} MB/s)")
 
 finally:
     os.close(fd)
