@@ -14,6 +14,8 @@ FILENAME = "/mnt/nvme/feat_l0_p10.pt"
 ALIGNMENT = 4096
 CHUNK_SIZE = 64 * 1024 * 1024  # 64 MB chunks saturate NVMe hardware speed
 
+'''
+
 flags = os.O_RDONLY | os.O_DIRECT
 fd = os.open(FILENAME, flags)
 
@@ -53,14 +55,14 @@ try:
 finally:
     os.close(fd)
 
-exit(0)
-
+'''
 
 # =====================================================================
 # 2. SEQUENTIAL PARTIAL READS (Full File in 4 KB Chunks)
 # =====================================================================
 print("--- Test 2: Sequential 4 KB Reads ---")
 fd = os.open(FILENAME, flags)
+CHUNK_SIZE = 4096
 
 try:
     file_size = os.lseek(fd, 0, os.SEEK_END)
@@ -99,6 +101,7 @@ try:
 finally:
     os.close(fd)
 
+exit(0)
 
 # =====================================================================
 # 3. SCATTERED RANDOM PARTIAL READS (13,700 Offsets)
