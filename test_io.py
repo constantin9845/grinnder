@@ -10,7 +10,7 @@ libc = ctypes.CDLL(None)
 # 1. FULL FILE SINGLE-BUFFER READ
 # =====================================================================
 print("--- Test 1: Full File Read ---")
-FILENAME = "/mnt/nvme/feat_l0_p3.pt"
+FILENAME = "/mnt/nvme/feat_l0_p7.pt"
 ALIGNMENT = 4096
 CHUNK_SIZE = 64 * 1024 * 1024  # 64 MB chunks saturate NVMe hardware speed
 flags = os.O_RDONLY | os.O_DIRECT
@@ -49,7 +49,12 @@ try:
     elapsed = (tn - t0) / 1e9
     mb_per_sec = (total_bytes_read / (1024 * 1024)) / elapsed
 
-    print(f"Read {total_bytes_read / (1024**3):.2f} GB in {elapsed:.4f} seconds ({mb_per_sec:.2f} MB/s)")
+    elapsed_sec = (tn - t0) / 1e9
+    throughput_mb = (total_bytes_read / (1024 * 1024)) / elapsed_sec if elapsed_sec > 0 else 0
+
+    print(f"Finished reading {total_bytes_read:,} / {file_size:,} bytes in 4KB chunks.")
+    print(f"Time Taken  : {elapsed_sec:.6f} seconds")
+    print(f"Throughput  : {throughput_mb:.2f} MB/s\n")
 
 finally:
     os.close(fd)
@@ -60,7 +65,7 @@ finally:
 # 2. SEQUENTIAL PARTIAL READS (Full File in 4 KB Chunks)
 # =====================================================================
 print("--- Test 2: Sequential 4 KB Reads ---")
-FILENAME = "/mnt/nvme/feat_l0_p4.pt"
+FILENAME = "/mnt/nvme/feat_l0_p8.pt"
 fd = os.open(FILENAME, flags)
 CHUNK_SIZE = 4096
 
@@ -106,7 +111,7 @@ finally:
 # 3. SCATTERED RANDOM PARTIAL READS (13,700 Offsets)
 # =====================================================================
 print("--- Test 3: Scattered 4 KB Reads ---")
-FILENAME = "/mnt/nvme/feat_l0_p5.pt"
+FILENAME = "/mnt/nvme/feat_l0_p9.pt"
 NUM_READS = 13700
 
 fd = os.open(FILENAME, flags)
