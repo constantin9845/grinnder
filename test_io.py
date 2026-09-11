@@ -10,13 +10,12 @@ libc = ctypes.CDLL(None)
 # 1. FULL FILE SINGLE-BUFFER READ
 # =====================================================================
 print("--- Test 1: Full File Read ---")
-FILENAME = "/mnt/nvme/feat_l0_p10.pt"
+FILENAME = "/mnt/nvme/feat_l0_p3.pt"
 ALIGNMENT = 4096
 CHUNK_SIZE = 64 * 1024 * 1024  # 64 MB chunks saturate NVMe hardware speed
-
-'''
-
 flags = os.O_RDONLY | os.O_DIRECT
+
+
 fd = os.open(FILENAME, flags)
 
 try:
@@ -55,12 +54,13 @@ try:
 finally:
     os.close(fd)
 
-'''
+
 
 # =====================================================================
 # 2. SEQUENTIAL PARTIAL READS (Full File in 4 KB Chunks)
 # =====================================================================
 print("--- Test 2: Sequential 4 KB Reads ---")
+FILENAME = "/mnt/nvme/feat_l0_p4.pt"
 fd = os.open(FILENAME, flags)
 CHUNK_SIZE = 4096
 
@@ -101,12 +101,12 @@ try:
 finally:
     os.close(fd)
 
-exit(0)
 
 # =====================================================================
 # 3. SCATTERED RANDOM PARTIAL READS (13,700 Offsets)
 # =====================================================================
 print("--- Test 3: Scattered 4 KB Reads ---")
+FILENAME = "/mnt/nvme/feat_l0_p5.pt"
 NUM_READS = 13700
 
 fd = os.open(FILENAME, flags)
