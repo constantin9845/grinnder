@@ -10,7 +10,7 @@ libc = ctypes.CDLL(None)
 # 1. FULL FILE SINGLE-BUFFER READ
 # =====================================================================
 print("--- Test 1: Full File Read ---")
-FILENAME = "/mnt/nvme/feat_l0_p0.pt"
+FILENAME = "/mnt/nvme/feat_l0_p10.pt"
 ALIGNMENT = 4096
 CHUNK_SIZE = 64 * 1024 * 1024  # 64 MB chunks saturate NVMe hardware speed
 
@@ -52,6 +52,8 @@ try:
 
 finally:
     os.close(fd)
+
+exit(0)
 
 
 # =====================================================================
