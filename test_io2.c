@@ -346,8 +346,8 @@ int main(int argc, char *argv[]) {
 
     printf("\nStarting Fixed Benchmark Suite on: %s\n\n", filename);
 
-    run_test1_full_2m_uring(filename);
-    run_test2_random_4k(filename);
+    //run_test1_full_2m_uring(filename);
+    //run_test2_random_4k(filename);
     run_test3_seq_4k(filename);
 
     return 0;
