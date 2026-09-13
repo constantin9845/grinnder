@@ -141,10 +141,10 @@ finally:
 # =====================================================================
 # 3. SCATTERED RANDOM READ - 5 GB (Parallel Across Entire LBA Range)
 # =====================================================================
-print(f"--- Test 3: Scattered Random 5 GB Read in 4 KB Chunks ({NUM_WORKERS} Threads / QD={NUM_WORKERS}) ---")
+print(f"--- Test 3: Scattered Random 5% Reads in 4 KB Chunks ({NUM_WORKERS} Threads / QD={NUM_WORKERS}) ---")
 CHUNK_SIZE_BYTES = 4096
 LBAS_PER_CHUNK = CHUNK_SIZE_BYTES // SECTOR_SIZE
-NUM_READS = TARGET_BYTES_5GB // CHUNK_SIZE_BYTES  # Exactly 1,310,720 reads to equal 5 GB
+NUM_READS = (250*1024*1024) // CHUNK_SIZE_BYTES  
 
 fd = os.open(BLOCK_DEVICE, flags)
 
