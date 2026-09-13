@@ -344,6 +344,8 @@ int main(int argc, char *argv[]) {
     const char *filename3 = "/mnt/nvme/feat_l0_p8.pt";
     if (argc > 1) {
         filename1 = argv[1];
+        filename2 = argv[1];
+        filename3 = argv[1];
     }
 
     printf("\nStarting Fixed Benchmark Suite: \n\n");
