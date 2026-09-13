@@ -24,7 +24,10 @@ int main() {
     // Allocate aligned memory buffers
     void *buffers[QUEUE_DEPTH];
     for (int i = 0; i < QUEUE_DEPTH; i++) {
-        posix_memalign(&buffers[i], 4096, CHUNK_SIZE);
+        if (posix_memalign(&buffers[i], 4096, CHUNK_SIZE) != 0) {
+            perror("Memory allocation failed");
+            return 1;
+        }
     }
 
     // Generate random offsets
