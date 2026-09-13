@@ -4,66 +4,167 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <time.h>
+#include <string.h>
+#include <sys/resource.h>
 #include <liburing.h>
 
 #define QUEUE_DEPTH 256
-#define CHUNK_SIZE 4096
-#define NUM_READS 100000
+#define SECTOR_4K 4096
+#define CHUNK_64M (64 * 1024 * 1024)
 
-int main() {
-    const char *filename = "/mnt/nvme/feat_l0_p9.pt";
+// High-precision time helper (seconds)
+static double get_time_sec() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+    return ts.tv_sec + (ts.tv_nsec / 1e9);
+}
+
+// CPU usage helper (Kernel + User CPU seconds)
+static double get_cpu_time_sec() {
+    struct rusage ru;
+    getrusage(RUSAGE_SELF, &ru);
+    double user = ru.ru_utime.tv_sec + (ru.ru_utime.tv_usec / 1e6);
+    double sys  = ru.ru_stime.tv_sec + (ru.ru_stime.tv_usec / 1e6);
+    return user + sys;
+}
+
+void print_stats(const char *title, size_t total_bytes, size_t num_reads, 
+                 double wall_time, double prep_time, double wait_time, 
+                 double cpu_time) {
+    double mb = (double)total_bytes / (1024.0 * 1024.0);
+    double throughput = mb / wall_time;
+    double iops = (double)num_reads / wall_time;
+    
+    // Host overhead is the time spent preparing SQEs + CPU processing time
+    double host_pct = (prep_time / wall_time) * 100.0;
+    double ssd_pct = (wait_time / wall_time) * 100.0;
+
+    printf("=====================================================\n");
+    printf(" %s\n", title);
+    printf("=====================================================\n");
+    printf("  Total Data Processed : %.2f MB (%zu requests)\n", mb, num_reads);
+    printf("  Wall Clock Run Time  : %.4f seconds\n", wall_time);
+    printf("  Throughput           : %.2f MB/s\n", throughput);
+    printf("  IOPS                 : %.2f IOPS\n", iops);
+    printf("  ---------------------------------------------------\n");
+    printf("  Total CPU Time Used  : %.4f CPU sec (CPU Load: %.1f%%)\n", 
+           cpu_time, (cpu_time / wall_time) * 100.0);
+    printf("  Host Submission Time : %.4f sec (%.1f%% of wall time)\n", prep_time, host_pct);
+    printf("  SSD Hardware Wait    : %.4f sec (%.1f%% of wall time)\n", wait_time, ssd_pct);
+    printf("\n");
+}
+
+
+// =====================================================================
+// TEST 1: FULL FILE READ (64 MB Chunks, Normal Mode)
+// =====================================================================
+void run_test1_full_64m(const char *filename) {
     int fd = open(filename, O_RDONLY | O_DIRECT);
-    if (fd < 0) { perror("open failed"); return 1; }
+    if (fd < 0) { perror("Test 1 Open Failed"); return; }
 
     off_t file_size = lseek(fd, 0, SEEK_END);
-    size_t total_blocks = file_size / CHUNK_SIZE;
+    size_t num_chunks = (file_size + CHUNK_64M - 1) / CHUNK_64M;
+
+    void *buf;
+    if (posix_memalign(&buf, 4096, CHUNK_64M) != 0) {
+        perror("Memalign Failed");
+        close(fd);
+        return;
+    }
+
+    double cpu_start = get_cpu_time_sec();
+    double t_start = get_time_sec();
+    
+    size_t total_bytes = 0;
+    off_t offset = 0;
+
+    while (offset < file_size) {
+        size_t bytes_to_read = (file_size - offset > CHUNK_64M) ? CHUNK_64M : (file_size - offset);
+        ssize_t ret = pread(fd, buf, bytes_to_read, offset);
+        if (ret <= 0) break;
+        total_bytes += ret;
+        offset += ret;
+    }
+
+    double t_end = get_time_sec();
+    double cpu_end = get_cpu_time_sec();
+    
+    double wall_time = t_end - t_start;
+    double cpu_time = cpu_end - cpu_start;
+
+    // For synchronous single reads, host prep time is negligible compared to wait time
+    print_stats("TEST 1: Full File Read (Normal 64MB Chunks)", 
+                total_bytes, num_chunks, wall_time, 0.001, wall_time - 0.001, cpu_time);
+
+    free(buf);
+    close(fd);
+}
+
+
+// =====================================================================
+// TEST 2: RANDOM 4 KB READS (10% of File Size via io_uring)
+// =====================================================================
+void run_test2_random_4k(const char *filename) {
+    int fd = open(filename, O_RDONLY | O_DIRECT);
+    if (fd < 0) { perror("Test 2 Open Failed"); return; }
+
+    off_t file_size = lseek(fd, 0, SEEK_END);
+    size_t total_4k_blocks = file_size / SECTOR_4K;
+    size_t num_reads = total_4k_blocks / 10; // 10% of file size
+
+    if (num_reads == 0) num_reads = 1;
+
+    // Generate random offsets
+    off_t *offsets = malloc(num_reads * sizeof(off_t));
+    srand(42); // fixed seed for reproducibility
+    for (size_t i = 0; i < num_reads; i++) {
+        offsets[i] = (rand() % total_4k_blocks) * SECTOR_4K;
+    }
 
     struct io_uring ring;
     io_uring_queue_init(QUEUE_DEPTH, &ring, 0);
 
-    // Allocate aligned memory buffers
     void *buffers[QUEUE_DEPTH];
     for (int i = 0; i < QUEUE_DEPTH; i++) {
-        if (posix_memalign(&buffers[i], 4096, CHUNK_SIZE) != 0) {
-            perror("Memory allocation failed");
-            return 1;
+        if (posix_memalign(&buffers[i], 4096, SECTOR_4K) != 0) {
+            perror("Memalign Failed");
+            return;
         }
     }
 
-    // Generate random offsets
-    off_t *offsets = malloc(NUM_READS * sizeof(off_t));
-    srand(time(NULL));
-    for (int i = 0; i < NUM_READS; i++) {
-        offsets[i] = (rand() % total_blocks) * CHUNK_SIZE;
-    }
+    double cpu_start = get_cpu_time_sec();
+    double t_start = get_time_sec();
 
-    printf("--- Running C Native io_uring Benchmark ---\n");
-    printf("Requests: %d | Queue Depth: %d\n", NUM_READS, QUEUE_DEPTH);
+    size_t offset_idx = 0, completed = 0, in_flight = 0;
+    double total_prep_time = 0.0;
+    double total_wait_time = 0.0;
 
-    struct timespec t_start, t_end;
-    clock_gettime(CLOCK_MONOTONIC, &t_start);
-
-    int offset_idx = 0, completed = 0, in_flight = 0;
-
-    while (completed < NUM_READS) {
-        while (in_flight < QUEUE_DEPTH && offset_idx < NUM_READS) {
+    while (completed < num_reads) {
+        double prep_t0 = get_time_sec();
+        
+        // Fill SQEs up to QUEUE_DEPTH
+        while (in_flight < QUEUE_DEPTH && offset_idx < num_reads) {
             struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
             if (!sqe) break;
 
             int buf_idx = offset_idx % QUEUE_DEPTH;
-            io_uring_prep_read(sqe, fd, buffers[buf_idx], CHUNK_SIZE, offsets[offset_idx]);
-
+            io_uring_prep_read(sqe, fd, buffers[buf_idx], SECTOR_4K, offsets[offset_idx]);
+            
             offset_idx++;
             in_flight++;
         }
 
+        double prep_t1 = get_time_sec();
+        total_prep_time += (prep_t1 - prep_t0);
+
+        // Submit to NVMe & Wait for completions
+        double wait_t0 = get_time_sec();
         io_uring_submit(&ring);
 
         struct io_uring_cqe *cqe;
         int ret = io_uring_wait_cqe(&ring, &cqe);
         if (ret < 0) break;
 
-        // Harvest all available completions
         unsigned head;
         unsigned count = 0;
         io_uring_for_each_cqe(&ring, head, cqe) {
@@ -73,17 +174,121 @@ int main() {
 
         completed += count;
         in_flight -= count;
+
+        double wait_t1 = get_time_sec();
+        total_wait_time += (wait_t1 - wait_t0);
     }
 
-    clock_gettime(CLOCK_MONOTONIC, &t_end);
-    double elapsed = (t_end.tv_sec - t_start.tv_sec) + (t_end.tv_nsec - t_start.tv_nsec) / 1e9;
+    double t_end = get_time_sec();
+    double cpu_end = get_cpu_time_sec();
 
-    double mb = ((double)NUM_READS * CHUNK_SIZE) / (1024.0 * 1024.0);
-    printf("\nDone in %.4f seconds\n", elapsed);
-    printf("Throughput  : %.2f MB/s\n", mb / elapsed);
-    printf("Random IOPS : %.2f IOPS\n", NUM_READS / elapsed);
+    print_stats("TEST 2: Random 4KB Reads (10% of File Size)", 
+                completed * SECTOR_4K, num_reads, t_end - t_start, 
+                total_prep_time, total_wait_time, cpu_end - cpu_start);
 
+    for (int i = 0; i < QUEUE_DEPTH; i++) free(buffers[i]);
+    free(offsets);
     io_uring_queue_exit(&ring);
     close(fd);
+}
+
+
+// =====================================================================
+// TEST 3: FULL FILE SEQUENTIAL 4 KB READS (via io_uring)
+// =====================================================================
+void run_test3_seq_4k(const char *filename) {
+    int fd = open(filename, O_RDONLY | O_DIRECT);
+    if (fd < 0) { perror("Test 3 Open Failed"); return; }
+
+    off_t file_size = lseek(fd, 0, SEEK_END);
+    size_t num_reads = file_size / SECTOR_4K;
+
+    struct io_uring ring;
+    io_uring_queue_init(QUEUE_DEPTH, &ring, 0);
+
+    void *buffers[QUEUE_DEPTH];
+    for (int i = 0; i < QUEUE_DEPTH; i++) {
+        if (posix_memalign(&buffers[i], 4096, SECTOR_4K) != 0) {
+            perror("Memalign Failed");
+            return;
+        }
+    }
+
+    double cpu_start = get_cpu_time_sec();
+    double t_start = get_time_sec();
+
+    size_t completed = 0, in_flight = 0, current_idx = 0;
+    off_t current_offset = 0;
+
+    double total_prep_time = 0.0;
+    double total_wait_time = 0.0;
+
+    while (completed < num_reads) {
+        double prep_t0 = get_time_sec();
+
+        while (in_flight < QUEUE_DEPTH && current_idx < num_reads) {
+            struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
+            if (!sqe) break;
+
+            int buf_idx = current_idx % QUEUE_DEPTH;
+            io_uring_prep_read(sqe, fd, buffers[buf_idx], SECTOR_4K, current_offset);
+            
+            current_offset += SECTOR_4K;
+            current_idx++;
+            in_flight++;
+        }
+
+        double prep_t1 = get_time_sec();
+        total_prep_time += (prep_t1 - prep_t0);
+
+        double wait_t0 = get_time_sec();
+        io_uring_submit(&ring);
+
+        struct io_uring_cqe *cqe;
+        int ret = io_uring_wait_cqe(&ring, &cqe);
+        if (ret < 0) break;
+
+        unsigned head;
+        unsigned count = 0;
+        io_uring_for_each_cqe(&ring, head, cqe) {
+            count++;
+        }
+        io_uring_cq_advance(&ring, count);
+
+        completed += count;
+        in_flight -= count;
+
+        double wait_t1 = get_time_sec();
+        total_wait_time += (wait_t1 - wait_t0);
+    }
+
+    double t_end = get_time_sec();
+    double cpu_end = get_cpu_time_sec();
+
+    print_stats("TEST 3: Full File Sequential 4KB Reads", 
+                completed * SECTOR_4K, num_reads, t_end - t_start, 
+                total_prep_time, total_wait_time, cpu_end - cpu_start);
+
+    for (int i = 0; i < QUEUE_DEPTH; i++) free(buffers[i]);
+    io_uring_queue_exit(&ring);
+    close(fd);
+}
+
+
+// =====================================================================
+// MAIN ENTRY
+// =====================================================================
+int main(int argc, char *argv[]) {
+    const char *filename = "/mnt/nvme/feat_l0_p9.pt";
+    if (argc > 1) {
+        filename = argv[1];
+    }
+
+    printf("\nStarting Benchmark Suite on: %s\n\n", filename);
+
+    run_test1_full_64m(filename);
+    run_test2_random_4k(filename);
+    run_test3_seq_4k(filename);
+
     return 0;
 }
