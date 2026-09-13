@@ -5,7 +5,7 @@ import random
 import pyuring
 
 ALIGNMENT = 4096
-ENTRIES = 256         # Queue Depth (Ring Size)
+ENTRIES = 256         # Queue Depth
 CHUNK_SIZE = 4096     # 4 KB
 FILENAME = "/mnt/nvme/feat_l0_p9.pt"
 
@@ -36,11 +36,11 @@ def run_io_uring_benchmark():
         # Allocate buffer pool for in-flight requests
         buffer_ptrs = [allocate_aligned_buffer(CHUNK_SIZE) for _ in range(ENTRIES)]
 
-        # 1. Correct struct instantiation for pyuring
-        ring = pyuring.io_uring()
-        cqes = pyuring.io_cqes()
+        # 1. Correct class initialization in pyuring
+        ring = pyuring.queue()
+        ring.ring_init(ENTRIES, 0)
 
-        pyuring.io_uring_queue_init(ENTRIES, ring, 0)
+        cqes = pyuring.cqes()
 
         offset_idx = 0
         completed = 0
@@ -49,9 +49,9 @@ def run_io_uring_benchmark():
         t0 = time.perf_counter()
 
         while completed < NUM_READS:
-            # Fill Submission Queue (SQ) up to capacity
+            # Fill Submission Queue (SQ)
             while in_flight < ENTRIES and offset_idx < NUM_READS:
-                sqe = pyuring.io_uring_get_sqe(ring)
+                sqe = ring.get_sqe()
                 if not sqe:
                     break
 
@@ -59,23 +59,23 @@ def run_io_uring_benchmark():
                 buf_ptr = buffer_ptrs[buf_idx]
                 offset = scattered_offsets[offset_idx]
 
-                # Prepare standard read operation
+                # Prepare read operation
                 pyuring.io_uring_prep_read(sqe, fd, buf_ptr, CHUNK_SIZE, offset)
                 
                 offset_idx += 1
                 in_flight += 1
 
-            # Submit requests in a single batch
-            pyuring.io_uring_submit(ring)
+            # Submit batch to NVMe controller
+            ring.submit()
 
-            # Wait for at least 1 completion in the Completion Queue (CQ)
-            pyuring.io_uring_wait_cqe(ring, cqes)
+            # Wait for at least 1 completion
+            ring.wait_cqe(cqes)
 
-            # Harvest completed requests
+            # Process completed requests
             for cqe in cqes:
                 completed += 1
                 in_flight -= 1
-                pyuring.io_uring_cqe_seen(ring, cqe)
+                ring.cqe_seen(cqe)
 
         t1 = time.perf_counter()
 
@@ -89,7 +89,7 @@ def run_io_uring_benchmark():
         print(f"  Throughput  : {throughput_mb:.2f} MB/s")
         print(f"  Random IOPS : {iops:,.2f} IOPS")
 
-        pyuring.io_uring_queue_exit(ring)
+        ring.queue_exit()
 
     finally:
         os.close(fd)
