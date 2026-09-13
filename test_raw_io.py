@@ -1,29 +1,4 @@
 import os
-
-files = [
-    "/mnt/nvme/file1.pt",
-    "/mnt/nvme/file2.pt",
-    "/mnt/nvme/file3.pt"
-]
-
-DEFAULT_FILE_SIZE = 3 * 1024 * 1024 * 1024  # 3 GB
-
-def ensure_file_exists(filepath, size_bytes=DEFAULT_FILE_SIZE):
-    if not os.path.exists(filepath):
-        print(f"Creating missing test file: {filepath} ({size_bytes / (1024**3):.2f} GB)...")
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        fd = os.open(filepath, os.O_CREAT | os.O_WRONLY, 0o666)
-        try:
-            os.posix_fallocate(fd, 0, size_bytes)
-        finally:
-            os.close(fd)
-
-# Ensure all 3 files exist before running benchmarks
-for f in files:
-    ensure_file_exists(f)
-
-
-import os
 import ctypes
 import time
 import random
@@ -39,6 +14,7 @@ BLOCK_DEVICE = "/dev/nvme0n1"  # Target raw block device
 SECTOR_SIZE = 512              # Logical sector size (512 or 4096 bytes)
 ALIGNMENT = 4096               # Buffer alignment requirement for O_DIRECT
 NUM_WORKERS = 128              # Queue Depth / Thread count
+TARGET_BYTES_5GB = 5 * 1024 * 1024 * 1024  # 5 GiB per test
 
 # Linux ioctl to get block device size in bytes
 BLKGETSIZE64 = 0x80081272
@@ -72,17 +48,17 @@ def get_device_capacity_lbas(fd, sector_size):
 
 
 # =====================================================================
-# 1. FULL SEQUENTIAL READ (64 MB Chunks via LBAs)
+# 1. SEQUENTIAL READ - 5 GB (64 MB Chunks via LBAs)
 # =====================================================================
-print("--- Test 1: Full Device Sequential Read (64 MB Chunks) ---")
+print("--- Test 1: Sequential 5 GB Read (64 MB Chunks) ---")
 CHUNK_SIZE_BYTES = 64 * 1024 * 1024  # 64 MB
-LBAS_PER_CHUNK = CHUNK_SIZE_BYTES // SECTOR_SIZE
 
 fd = os.open(BLOCK_DEVICE, flags)
 
 try:
     total_bytes, total_lbas = get_device_capacity_lbas(fd, SECTOR_SIZE)
-    print(f"Target Device Capacity: {total_bytes / (1024**3):.2f} GB ({total_lbas:,} LBAs)")
+    test_limit_bytes = min(total_bytes, TARGET_BYTES_5GB)
+    print(f"Target Read Capacity: {test_limit_bytes / (1024**3):.2f} GB")
 
     buf_ptr = ctypes.c_void_p()
     if libc.posix_memalign(ctypes.byref(buf_ptr), ALIGNMENT, CHUNK_SIZE_BYTES) != 0:
@@ -95,11 +71,9 @@ try:
 
     t0 = time.perf_counter_ns()
 
-    while current_lba < total_lbas:
+    while total_bytes_read < test_limit_bytes and current_lba < total_lbas:
         byte_offset = current_lba * SECTOR_SIZE
-        
-        # Calculate bytes remaining to prevent reading past device end
-        bytes_to_read = min(CHUNK_SIZE_BYTES, total_bytes - byte_offset)
+        bytes_to_read = min(CHUNK_SIZE_BYTES, test_limit_bytes - total_bytes_read)
         
         bytes_read = os.preadv(fd, [memview[:bytes_to_read]], byte_offset)
         if bytes_read == 0:
@@ -114,7 +88,7 @@ try:
     elapsed_sec = (tn - t0) / 1e9
     throughput_mb = (total_bytes_read / (1024 * 1024)) / elapsed_sec if elapsed_sec > 0 else 0
 
-    print(f"Finished reading {total_bytes_read:,} / {total_bytes:,} bytes.")
+    print(f"Finished reading {total_bytes_read / (1024**3):.2f} GB ({total_bytes_read:,} bytes).")
     print(f"Time Taken  : {elapsed_sec:.6f} seconds")
     print(f"Throughput  : {throughput_mb:.2f} MB/s\n")
 
@@ -123,9 +97,9 @@ finally:
 
 
 # =====================================================================
-# 2. SEQUENTIAL 4 KB READS (Parallel by LBA Range)
+# 2. SEQUENTIAL READ - 5 GB (Parallel 4 KB Chunks by LBA Range)
 # =====================================================================
-print(f"--- Test 2: Sequential 4 KB Reads ({NUM_WORKERS} Threads / QD={NUM_WORKERS}) ---")
+print(f"--- Test 2: Sequential 5 GB Read in 4 KB Chunks ({NUM_WORKERS} Threads / QD={NUM_WORKERS}) ---")
 CHUNK_SIZE_BYTES = 4096
 LBAS_PER_CHUNK = CHUNK_SIZE_BYTES // SECTOR_SIZE
 
@@ -133,10 +107,8 @@ fd = os.open(BLOCK_DEVICE, flags)
 
 try:
     total_bytes, total_lbas = get_device_capacity_lbas(fd, SECTOR_SIZE)
-    
-    # Generate sequential LBA targets (reading up to 10 GB to limit test duration)
-    MAX_TEST_BYTES = 10 * 1024 * 1024 * 1024
-    max_lbas = min(total_lbas, MAX_TEST_BYTES // SECTOR_SIZE)
+    test_limit_bytes = min(total_bytes, TARGET_BYTES_5GB)
+    max_lbas = test_limit_bytes // SECTOR_SIZE
     
     sequential_lbas = list(range(0, max_lbas, LBAS_PER_CHUNK))
 
@@ -157,7 +129,7 @@ try:
     throughput_mb = (total_bytes_read / (1024 * 1024)) / elapsed_sec if elapsed_sec > 0 else 0
     iops = len(sequential_lbas) / elapsed_sec if elapsed_sec > 0 else 0
 
-    print(f"Finished reading {total_bytes_read / (1024**2):.2f} MB in 4KB chunks across {len(sequential_lbas):,} LBAs.")
+    print(f"Finished reading {total_bytes_read / (1024**3):.2f} GB in 4KB chunks across {len(sequential_lbas):,} LBAs.")
     print(f"Time Taken  : {elapsed_sec:.6f} seconds")
     print(f"Throughput  : {throughput_mb:.2f} MB/s")
     print(f"Read IOPS   : {iops:.2f} IOPS\n")
@@ -167,12 +139,12 @@ finally:
 
 
 # =====================================================================
-# 3. SCATTERED RANDOM PARTIAL READS (Parallel Across Entire LBA Range)
+# 3. SCATTERED RANDOM READ - 5 GB (Parallel Across Entire LBA Range)
 # =====================================================================
-print(f"--- Test 3: Scattered 4 KB Reads ({NUM_WORKERS} Threads / QD={NUM_WORKERS}) ---")
-NUM_READS = 50000
+print(f"--- Test 3: Scattered Random 5 GB Read in 4 KB Chunks ({NUM_WORKERS} Threads / QD={NUM_WORKERS}) ---")
 CHUNK_SIZE_BYTES = 4096
 LBAS_PER_CHUNK = CHUNK_SIZE_BYTES // SECTOR_SIZE
+NUM_READS = TARGET_BYTES_5GB // CHUNK_SIZE_BYTES  # Exactly 1,310,720 reads to equal 5 GB
 
 fd = os.open(BLOCK_DEVICE, flags)
 
@@ -200,7 +172,7 @@ try:
     throughput_mb = (total_bytes_read / (1024 * 1024)) / elapsed_sec if elapsed_sec > 0 else 0
     iops = len(scattered_lbas) / elapsed_sec if elapsed_sec > 0 else 0
 
-    print(f"Completed   : {len(scattered_lbas):,} scattered reads ({total_bytes_read / (1024**2):.2f} MB total data)")
+    print(f"Completed   : {len(scattered_lbas):,} scattered reads ({total_bytes_read / (1024**3):.2f} GB total data)")
     print(f"Time Taken  : {elapsed_sec:.4f} seconds")
     print(f"Throughput  : {throughput_mb:.2f} MB/s")
     print(f"Random IOPS : {iops:.2f} IOPS\n")
@@ -210,9 +182,9 @@ finally:
 
 
 # =====================================================================
-# 4. OVERHEAD MEASUREMENT EXPERIMENT (64 MB vs 4 KB on LBAs)
+# 4. OVERHEAD MEASUREMENT EXPERIMENT - 5 GB Each (64 MB vs 4 KB)
 # =====================================================================
-print(f"--- Test 4: LBA Overhead Measurement ---")
+print(f"--- Test 4: LBA Overhead Measurement (5 GB per test) ---")
 
 def run_lba_overhead_test(device_path, chunk_size_bytes, num_workers, test_name):
     fd = os.open(device_path, flags)
@@ -220,9 +192,8 @@ def run_lba_overhead_test(device_path, chunk_size_bytes, num_workers, test_name)
         total_bytes, total_lbas = get_device_capacity_lbas(fd, SECTOR_SIZE)
         lbas_per_chunk = chunk_size_bytes // SECTOR_SIZE
         
-        # Test max 5 GB per overhead run
-        max_bytes = min(total_bytes, 5 * 1024 * 1024 * 1024)
-        max_lbas = max_bytes // SECTOR_SIZE
+        test_limit_bytes = min(total_bytes, TARGET_BYTES_5GB)
+        max_lbas = test_limit_bytes // SECTOR_SIZE
 
         # 1. SETUP PHASE
         t_setup_start = time.perf_counter()
@@ -267,7 +238,7 @@ def run_lba_overhead_test(device_path, chunk_size_bytes, num_workers, test_name)
 
         print(f"\n[{test_name}]")
         print(f"  Total Requests Executed    : {num_requests:,}")
-        print(f"  Total Data Read            : {total_bytes_read / (1024**2):.2f} MB")
+        print(f"  Total Data Read            : {total_bytes_read / (1024**3):.2f} GB")
         print(f"  Wall Clock Execution Time  : {wall_time:.4f} seconds")
         print(f"  Setup / Scheduling Time     : {setup_time * 1000:.2f} ms")
         print(f"  ------------------------------------------------")
@@ -283,5 +254,5 @@ def run_lba_overhead_test(device_path, chunk_size_bytes, num_workers, test_name)
         os.close(fd)
 
 
-run_lba_overhead_test(BLOCK_DEVICE, 64 * 1024 * 1024, 1, "64 MB Chunks (Single Thread)")
-run_lba_overhead_test(BLOCK_DEVICE, 4096, NUM_WORKERS, "4 KB Chunks (128 Threads)")
+run_lba_overhead_test(BLOCK_DEVICE, 64 * 1024 * 1024, 1, "64 MB Chunks (Single Thread - 5 GB Total)")
+run_lba_overhead_test(BLOCK_DEVICE, 4096, NUM_WORKERS, "4 KB Chunks (128 Threads - 5 GB Total)")
