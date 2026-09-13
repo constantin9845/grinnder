@@ -339,16 +339,18 @@ void run_test3_seq_4k(const char *filename) {
 // MAIN ENTRY
 // =====================================================================
 int main(int argc, char *argv[]) {
-    const char *filename = "/mnt/nvme/feat_l0_p9.pt";
+    const char *filename1 = "/mnt/nvme/feat_l0_p6.pt";
+    const char *filename2 = "/mnt/nvme/feat_l0_p7.pt";
+    const char *filename3 = "/mnt/nvme/feat_l0_p8.pt";
     if (argc > 1) {
-        filename = argv[1];
+        filename1 = argv[1];
     }
 
-    printf("\nStarting Fixed Benchmark Suite on: %s\n\n", filename);
+    printf("\nStarting Fixed Benchmark Suite: %s\n\n");
 
-    //run_test1_full_2m_uring(filename);
-    //run_test2_random_4k(filename);
-    run_test3_seq_4k(filename);
+    run_test1_full_2m_uring(filename1);
+    run_test2_random_4k(filename2);
+    run_test3_seq_4k(filename3);
 
     return 0;
 }
