@@ -2,11 +2,11 @@ import os
 import time
 import ctypes
 import random
-import pyuring
+import libaio
 
 ALIGNMENT = 4096
-ENTRIES = 256         # Queue Depth
-CHUNK_SIZE = 4096     # 4 KB
+ENTRIES = 256
+CHUNK_SIZE = 4096
 FILENAME = "/mnt/nvme/feat_l0_p9.pt"
 
 def allocate_aligned_buffer(size):
@@ -16,8 +16,7 @@ def allocate_aligned_buffer(size):
         raise OSError("posix_memalign failed")
     return buf_ptr
 
-
-def run_io_uring_benchmark():
+def run_libaio_benchmark():
     flags = os.O_RDONLY | os.O_DIRECT
     fd = os.open(FILENAME, flags)
 
@@ -28,19 +27,15 @@ def run_io_uring_benchmark():
         NUM_READS = min(100000, total_blocks)
         scattered_offsets = [random.randrange(0, total_blocks) * CHUNK_SIZE for _ in range(NUM_READS)]
 
-        print(f"--- Running io_uring Async Benchmark ---")
+        print(f"--- Running Async Kernel AIO Benchmark ---")
         print(f"File Size         : {file_size / (1024**3):.2f} GB")
         print(f"Total Requests    : {NUM_READS:,} 4KB reads")
         print(f"Target Queue Depth: {ENTRIES}")
 
-        # Allocate buffer pool for in-flight requests
-        buffer_ptrs = [allocate_aligned_buffer(CHUNK_SIZE) for _ in range(ENTRIES)]
-
-        # 1. Correct class initialization in pyuring
-        ring = pyuring.queue()
-        ring.ring_init(ENTRIES, 0)
-
-        cqes = pyuring.cqes()
+        # Allocate memory buffers for in-flight requests
+        buffers = [allocate_aligned_buffer(CHUNK_SIZE) for _ in range(ENTRIES)]
+        
+        ctx = libaio.AIOContext(ENTRIES)
 
         offset_idx = 0
         completed = 0
@@ -49,33 +44,35 @@ def run_io_uring_benchmark():
         t0 = time.perf_counter()
 
         while completed < NUM_READS:
-            # Fill Submission Queue (SQ)
+            # 1. Fill queue with requests
+            iocbs = []
             while in_flight < ENTRIES and offset_idx < NUM_READS:
-                sqe = ring.get_sqe()
-                if not sqe:
-                    break
-
                 buf_idx = offset_idx % ENTRIES
-                buf_ptr = buffer_ptrs[buf_idx]
+                buf_ptr = buffers[buf_idx]
                 offset = scattered_offsets[offset_idx]
 
-                # Prepare read operation
-                pyuring.io_uring_prep_read(sqe, fd, buf_ptr, CHUNK_SIZE, offset)
-                
+                # Create asynchronous read control block
+                block = ctypes.create_string_buffer(CHUNK_SIZE)
+                iocb = libaio.AIOBlock(
+                    mode=libaio.AIOCMD_PREAD,
+                    fd=fd,
+                    buf=buf_ptr.value,
+                    count=CHUNK_SIZE,
+                    offset=offset
+                )
+                iocbs.append(iocb)
                 offset_idx += 1
                 in_flight += 1
 
-            # Submit batch to NVMe controller
-            ring.submit()
+            # 2. Submit batch directly to kernel driver
+            if iocbs:
+                ctx.submit(iocbs)
 
-            # Wait for at least 1 completion
-            ring.wait_cqe(cqes)
-
-            # Process completed requests
-            for cqe in cqes:
-                completed += 1
-                in_flight -= 1
-                ring.cqe_seen(cqe)
+            # 3. Harvest completions
+            events = ctx.getevents(min_nr=1, nr=ENTRIES)
+            num_events = len(events)
+            completed += num_events
+            in_flight -= num_events
 
         t1 = time.perf_counter()
 
@@ -89,11 +86,8 @@ def run_io_uring_benchmark():
         print(f"  Throughput  : {throughput_mb:.2f} MB/s")
         print(f"  Random IOPS : {iops:,.2f} IOPS")
 
-        ring.queue_exit()
-
     finally:
         os.close(fd)
 
-
 if __name__ == "__main__":
-    run_io_uring_benchmark()
+    run_libaio_benchmark()
