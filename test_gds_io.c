@@ -217,26 +217,26 @@ void run_test3_gds_seq_4k(const char *filename) {
     CUFILE_CHECK(cuFileHandleRegister(&cf_handle, &cf_descr));
 
     // Allocate GPU buffer EXACTLY matching the maximum batch slice size
-    size_t batch_buf_size = (size_t)g_max_batch_size * SECTOR_4K;
+    size_t batch_buf_size = (size_t)MAX_BATCH_SIZE * SECTOR_4K;
     void *d_buffer = NULL;
     CUDA_CHECK(cudaMalloc(&d_buffer, batch_buf_size));
     CUFILE_CHECK(cuFileBufRegister(d_buffer, batch_buf_size, 0));
 
     CUfileBatchHandle_t batch_handle;
-    CUFILE_CHECK(cuFileBatchIOSetUp(&batch_handle, g_max_batch_size));
+    CUFILE_CHECK(cuFileBatchIOSetUp(&batch_handle, MAX_BATCH_SIZE));
 
     // Host memory structures are allocated ONLY for active batch size
-    CUfileIOParams_t *io_params = calloc(g_max_batch_size, sizeof(CUfileIOParams_t));
-    CUfileIOEvents_t *events    = calloc(g_max_batch_size, sizeof(CUfileIOEvents_t));
+    CUfileIOParams_t *io_params = calloc(MAX_BATCH_SIZE, sizeof(CUfileIOParams_t));
+    CUfileIOEvents_t *events    = calloc(MAX_BATCH_SIZE, sizeof(CUfileIOEvents_t));
 
     double cpu_start = get_cpu_time_sec();
     double t_start = get_time_sec();
 
     size_t total_completed = 0;
 
-    for (size_t offset_idx = 0; offset_idx < num_reads; offset_idx += g_max_batch_size) {
-        unsigned int current_batch_size = (num_reads - offset_idx > g_max_batch_size) 
-                                          ? g_max_batch_size 
+    for (size_t offset_idx = 0; offset_idx < num_reads; offset_idx += MAX_BATCH_SIZE) {
+        unsigned int current_batch_size = (num_reads - offset_idx > MAX_BATCH_SIZE) 
+                                          ? MAX_BATCH_SIZE 
                                           : (unsigned int)(num_reads - offset_idx);
 
         // Map requests into the reusing GPU batch buffer
