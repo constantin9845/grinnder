@@ -57,6 +57,7 @@ void h2d_copy_async(torch::Tensor src, torch::Tensor dst) {
   });
 }
 
+
 void gather_partitions(int pid, std::vector<torch::Tensor> srcs,
                        torch::Tensor dst,
                        std::vector<torch::Tensor> boundaries) {
@@ -119,6 +120,56 @@ void gather_partitions(int pid, std::vector<torch::Tensor> srcs,
   });
 }
 
+
+
+#include <fcntl.h>
+#include <unistd.h>
+#include <vector>
+#include <string>
+#include <unordered_map>
+#include <cstring>
+
+// Global storage to keep track of active CUfile handles by file descriptor
+static std::unordered_map<int, CUfileHandle_t> g_cufile_handles;
+
+// Opens files with O_DIRECT and registers them with GDS cuFile
+std::vector<int> open_files(const std::vector<std::string>& file_paths) {
+  std::vector<int> fds;
+  fds.reserve(file_paths.size());
+
+  for (const auto& path : file_paths) {
+    int fd = open(path.c_str(), O_RDONLY | O_DIRECT);
+    AT_ASSERTM(fd >= 0, "Failed to open file with O_DIRECT: " + path);
+
+    CUfileDescr_t desc;
+    memset(&desc, 0, sizeof(CUfileDescr_t));
+    desc.handle.fd = fd;
+    desc.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
+
+    CUfileHandle_t handle;
+    CUfileError_t status = cuFileHandleRegister(&handle, &desc);
+    AT_ASSERTM(status.err == CU_FILE_SUCCESS, 
+               "cuFileHandleRegister failed for file: " + path);
+
+    // Track the handle globally so gather operations can reuse it
+    g_cufile_handles[fd] = handle;
+    fds.push_back(fd);
+  }
+
+  return fds;
+}
+
+// Deregisters GDS handles and closes open file descriptors
+void close_files(const std::vector<int>& fds) {
+  for (int fd : fds) {
+    auto it = g_cufile_handles.find(fd);
+    if (it != g_cufile_handles.end()) {
+      cuFileHandleDeregister(it->second);
+      g_cufile_handles.erase(it);
+    }
+    close(fd);
+  }
+}
 
 
 #include <torch/extension.h>
@@ -289,55 +340,4 @@ void scatter_partitions(int pid, torch::Tensor src,
                   "Scatter: copied size mismatch with source");
     });
   });
-}
-
-
-
-#include <fcntl.h>
-#include <unistd.h>
-#include <vector>
-#include <string>
-#include <unordered_map>
-#include <cstring>
-
-// Global storage to keep track of active CUfile handles by file descriptor
-static std::unordered_map<int, CUfileHandle_t> g_cufile_handles;
-
-// Opens files with O_DIRECT and registers them with GDS cuFile
-std::vector<int> open_files(const std::vector<std::string>& file_paths) {
-  std::vector<int> fds;
-  fds.reserve(file_paths.size());
-
-  for (const auto& path : file_paths) {
-    int fd = open(path.c_str(), O_RDONLY | O_DIRECT);
-    AT_ASSERTM(fd >= 0, "Failed to open file with O_DIRECT: " + path);
-
-    CUfileDescr_t desc;
-    memset(&desc, 0, sizeof(CUfileDescr_t));
-    desc.handle.fd = fd;
-    desc.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
-
-    CUfileHandle_t handle;
-    CUfileError_t status = cuFileHandleRegister(&handle, &desc);
-    AT_ASSERTM(status.err == CU_FILE_SUCCESS, 
-               "cuFileHandleRegister failed for file: " + path);
-
-    // Track the handle globally so gather operations can reuse it
-    g_cufile_handles[fd] = handle;
-    fds.push_back(fd);
-  }
-
-  return fds;
-}
-
-// Deregisters GDS handles and closes open file descriptors
-void close_files(const std::vector<int>& fds) {
-  for (int fd : fds) {
-    auto it = g_cufile_handles.find(fd);
-    if (it != g_cufile_handles.end()) {
-      cuFileHandleDeregister(it->second);
-      g_cufile_handles.erase(it);
-    }
-    close(fd);
-  }
 }
