@@ -116,6 +116,7 @@ class DeviceBuffer:
     def async_gather_direct(
             self,
             phase,
+            fds,
             pid: int,
             host_buffer: HostBuffer,
             boundaries: List[Optional[Tensor]],
@@ -126,7 +127,7 @@ class DeviceBuffer:
             Combines allocate() + host_buffer.async_gather() for convenience.
             """
             self.allocate(pid)
-            host_buffer.async_gather_direct(phase, pid, self._tensors[pid], boundaries, stream)
+            host_buffer.async_gather_direct(phase, fds, pid, self._tensors[pid], boundaries, stream)
 
     def h2d_synchronize(self, stream: torch.cuda.Stream) -> None:
         """Wait for H2D operations to complete.
