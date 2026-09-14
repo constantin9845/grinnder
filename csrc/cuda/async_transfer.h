@@ -21,7 +21,7 @@ void gather_partitions_direct(
     std::vector<torch::Tensor> boundaries);
 
 void gather_activations_direct(
-    const std::vector<int>& fds,
+    const std::string& filepath,
     torch::Tensor dst);
 
 // Scatter: one GPU tensor -> multiple host partitions with accumulation

@@ -788,9 +788,9 @@ class HostBuffer:
 
     def storage_to_gpu(self,
     phase,
-    fds,
+    pid,
     gpu_target: Tensor,
-    stream: torch.cuda.Stream,) -> None:
+    stream: torch.cuda.Stream) -> None:
         assert self._backend is not None
         assert gpu_target.is_cuda
         stream.wait_stream(torch.cuda.current_stream(gpu_target.device))
@@ -798,7 +798,8 @@ class HostBuffer:
         t0 = time.perf_counter_ns()
         with torch.cuda.stream(stream):
             if self._ops is not None:
-                self._ops.gather_activations_direct(fds, gpu_target)
+                fd = f"/mnt/nvme/feat_l3_p{pid}.pt"
+                self._ops.gather_activations_direct(fd, gpu_target)
             else:
                 print("OPS not defined at storage to gpu")
                 exit(1)
