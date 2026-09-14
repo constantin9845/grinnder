@@ -204,7 +204,10 @@ void run_test3_gds_seq_4k(const char *filename) {
     if (fd < 0) { perror("Test 3 Open Failed"); return; }
 
     off_t file_size = lseek(fd, 0, SEEK_END);
+    if (file_size <= 0) { close(fd); return; }
+
     size_t num_reads = file_size / SECTOR_4K;
+    if (num_reads == 0) num_reads = 1;
 
     CUfileHandle_t cf_handle;
     CUfileDescr_t cf_descr;
@@ -213,39 +216,42 @@ void run_test3_gds_seq_4k(const char *filename) {
     cf_descr.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
     CUFILE_CHECK(cuFileHandleRegister(&cf_handle, &cf_descr));
 
-    size_t gpu_buf_size = num_reads * SECTOR_4K;
+    // Allocate GPU buffer EXACTLY matching the maximum batch slice size
+    size_t batch_buf_size = (size_t)g_max_batch_size * SECTOR_4K;
     void *d_buffer = NULL;
-    CUDA_CHECK(cudaMalloc(&d_buffer, gpu_buf_size));
-    CUFILE_CHECK(cuFileBufRegister(d_buffer, gpu_buf_size, 0));
+    CUDA_CHECK(cudaMalloc(&d_buffer, batch_buf_size));
+    CUFILE_CHECK(cuFileBufRegister(d_buffer, batch_buf_size, 0));
 
-    CUfileIOParams_t *io_params = calloc(num_reads, sizeof(CUfileIOParams_t));
-    for (size_t i = 0; i < num_reads; i++) {
-        io_params[i].mode = CUFILE_BATCH;
-        io_params[i].opcode = CUFILE_READ;
-        io_params[i].fh = cf_handle;
-        io_params[i].u.batch.devPtr_base = d_buffer;
-        io_params[i].u.batch.devPtr_offset = i * SECTOR_4K;
-        io_params[i].u.batch.file_offset = i * SECTOR_4K;
-        io_params[i].u.batch.size = SECTOR_4K;
-    }
-
-    // Allocate temporary workspace for max batch size (4096)
     CUfileBatchHandle_t batch_handle;
-    CUFILE_CHECK(cuFileBatchIOSetUp(&batch_handle, MAX_BATCH_SIZE));
-    CUfileIOEvents_t events[MAX_BATCH_SIZE];
+    CUFILE_CHECK(cuFileBatchIOSetUp(&batch_handle, g_max_batch_size));
+
+    // Host memory structures are allocated ONLY for active batch size
+    CUfileIOParams_t *io_params = calloc(g_max_batch_size, sizeof(CUfileIOParams_t));
+    CUfileIOEvents_t *events    = calloc(g_max_batch_size, sizeof(CUfileIOEvents_t));
 
     double cpu_start = get_cpu_time_sec();
     double t_start = get_time_sec();
 
     size_t total_completed = 0;
 
-    // Process in chunks of MAX_BATCH_SIZE (4096)
-    for (size_t offset_idx = 0; offset_idx < num_reads; offset_idx += MAX_BATCH_SIZE) {
-        unsigned int current_batch_size = (num_reads - offset_idx > MAX_BATCH_SIZE) 
-                                          ? MAX_BATCH_SIZE 
+    for (size_t offset_idx = 0; offset_idx < num_reads; offset_idx += g_max_batch_size) {
+        unsigned int current_batch_size = (num_reads - offset_idx > g_max_batch_size) 
+                                          ? g_max_batch_size 
                                           : (unsigned int)(num_reads - offset_idx);
 
-        CUFILE_CHECK(cuFileBatchIOSubmit(batch_handle, current_batch_size, &io_params[offset_idx], 0));
+        // Map requests into the reusing GPU batch buffer
+        for (unsigned int i = 0; i < current_batch_size; i++) {
+            size_t global_idx = offset_idx + i;
+            io_params[i].mode = CUFILE_BATCH;
+            io_params[i].opcode = CUFILE_READ;
+            io_params[i].fh = cf_handle;
+            io_params[i].u.batch.devPtr_base = d_buffer;
+            io_params[i].u.batch.devPtr_offset = i * SECTOR_4K;
+            io_params[i].u.batch.file_offset = global_idx * SECTOR_4K;
+            io_params[i].u.batch.size = SECTOR_4K;
+        }
+
+        CUFILE_CHECK(cuFileBatchIOSubmit(batch_handle, current_batch_size, io_params, 0));
 
         unsigned int completed = current_batch_size;
         CUFILE_CHECK(cuFileBatchIOGetStatus(batch_handle, current_batch_size, &completed, events, NULL));
@@ -259,6 +265,7 @@ void run_test3_gds_seq_4k(const char *filename) {
                 total_completed * SECTOR_4K, num_reads, t_end - t_start, cpu_end - cpu_start);
 
     cuFileBatchIODestroy(batch_handle);
+    free(events);
     free(io_params);
     CUFILE_CHECK(cuFileBufDeregister(d_buffer));
     CUDA_CHECK(cudaFree(d_buffer));
