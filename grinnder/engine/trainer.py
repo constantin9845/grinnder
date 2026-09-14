@@ -361,11 +361,11 @@ class Trainer:
             self._progress(f"FORWARD LAYER {layer_id + 1}/{self.model.num_layers} START")
             self.cache.cache_tracker_print()
 
-            self.fds = self.device_features[layer_id].open_files(self.graph.num_parts)
+            self.fds = self.host_features[layer_id].open_files(self.graph.num_parts)
 
             self._forward_layer(layer_id)
 
-            self.device_features[layer_id].close_files(self.fds)
+            self.host_features[layer_id].close_files(self.fds)
             self.fds = None
 
             
@@ -389,11 +389,11 @@ class Trainer:
         self.cache.cache_tracker_print()
         stat.start_backward()
 
-        self.fds = self.device_features[layer_id].open_files(self.graph.num_parts)
+        self.fds = self.host_features[layer_id].open_files(self.graph.num_parts)
 
         self._backward_last_layer(losses)
 
-        self.device_features[layer_id].close_files(self.fds)
+        self.host_features[layer_id].close_files(self.fds)
         self.fds = None
 
 
@@ -404,11 +404,11 @@ class Trainer:
             )
             self.cache.cache_tracker_print()
 
-            self.fds = self.device_features[layer_id].open_files(self.graph.num_parts)
+            self.fds = self.host_features[layer_id].open_files(self.graph.num_parts)
 
             self._backward_layer(layer_id)
 
-            self.device_features[layer_id].close_files(self.fds)
+            self.host_features[layer_id].close_files(self.fds)
             self.fds = None
 
             self._progress(
