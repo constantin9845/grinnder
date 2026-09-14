@@ -128,6 +128,17 @@ void gather_partitions(int pid, std::vector<torch::Tensor> srcs,
 #include <string>
 #include <unordered_map>
 #include <cstring>
+#include <torch/extension.h>
+#include <c10/cuda/CUDAStream.h>
+#include <c10/cuda/CUDAGuard.h> 
+#include <cuda_runtime.h>
+#include <cufile.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <vector>
+#include <string>
+#include <future>
+#include <cstring>
 
 // Global storage to keep track of active CUfile handles by file descriptor
 static std::unordered_map<int, CUfileHandle_t> g_cufile_handles;
@@ -170,19 +181,6 @@ void close_files(const std::vector<int>& fds) {
     close(fd);
   }
 }
-
-
-#include <torch/extension.h>
-#include <c10/cuda/CUDAStream.h>
-#include <c10/cuda/CUDAGuard.h> // Correct header for CUDAStreamGuard
-#include <cuda_runtime.h>
-#include <cufile.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <vector>
-#include <string>
-#include <future>
-#include <cstring>
 
 void gather_partitions_direct(
     int pid,
