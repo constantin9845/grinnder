@@ -9,9 +9,10 @@
 #include <cuda_runtime.h>
 #include <cufile.h>
 
-#define SECTOR_4K (4 * 1024)         // 4 KB Sector Alignment
-#define CHUNK_2M  (2 * 1024 * 1024)  // 2 MB Read Chunk
-#define GPU_ID    0                  // Target GPU index
+#define SECTOR_4K      (4 * 1024)         // 4 KB Sector Alignment
+#define CHUNK_2M       (2 * 1024 * 1024)  // 2 MB Read Chunk
+#define MAX_BATCH_SIZE 4096               // GDS API Limit for cuFileBatchIOSetUp
+#define GPU_ID         0                  // Target GPU index
 
 static double get_time_sec() {
     struct timespec ts;
@@ -144,11 +145,12 @@ void run_test2_gds_random_4k(const char *filename) {
     CUDA_CHECK(cudaMalloc(&d_buffer, gpu_buf_size));
     CUFILE_CHECK(cuFileBufRegister(d_buffer, gpu_buf_size, 0));
 
+    // Prepare full params list
     CUfileIOParams_t *io_params = calloc(num_reads, sizeof(CUfileIOParams_t));
     srand(42);
     for (size_t i = 0; i < num_reads; i++) {
         io_params[i].mode = CUFILE_BATCH;
-        io_params[i].opcode = CUFILE_READ;
+        io_params[i].opcode = CU_FILE_READ;
         io_params[i].fh = cf_handle;
         io_params[i].u.batch.devPtr_base = d_buffer;
         io_params[i].u.batch.devPtr_offset = i * SECTOR_4K;
@@ -156,26 +158,36 @@ void run_test2_gds_random_4k(const char *filename) {
         io_params[i].u.batch.size = SECTOR_4K;
     }
 
+    // Allocate temporary workspace for max batch size (4096)
     CUfileBatchHandle_t batch_handle;
-    CUFILE_CHECK(cuFileBatchIOSetUp(&batch_handle, num_reads));
+    CUFILE_CHECK(cuFileBatchIOSetUp(&batch_handle, MAX_BATCH_SIZE));
+    CUfileIOEvents_t events[MAX_BATCH_SIZE];
 
     double cpu_start = get_cpu_time_sec();
     double t_start = get_time_sec();
 
-    CUFILE_CHECK(cuFileBatchIOSubmit(batch_handle, num_reads, io_params, 0));
+    size_t total_completed = 0;
 
-    unsigned int num_completed = num_reads;
-    CUfileIOEvents_t *events = calloc(num_reads, sizeof(CUfileIOEvents_t));
-    CUFILE_CHECK(cuFileBatchIOGetStatus(batch_handle, num_reads, &num_completed, events, NULL));
+    // Process in chunks of MAX_BATCH_SIZE (4096)
+    for (size_t offset_idx = 0; offset_idx < num_reads; offset_idx += MAX_BATCH_SIZE) {
+        unsigned int current_batch_size = (num_reads - offset_idx > MAX_BATCH_SIZE) 
+                                          ? MAX_BATCH_SIZE 
+                                          : (unsigned int)(num_reads - offset_idx);
+
+        CUFILE_CHECK(cuFileBatchIOSubmit(batch_handle, current_batch_size, &io_params[offset_idx], 0));
+
+        unsigned int completed = current_batch_size;
+        CUFILE_CHECK(cuFileBatchIOGetStatus(batch_handle, current_batch_size, &completed, events, NULL));
+        total_completed += completed;
+    }
 
     double t_end = get_time_sec();
     double cpu_end = get_cpu_time_sec();
 
     print_stats("GDS TEST 2: Random 4KB Reads (10% File Size via cuFile Batch Async)", 
-                num_completed * SECTOR_4K, num_reads, t_end - t_start, cpu_end - cpu_start);
+                total_completed * SECTOR_4K, num_reads, t_end - t_start, cpu_end - cpu_start);
 
     cuFileBatchIODestroy(batch_handle);
-    free(events);
     free(io_params);
     CUFILE_CHECK(cuFileBufDeregister(d_buffer));
     CUDA_CHECK(cudaFree(d_buffer));
@@ -209,7 +221,7 @@ void run_test3_gds_seq_4k(const char *filename) {
     CUfileIOParams_t *io_params = calloc(num_reads, sizeof(CUfileIOParams_t));
     for (size_t i = 0; i < num_reads; i++) {
         io_params[i].mode = CUFILE_BATCH;
-        io_params[i].opcode = CUFILE_READ;
+        io_params[i].opcode = CU_FILE_READ;
         io_params[i].fh = cf_handle;
         io_params[i].u.batch.devPtr_base = d_buffer;
         io_params[i].u.batch.devPtr_offset = i * SECTOR_4K;
@@ -217,26 +229,36 @@ void run_test3_gds_seq_4k(const char *filename) {
         io_params[i].u.batch.size = SECTOR_4K;
     }
 
+    // Allocate temporary workspace for max batch size (4096)
     CUfileBatchHandle_t batch_handle;
-    CUFILE_CHECK(cuFileBatchIOSetUp(&batch_handle, num_reads));
+    CUFILE_CHECK(cuFileBatchIOSetUp(&batch_handle, MAX_BATCH_SIZE));
+    CUfileIOEvents_t events[MAX_BATCH_SIZE];
 
     double cpu_start = get_cpu_time_sec();
     double t_start = get_time_sec();
 
-    CUFILE_CHECK(cuFileBatchIOSubmit(batch_handle, num_reads, io_params, 0));
+    size_t total_completed = 0;
 
-    unsigned int num_completed = num_reads;
-    CUfileIOEvents_t *events = calloc(num_reads, sizeof(CUfileIOEvents_t));
-    CUFILE_CHECK(cuFileBatchIOGetStatus(batch_handle, num_reads, &num_completed, events, NULL));
+    // Process in chunks of MAX_BATCH_SIZE (4096)
+    for (size_t offset_idx = 0; offset_idx < num_reads; offset_idx += MAX_BATCH_SIZE) {
+        unsigned int current_batch_size = (num_reads - offset_idx > MAX_BATCH_SIZE) 
+                                          ? MAX_BATCH_SIZE 
+                                          : (unsigned int)(num_reads - offset_idx);
+
+        CUFILE_CHECK(cuFileBatchIOSubmit(batch_handle, current_batch_size, &io_params[offset_idx], 0));
+
+        unsigned int completed = current_batch_size;
+        CUFILE_CHECK(cuFileBatchIOGetStatus(batch_handle, current_batch_size, &completed, events, NULL));
+        total_completed += completed;
+    }
 
     double t_end = get_time_sec();
     double cpu_end = get_cpu_time_sec();
 
     print_stats("GDS TEST 3: Full File Sequential 4KB Reads (via cuFile Batch Async)", 
-                num_completed * SECTOR_4K, num_reads, t_end - t_start, cpu_end - cpu_start);
+                total_completed * SECTOR_4K, num_reads, t_end - t_start, cpu_end - cpu_start);
 
     cuFileBatchIODestroy(batch_handle);
-    free(events);
     free(io_params);
     CUFILE_CHECK(cuFileBufDeregister(d_buffer));
     CUDA_CHECK(cudaFree(d_buffer));
