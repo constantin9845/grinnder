@@ -11,7 +11,7 @@
 
 #define SECTOR_4K      (4 * 1024)         // 4 KB Sector Alignment
 #define CHUNK_2M       (2 * 1024 * 1024)  // 2 MB Read Chunk
-#define MAX_BATCH_SIZE 4096               // GDS API Limit for cuFileBatchIOSetUp
+#define MAX_BATCH_SIZE 128               // GDS API Limit for cuFileBatchIOSetUp
 #define GPU_ID         0                  // Target GPU index
 
 static double get_time_sec() {
