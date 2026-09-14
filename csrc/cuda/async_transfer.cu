@@ -135,7 +135,7 @@ void gather_partitions(int pid, std::vector<torch::Tensor> srcs,
 
 void gather_partitions_direct(
     int pid,
-    std::vector<std::string> file_paths,
+    const std::vector<int>& fds,
     torch::Tensor dst,
     std::vector<torch::Tensor> boundaries) {
 
@@ -154,11 +154,11 @@ void gather_partitions_direct(
     int64_t row_bytes = feat_dim * dst.element_size();
     uint8_t* dst_raw = reinterpret_cast<uint8_t*>(dst.data_ptr());
 
-    size_t num_parts = file_paths.size();
+    size_t num_parts = fds.size();
     std::vector<int64_t> part_offsets(num_parts, 0);
 
-    int target_fd = open(file_paths[pid].c_str(), O_RDONLY | O_DIRECT);
-    AT_ASSERTM(target_fd >= 0, "Failed to open target partition file");
+    int target_fd = fds[pid];
+    CUfileHandle_t target_handle = g_cufile_handles[target_fd];
 
     off_t target_file_size = lseek(target_fd, 0, SEEK_END);
     int64_t target_nodes = target_file_size / row_bytes;
@@ -173,46 +173,21 @@ void gather_partitions_direct(
 
     AT_ASSERTM(curr_offset == total_rows, "Gather offset mismatch with destination size");
 
-    // 1. Read target partition
-    CUfileDescr_t target_desc;
-    memset(&target_desc, 0, sizeof(CUfileDescr_t));
-    target_desc.handle.fd = target_fd;
-    target_desc.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
-
-    CUfileHandle_t target_handle;
-    CUfileError_t target_status = cuFileHandleRegister(&target_handle, &target_desc);
-    AT_ASSERTM(target_status.err == CU_FILE_SUCCESS, "cuFileHandleRegister failed for target partition");
-
+    // 1. Direct GDS read for target partition (reuses existing registered handle)
     ssize_t ret = cuFileRead(target_handle, dst_raw, target_file_size, 0, 0);
     AT_ASSERTM(ret == target_file_size, "GDS Read failed for target partition");
 
-    cuFileHandleDeregister(target_handle);
-    close(target_fd);
-
-    // 2. Read boundary partitions
+    // 2. Read boundary partitions using existing handles
     std::vector<std::future<void>> futures;
-
+    
     for (size_t i = 0; i < num_parts; ++i) {
       if (static_cast<int>(i) == pid || !boundaries[i].defined() || boundaries[i].numel() == 0) {
         continue;
       }
 
       futures.push_back(std::async(std::launch::async, [=, &boundaries]() {
-        int fd = open(file_paths[i].c_str(), O_RDONLY | O_DIRECT);
-        if (fd < 0) return;
-
-        CUfileDescr_t desc;
-        memset(&desc, 0, sizeof(CUfileDescr_t));
-        desc.handle.fd = fd;
-        desc.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
-
-        // Declare handle before passing reference to cuFileHandleRegister
-        CUfileHandle_t handle;
-        CUfileError_t reg_status = cuFileHandleRegister(&handle, &desc);
-        if (reg_status.err != CU_FILE_SUCCESS) {
-          close(fd);
-          return;
-        }
+        int fd = fds[i];
+        CUfileHandle_t handle = g_cufile_handles[fd];
 
         auto bndry = boundaries[i].to(at::kCPU).contiguous();
         const int64_t* idx_ptr = bndry.data_ptr<int64_t>();
@@ -237,9 +212,6 @@ void gather_partitions_direct(
 
           idx += range_len;
         }
-
-        cuFileHandleDeregister(handle);
-        close(fd);
       }));
     }
 
@@ -317,4 +289,55 @@ void scatter_partitions(int pid, torch::Tensor src,
                   "Scatter: copied size mismatch with source");
     });
   });
+}
+
+
+
+#include <fcntl.h>
+#include <unistd.h>
+#include <vector>
+#include <string>
+#include <unordered_map>
+#include <cstring>
+
+// Global storage to keep track of active CUfile handles by file descriptor
+static std::unordered_map<int, CUfileHandle_t> g_cufile_handles;
+
+// Opens files with O_DIRECT and registers them with GDS cuFile
+std::vector<int> open_files(const std::vector<std::string>& file_paths) {
+  std::vector<int> fds;
+  fds.reserve(file_paths.size());
+
+  for (const auto& path : file_paths) {
+    int fd = open(path.c_str(), O_RDONLY | O_DIRECT);
+    AT_ASSERTM(fd >= 0, "Failed to open file with O_DIRECT: " + path);
+
+    CUfileDescr_t desc;
+    memset(&desc, 0, sizeof(CUfileDescr_t));
+    desc.handle.fd = fd;
+    desc.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
+
+    CUfileHandle_t handle;
+    CUfileError_t status = cuFileHandleRegister(&handle, &desc);
+    AT_ASSERTM(status.err == CU_FILE_SUCCESS, 
+               "cuFileHandleRegister failed for file: " + path);
+
+    // Track the handle globally so gather operations can reuse it
+    g_cufile_handles[fd] = handle;
+    fds.push_back(fd);
+  }
+
+  return fds;
+}
+
+// Deregisters GDS handles and closes open file descriptors
+void close_files(const std::vector<int>& fds) {
+  for (int fd : fds) {
+    auto it = g_cufile_handles.find(fd);
+    if (it != g_cufile_handles.end()) {
+      cuFileHandleDeregister(it->second);
+      g_cufile_handles.erase(it);
+    }
+    close(fd);
+  }
 }

@@ -121,6 +121,7 @@ class HostBuffer:
 
         self._ops = _load_ops()
 
+
     def __getitem__(self, pid: int) -> Tensor:
         """Get host tensor for partition pid, allocating it if needed."""
         self.allocate(pid)
@@ -387,6 +388,21 @@ class HostBuffer:
 
         print(f"\tPartition {pid} loads {gb} GB from other partitions")
 
+
+
+    def open_files(self, num_parts):
+
+        file_paths = [
+            f"{self._backend._storage_dir}/{self._file_prefix}_p{i}.pt"
+            for i in range(num_parts)
+        ]
+        
+        fds = self._ops.open_files(file_paths)
+        return fds
+    
+    def close_files(self, fds):
+        self._ops.close_files(fds)
+
     # ------------------------------------------------------------------
     # Gather Direct: target partition + boundary feat/act from NVMe -> one GPU tensor
     # ------------------------------------------------------------------
@@ -394,6 +410,7 @@ class HostBuffer:
     def async_gather_direct(
     self,
     phase,
+    fds,
     pid: int,
     gpu_target: Tensor,
     boundaries: List[Optional[Tensor]],
@@ -518,7 +535,7 @@ class HostBuffer:
         with torch.cuda.stream(stream):
 
             if self._ops is not None:
-                self._ops.gather_partitions_direct(pid, file_paths, gpu_target, bndries)
+                self._ops.gather_partitions_direct(pid, fds, gpu_target, bndries)
                 print("Not a fallback")
 
             else:

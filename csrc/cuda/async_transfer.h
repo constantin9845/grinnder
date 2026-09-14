@@ -16,7 +16,7 @@ void gather_partitions(int pid, std::vector<torch::Tensor> srcs,
 
 void gather_partitions_direct(
     int pid,
-    std::vector<std::string> file_paths,
+    const std::vector<int>& fds,
     torch::Tensor dst,
     std::vector<torch::Tensor> boundaries);
 
@@ -26,6 +26,9 @@ void gather_partitions_direct(
 void scatter_partitions(int pid, torch::Tensor src,
                         std::vector<torch::Tensor> dsts,
                         std::vector<torch::Tensor> boundaries);
+
+std::vector<int> open_files(const std::vector<std::string>& file_paths);
+void close_files(const std::vector<int>& fds);
 
 // Thread pool synchronization
 void h2d_synchronize();

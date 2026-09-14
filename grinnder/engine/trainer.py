@@ -166,6 +166,8 @@ class Trainer:
         if not self._single_partition_fast_path_enabled:
             self._prefill_features()
 
+        self.fds = None
+
     def _progress(self, message: str) -> None:
         if self._log_progress:
             print(f"      {message}{self._progress_memory_suffix()}", flush=True)
@@ -358,7 +360,14 @@ class Trainer:
         for layer_id in range(self.model.num_layers):
             self._progress(f"FORWARD LAYER {layer_id + 1}/{self.model.num_layers} START")
             self.cache.cache_tracker_print()
+
+            self.fds = self.device_features[layer_id].open_files(self.graph.num_parts)
+
             self._forward_layer(layer_id)
+
+            self.device_features[layer_id].close_files(self.fds)
+            self.fds = None
+
             
             self._progress(f"FORWARD LAYER {layer_id + 1}/{self.model.num_layers} DONE")
 
@@ -379,14 +388,29 @@ class Trainer:
         self._progress(f"BACKWARD LAYER {self.model.num_layers}/{self.model.num_layers} START")
         self.cache.cache_tracker_print()
         stat.start_backward()
+
+        self.fds = self.device_features[layer_id].open_files(self.graph.num_parts)
+
         self._backward_last_layer(losses)
+
+        self.device_features[layer_id].close_files(self.fds)
+        self.fds = None
+
+
         self._progress(f"BACKWARD LAYER {self.model.num_layers}/{self.model.num_layers} DONE")
         for layer_id in reversed(range(self.model.num_layers - 1)):
             self._progress(
                 f"backward layer {layer_id + 1}/{self.model.num_layers} start"
             )
             self.cache.cache_tracker_print()
+
+            self.fds = self.device_features[layer_id].open_files(self.graph.num_parts)
+
             self._backward_layer(layer_id)
+
+            self.device_features[layer_id].close_files(self.fds)
+            self.fds = None
+
             self._progress(
                 f"backward layer {layer_id + 1}/{self.model.num_layers} done"
             )
@@ -499,8 +523,6 @@ class Trainer:
         if not pids:
             return
         
-
-
         t0 = time.time()
         # Storage_to_Host: load layer activations into cache
         #self._prepare_cache_layer(layer_id)
@@ -510,6 +532,7 @@ class Trainer:
         t0 = time.perf_counter_ns()
         self.device_features[layer_id].async_gather_direct(
             "forward",
+            fds=self.fds,
             pid=pids[0],
             host_buffer=self.host_features[layer_id],
             boundaries=self.graph.boundaries[pids[0]],
@@ -544,6 +567,7 @@ class Trainer:
                     t0 = time.perf_counter_ns()
                     self.device_features[layer_id].async_gather_direct(
                         "forward",
+                        fds=self.fds,
                         pid=next_pid,
                         host_buffer=self.host_features[layer_id],
                         boundaries=self.graph.boundaries[next_pid],
@@ -640,6 +664,7 @@ class Trainer:
                     t0 = time.perf_counter_ns()
                     self.device_features[layer_id].async_gather_direct(
                         "forward",
+                        fds=self.fds,
                         pid=next_pid,
                         host_buffer=self.host_features[layer_id],
                         boundaries=self.graph.boundaries[next_pid],
@@ -853,6 +878,7 @@ class Trainer:
             #self._prepare_cache_partition(cache_layer_id, pids[0], "backward")
             self.device_features[layer_id].async_gather_direct(
                 "backward",
+                fds=self.fds,
                 pid=pids[0],
                 host_buffer=self.host_features[layer_id],
                 boundaries=self.graph.boundaries[pids[0]],
@@ -882,6 +908,7 @@ class Trainer:
                 #self._prepare_cache_partition(cache_layer_id, next_pid, "backward")
                 self.device_features[layer_id].async_gather_direct(
                     "backward",
+                    fds=self.fds,
                     pid=next_pid,
                     host_buffer=self.host_features[layer_id],
                     boundaries=self.graph.boundaries[next_pid],
@@ -943,6 +970,7 @@ class Trainer:
                     #self._prepare_cache_partition(cache_layer_id, next_pid, "backward")
                     self.device_features[layer_id].async_gather_direct(
                         "backward",
+                        fds=self.fds,
                         pid=next_pid,
                         host_buffer=self.host_features[layer_id],
                         boundaries=self.graph.boundaries[next_pid],
@@ -1017,6 +1045,7 @@ class Trainer:
             #self._prepare_cache_partition(layer_id, first_pid, "backward")
             self.device_features[layer_id].async_gather_direct(
                 "backward",
+                fds=self.fds,
                 pid=first_pid,
                 host_buffer=self.host_features[layer_id],
                 boundaries=self.graph.boundaries[first_pid],
@@ -1062,6 +1091,7 @@ class Trainer:
                         #self._prepare_cache_partition(layer_id, next_pid, "backward")
                         self.device_features[layer_id].async_gather_direct(
                             "backward",
+                            fds=self.fds,
                             pid=next_pid,
                             host_buffer=self.host_features[layer_id],
                             boundaries=self.graph.boundaries[next_pid],
@@ -1152,6 +1182,7 @@ class Trainer:
                         #self._prepare_cache_partition(layer_id, next_pid, "backward")
                         self.device_features[layer_id].async_gather_direct(
                             "backward",
+                            fds=self.fds,
                             pid=next_pid,
                             host_buffer=self.host_features[layer_id],
                             boundaries=self.graph.boundaries[next_pid],
@@ -1209,6 +1240,7 @@ class Trainer:
                         #self._prepare_cache_partition(layer_id, next_pid, "backward")
                         self.device_features[layer_id].async_gather_direct(
                             "backward",
+                            fds=self.fds,
                             pid=next_pid,
                             host_buffer=self.host_features[layer_id],
                             boundaries=self.graph.boundaries[next_pid],
