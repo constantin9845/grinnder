@@ -143,7 +143,7 @@ class DeviceBuffer:
             Combines allocate() + host_buffer.async_gather() for convenience.
             """
             self.allocate(pid)
-            host_buffer.async_gather_direct(phase, pid, gpu_target, stream)
+            host_buffer.storage_to_gpu(phase, pid, gpu_target, stream)
 
     def h2d_synchronize(self, stream: torch.cuda.Stream) -> None:
         """Wait for H2D operations to complete.

@@ -787,10 +787,10 @@ class HostBuffer:
 
 
     def storage_to_gpu(self,
-    phase,
-    pid,
-    gpu_target: Tensor,
-    stream: torch.cuda.Stream) -> None:
+        phase,
+        pid,
+        gpu_target: Tensor,
+        stream: torch.cuda.Stream) -> None:
         assert self._backend is not None
         assert gpu_target.is_cuda
         stream.wait_stream(torch.cuda.current_stream(gpu_target.device))
