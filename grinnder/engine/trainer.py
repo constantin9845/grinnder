@@ -760,7 +760,11 @@ class Trainer:
 
         print("LOSS : load partition [-1] [CPU --> GPU]")
         self.host_features[-1].storage_to_gpu(
-            "loss", first_pid, self.host_features[3], act_first, self.streams.h2d[0]
+            phase="loss", 
+            pid=first_pid, 
+            host_buffer=self.host_features[3], 
+            gpu_target=act_first,
+            stream=self.streams.h2d[0]
         )
 
         for i, pid in enumerate(pids):
@@ -782,11 +786,11 @@ class Trainer:
                     )
                 
                 self.host_features[-1].storage_to_gpu(
-                    "loss", 
-                    next_pid, 
-                    self.host_features[3], 
-                    act_next,
-                    self.streams.h2d[(i + 1) % pool_size],
+                    phase="loss", 
+                    pid=next_pid, 
+                    host_buffer=self.host_features[3], 
+                    gpu_target=act_next,
+                    stream=self.streams.h2d[(i + 1) % pool_size]
                 )
 
                 print(f"LOSS : load partition [{next_pid}] [CPU --> GPU]")
@@ -839,11 +843,11 @@ class Trainer:
                         act_next.numel() * act_next.element_size()
                     )
                 self.host_features[-1].storage_to_gpu(
-                    "loss", 
-                    next_pid, 
-                    self.host_features[3], 
-                    act_next,
-                    self.streams.h2d[(i + 1) % pool_size],
+                    phase="loss", 
+                    pid=next_pid, 
+                    host_buffer=self.host_features[3], 
+                    gpu_target=act_next,
+                    stream=self.streams.h2d[(i + 1) % pool_size]
                 )
 
         self._pid_to_loss_idx = pid_to_loss_idx
