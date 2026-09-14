@@ -13,14 +13,12 @@
 #define CHUNK_2M  (2 * 1024 * 1024)  // 2 MB Read Chunk
 #define GPU_ID    0                  // Target GPU index
 
-// High-precision time helper (seconds)
 static double get_time_sec() {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
     return ts.tv_sec + (ts.tv_nsec / 1e9);
 }
 
-// CPU usage helper (Kernel + User CPU seconds)
 static double get_cpu_time_sec() {
     struct rusage ru;
     getrusage(RUSAGE_SELF, &ru);
@@ -29,7 +27,6 @@ static double get_cpu_time_sec() {
     return user + sys;
 }
 
-// CUDA Error Checking macro
 #define CUDA_CHECK(val) check_cuda((val), #val, __FILE__, __LINE__)
 void check_cuda(cudaError_t result, char const *const func, const char *const file, int const line) {
     if (result != cudaSuccess) {
@@ -39,7 +36,6 @@ void check_cuda(cudaError_t result, char const *const func, const char *const fi
     }
 }
 
-// cuFile Error Checking macro
 #define CUFILE_CHECK(status) check_cufile((status), #status, __FILE__, __LINE__)
 void check_cufile(CUfileError_t status, char const *const func, const char *const file, int const line) {
     if (status.err != CU_FILE_SUCCESS) {
@@ -79,7 +75,6 @@ void run_test1_gds_2m_chunks(const char *filename) {
     off_t file_size = lseek(fd, 0, SEEK_END);
     if (file_size <= 0) { close(fd); return; }
 
-    // 1. Register file with GDS driver
     CUfileHandle_t cf_handle;
     CUfileDescr_t cf_descr;
     memset(&cf_descr, 0, sizeof(CUfileDescr_t));
@@ -87,11 +82,8 @@ void run_test1_gds_2m_chunks(const char *filename) {
     cf_descr.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
     CUFILE_CHECK(cuFileHandleRegister(&cf_handle, &cf_descr));
 
-    // 2. Allocate GPU VRAM Buffer
     void *d_buffer = NULL;
     CUDA_CHECK(cudaMalloc(&d_buffer, CHUNK_2M));
-
-    // 3. Register GPU buffer with GDS driver for DMA pin registration
     CUFILE_CHECK(cuFileBufRegister(d_buffer, CHUNK_2M, 0));
 
     double cpu_start = get_cpu_time_sec();
@@ -105,7 +97,6 @@ void run_test1_gds_2m_chunks(const char *filename) {
                                ? CHUNK_2M 
                                : (file_size - offset);
 
-        // GDS synchronous DMA read directly into VRAM
         ssize_t ret = cuFileRead(cf_handle, d_buffer, bytes_to_read, offset, 0);
         if (ret < 0) {
             fprintf(stderr, "Test 1 GDS Read Error at offset %ld\n", offset);
@@ -122,7 +113,6 @@ void run_test1_gds_2m_chunks(const char *filename) {
     print_stats("GDS TEST 1: Full File Read (cuFile Direct NVMe->GPU, 2MB Chunks)", 
                 file_size, num_reads, t_end - t_start, cpu_end - cpu_start);
 
-    // Cleanup
     CUFILE_CHECK(cuFileBufDeregister(d_buffer));
     CUDA_CHECK(cudaFree(d_buffer));
     cuFileHandleDeregister(cf_handle);
@@ -139,10 +129,9 @@ void run_test2_gds_random_4k(const char *filename) {
 
     off_t file_size = lseek(fd, 0, SEEK_END);
     size_t total_4k_blocks = file_size / SECTOR_4K;
-    size_t num_reads = total_4k_blocks / 10; // Read 10% of total 4K sectors
+    size_t num_reads = total_4k_blocks / 10;
     if (num_reads == 0) num_reads = 1;
 
-    // Register File with GDS
     CUfileHandle_t cf_handle;
     CUfileDescr_t cf_descr;
     memset(&cf_descr, 0, sizeof(CUfileDescr_t));
@@ -150,37 +139,33 @@ void run_test2_gds_random_4k(const char *filename) {
     cf_descr.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
     CUFILE_CHECK(cuFileHandleRegister(&cf_handle, &cf_descr));
 
-    // Allocate GPU buffer for total batch
     size_t gpu_buf_size = num_reads * SECTOR_4K;
     void *d_buffer = NULL;
     CUDA_CHECK(cudaMalloc(&d_buffer, gpu_buf_size));
     CUFILE_CHECK(cuFileBufRegister(d_buffer, gpu_buf_size, 0));
 
-    // Prepare batch read array
-    CUfileIOParams_t *io_params = malloc(num_reads * sizeof(CUfileIOParams_t));
+    CUfileIOParams_t *io_params = calloc(num_reads, sizeof(CUfileIOParams_t));
     srand(42);
     for (size_t i = 0; i < num_reads; i++) {
-        io_params[i].mode = CUFILE_BATCH_READ;
+        io_params[i].mode = CUFILE_BATCH;
+        io_params[i].opcode = CU_FILE_READ;
         io_params[i].fh = cf_handle;
-        io_params[i].devPtr_base = d_buffer;
-        io_params[i].devPtr_offset = i * SECTOR_4K;
-        io_params[i].file_offset = (rand() % total_4k_blocks) * SECTOR_4K;
-        io_params[i].size = SECTOR_4K;
+        io_params[i].u.batch.devPtr_base = d_buffer;
+        io_params[i].u.batch.devPtr_offset = i * SECTOR_4K;
+        io_params[i].u.batch.file_offset = (rand() % total_4k_blocks) * SECTOR_4K;
+        io_params[i].u.batch.size = SECTOR_4K;
     }
 
-    // Initialize cuFile Batch Interface
     CUfileBatchHandle_t batch_handle;
     CUFILE_CHECK(cuFileBatchIOSetUp(&batch_handle, num_reads));
 
     double cpu_start = get_cpu_time_sec();
     double t_start = get_time_sec();
 
-    // Submit batch GDS requests to GPU
     CUFILE_CHECK(cuFileBatchIOSubmit(batch_handle, num_reads, io_params, 0));
 
-    // Wait for hardware completions
     unsigned int num_completed = num_reads;
-    CUfileIOEvents_t *events = malloc(num_reads * sizeof(CUfileIOEvents_t));
+    CUfileIOEvents_t *events = calloc(num_reads, sizeof(CUfileIOEvents_t));
     CUFILE_CHECK(cuFileBatchIOGetStatus(batch_handle, num_reads, &num_completed, events, NULL));
 
     double t_end = get_time_sec();
@@ -189,8 +174,7 @@ void run_test2_gds_random_4k(const char *filename) {
     print_stats("GDS TEST 2: Random 4KB Reads (10% File Size via cuFile Batch Async)", 
                 num_completed * SECTOR_4K, num_reads, t_end - t_start, cpu_end - cpu_start);
 
-    // Cleanup
-    cuFileBatchDestroy(batch_handle);
+    cuFileBatchIODestroy(batch_handle);
     free(events);
     free(io_params);
     CUFILE_CHECK(cuFileBufDeregister(d_buffer));
@@ -210,7 +194,6 @@ void run_test3_gds_seq_4k(const char *filename) {
     off_t file_size = lseek(fd, 0, SEEK_END);
     size_t num_reads = file_size / SECTOR_4K;
 
-    // Register File with GDS
     CUfileHandle_t cf_handle;
     CUfileDescr_t cf_descr;
     memset(&cf_descr, 0, sizeof(CUfileDescr_t));
@@ -218,21 +201,20 @@ void run_test3_gds_seq_4k(const char *filename) {
     cf_descr.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
     CUFILE_CHECK(cuFileHandleRegister(&cf_handle, &cf_descr));
 
-    // Allocate GPU buffer for total batch
     size_t gpu_buf_size = num_reads * SECTOR_4K;
     void *d_buffer = NULL;
     CUDA_CHECK(cudaMalloc(&d_buffer, gpu_buf_size));
     CUFILE_CHECK(cuFileBufRegister(d_buffer, gpu_buf_size, 0));
 
-    // Prepare batch read array
-    CUfileIOParams_t *io_params = malloc(num_reads * sizeof(CUfileIOParams_t));
+    CUfileIOParams_t *io_params = calloc(num_reads, sizeof(CUfileIOParams_t));
     for (size_t i = 0; i < num_reads; i++) {
-        io_params[i].mode = CUFILE_BATCH_READ;
+        io_params[i].mode = CUFILE_BATCH;
+        io_params[i].opcode = CU_FILE_READ;
         io_params[i].fh = cf_handle;
-        io_params[i].devPtr_base = d_buffer;
-        io_params[i].devPtr_offset = i * SECTOR_4K;
-        io_params[i].file_offset = i * SECTOR_4K;
-        io_params[i].size = SECTOR_4K;
+        io_params[i].u.batch.devPtr_base = d_buffer;
+        io_params[i].u.batch.devPtr_offset = i * SECTOR_4K;
+        io_params[i].u.batch.file_offset = i * SECTOR_4K;
+        io_params[i].u.batch.size = SECTOR_4K;
     }
 
     CUfileBatchHandle_t batch_handle;
@@ -241,12 +223,10 @@ void run_test3_gds_seq_4k(const char *filename) {
     double cpu_start = get_cpu_time_sec();
     double t_start = get_time_sec();
 
-    // Submit batch GDS requests to GPU
     CUFILE_CHECK(cuFileBatchIOSubmit(batch_handle, num_reads, io_params, 0));
 
-    // Wait for completions
     unsigned int num_completed = num_reads;
-    CUfileIOEvents_t *events = malloc(num_reads * sizeof(CUfileIOEvents_t));
+    CUfileIOEvents_t *events = calloc(num_reads, sizeof(CUfileIOEvents_t));
     CUFILE_CHECK(cuFileBatchIOGetStatus(batch_handle, num_reads, &num_completed, events, NULL));
 
     double t_end = get_time_sec();
@@ -255,8 +235,7 @@ void run_test3_gds_seq_4k(const char *filename) {
     print_stats("GDS TEST 3: Full File Sequential 4KB Reads (via cuFile Batch Async)", 
                 num_completed * SECTOR_4K, num_reads, t_end - t_start, cpu_end - cpu_start);
 
-    // Cleanup
-    cuFileBatchDestroy(batch_handle);
+    cuFileBatchIODestroy(batch_handle);
     free(events);
     free(io_params);
     CUFILE_CHECK(cuFileBufDeregister(d_buffer));
@@ -279,7 +258,6 @@ int main(int argc, char *argv[]) {
         filename3 = argv[1];
     }
 
-    // Initialize CUDA and cuFile Drivers
     CUDA_CHECK(cudaSetDevice(GPU_ID));
     CUFILE_CHECK(cuFileDriverOpen());
 
@@ -289,7 +267,6 @@ int main(int argc, char *argv[]) {
     run_test2_gds_random_4k(filename2);
     run_test3_gds_seq_4k(filename3);
 
-    // Close GDS Driver
     cuFileDriverClose();
     return 0;
 }
