@@ -150,7 +150,7 @@ void run_test2_gds_random_4k(const char *filename) {
     srand(42);
     for (size_t i = 0; i < num_reads; i++) {
         io_params[i].mode = CUFILE_BATCH;
-        io_params[i].opcode = CU_FILE_READ;
+        io_params[i].opcode = CUFILE_READ;
         io_params[i].fh = cf_handle;
         io_params[i].u.batch.devPtr_base = d_buffer;
         io_params[i].u.batch.devPtr_offset = i * SECTOR_4K;
@@ -221,7 +221,7 @@ void run_test3_gds_seq_4k(const char *filename) {
     CUfileIOParams_t *io_params = calloc(num_reads, sizeof(CUfileIOParams_t));
     for (size_t i = 0; i < num_reads; i++) {
         io_params[i].mode = CUFILE_BATCH;
-        io_params[i].opcode = CU_FILE_READ;
+        io_params[i].opcode = CUFILE_READ;
         io_params[i].fh = cf_handle;
         io_params[i].u.batch.devPtr_base = d_buffer;
         io_params[i].u.batch.devPtr_offset = i * SECTOR_4K;
