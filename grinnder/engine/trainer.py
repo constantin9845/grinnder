@@ -378,7 +378,13 @@ class Trainer:
         self._progress("LOSS START")
         self.cache.cache_tracker_print()
         stat.start_loss()
+
+        self.fds = self.host_features[layer_id].open_files(self.graph.num_parts)
+
         losses, metrics = self._compute_losses(criterion)
+
+        self.host_features[layer_id].close_files(self.fds)
+        self.fds = None
         self._progress("LOSS DONE")
 
         stat.loss_done()
@@ -745,7 +751,7 @@ class Trainer:
         first_pid = pids[0]
         if use_bypass:
             print(f"LOSS : load partition [-1] [SSD --> CPU]")
-            self.host_features[-1].storage_to_cpu("loss", first_pid)
+            #self.host_features[-1].storage_to_cpu("loss", first_pid)
         act_first = self.activations[last_layer][first_pid]
         if act_first is not None:
             act_first.untyped_storage().resize_(
@@ -753,8 +759,8 @@ class Trainer:
             )
 
         print("LOSS : load partition [-1] [CPU --> GPU]")
-        self.host_features[-1].async_upload(
-            "loss", first_pid, act_first, self.streams.h2d[0]
+        self.host_features[-1].storage_to_gpu(
+            "loss", self.fds, act_first, self.streams.h2d[0]
         )
 
         for i, pid in enumerate(pids):
@@ -768,14 +774,14 @@ class Trainer:
                 next_pid = pids[i + 1]
                 if use_bypass:
                     print(f"LOSS : load partition [{next_pid}] [SSD --> CPU]")
-                    self.host_features[-1].storage_to_cpu("loss", next_pid)
+                    #self.host_features[-1].storage_to_cpu("loss", next_pid)
                 act_next = self.activations[last_layer][next_pid]
                 if act_next is not None:
                     act_next.untyped_storage().resize_(
                         act_next.numel() * act_next.element_size()
                     )
                 
-                self.host_features[-1].async_upload(
+                self.host_features[-1].storage_to_gpu(
                     "loss", 
                     next_pid, act_next,
                     self.streams.h2d[(i + 1) % pool_size],
@@ -823,14 +829,14 @@ class Trainer:
 
             if i < len(pids) - 1 and pool_size == 1:
                 next_pid = pids[i + 1]
-                if use_bypass:
-                    self.host_features[-1].storage_to_cpu("loss", next_pid)
+                #if use_bypass:
+                    #self.host_features[-1].storage_to_cpu("loss", next_pid)
                 act_next = self.activations[last_layer][next_pid]
                 if act_next is not None:
                     act_next.untyped_storage().resize_(
                         act_next.numel() * act_next.element_size()
                     )
-                self.host_features[-1].async_upload(
+                self.host_features[-1].storage_to_gpu(
                     "loss", 
                     next_pid,
                     act_next,

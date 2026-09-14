@@ -310,6 +310,105 @@ void gather_partitions_direct(
 }
 
 
+extern std::unordered_map<int, CUfileHandle_t> g_cufile_handles2;
+
+void gather_activations_direct(
+    const std::vector<int>& fds,
+    torch::Tensor dst) {
+
+  AT_ASSERTM(dst.is_cuda(), "Destination must be a CUDA tensor");
+  AT_ASSERTM(dst.is_contiguous(), "Destination must be contiguous");
+
+  auto stream = at::cuda::getCurrentCUDAStream(dst.get_device());
+  AT_ASSERTM(stream != at::cuda::getDefaultCUDAStream(dst.get_device()),
+             "Async gather requires a non-default CUDA stream");
+
+  getH2DPool().run([=] {
+    c10::cuda::CUDAStreamGuard guard(stream);
+
+    uint8_t* dst_raw = reinterpret_cast<uint8_t*>(dst.data_ptr());
+    size_t num_parts = fds.size();
+
+    // -------------------------------------------------------------------
+    // 1. Calculate file sizes and compute contiguous destination offsets
+    // -------------------------------------------------------------------
+    std::vector<off_t> file_sizes(num_parts, 0);
+    int64_t total_bytes_needed = 0;
+
+    for (size_t i = 0; i < num_parts; ++i) {
+      int fd = fds[i];
+      off_t size = lseek(fd, 0, SEEK_END);
+      AT_ASSERTM(size >= 0, "Failed to get file size via lseek");
+      file_sizes[i] = size;
+      total_bytes_needed += size;
+    }
+
+    AT_ASSERTM(dst.nbytes() >= total_bytes_needed,
+               "Destination tensor is smaller than the combined size of all files");
+
+    if (num_parts == 0 || total_bytes_needed == 0) return;
+
+
+    // -------------------------------------------------------------------
+    // 2. Prepare full params list (1 read entry per file partition)
+    // -------------------------------------------------------------------
+    CUfileIOParams_t *io_params = (CUfileIOParams_t*)calloc(num_parts, sizeof(CUfileIOParams_t));
+    AT_ASSERTM(io_params != nullptr, "Failed to allocate memory for io_params");
+
+    int64_t curr_dst_offset = 0;
+    size_t valid_reads = 0;
+
+    for (size_t i = 0; i < num_parts; ++i) {
+      off_t fsize = file_sizes[i];
+      if (fsize == 0) continue;
+
+      int fd = fds[i];
+      CUfileHandle_t handle = g_cufile_handles[fd];
+
+      io_params[valid_reads].mode = CUFILE_BATCH;
+      io_params[valid_reads].opcode = CUFILE_READ;
+      io_params[valid_reads].fh = handle;
+      io_params[valid_reads].u.batch.devPtr_base = dst_raw;
+      io_params[valid_reads].u.batch.devPtr_offset = curr_dst_offset;
+      io_params[valid_reads].u.batch.file_offset = 0; // Read from the beginning of each file
+      io_params[valid_reads].u.batch.size = fsize;    // Read the full file
+
+      curr_dst_offset += fsize;
+      valid_reads++;
+    }
+
+
+    // -------------------------------------------------------------------
+    // 2. Prepare full params list (1 read entry per file partition)
+    // -------------------------------------------------------------------
+    CUfileIOParams_t *io_params = (CUfileIOParams_t*)calloc(num_parts, sizeof(CUfileIOParams_t));
+    AT_ASSERTM(io_params != nullptr, "Failed to allocate memory for io_params");
+
+    int64_t curr_dst_offset = 0;
+    size_t valid_reads = 0;
+
+    for (size_t i = 0; i < num_parts; ++i) {
+      off_t fsize = file_sizes[i];
+      if (fsize == 0) continue;
+
+      int fd = fds[i];
+      CUfileHandle_t handle = g_cufile_handles[fd];
+
+      io_params[valid_reads].mode = CUFILE_BATCH;
+      io_params[valid_reads].opcode = CUFILE_READ;
+      io_params[valid_reads].fh = handle;
+      io_params[valid_reads].u.batch.devPtr_base = dst_raw;
+      io_params[valid_reads].u.batch.devPtr_offset = curr_dst_offset;
+      io_params[valid_reads].u.batch.file_offset = 0; // Read from the beginning of each file
+      io_params[valid_reads].u.batch.size = fsize;    // Read the full file
+
+      curr_dst_offset += fsize;
+      valid_reads++;
+    }
+  });
+}
+
+
 void scatter_partitions(int pid, torch::Tensor src,
                         std::vector<torch::Tensor> dsts,
                         std::vector<torch::Tensor> boundaries) {

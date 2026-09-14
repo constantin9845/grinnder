@@ -268,7 +268,8 @@ class HostBuffer:
 
         tn = time.perf_counter_ns()
 
-        stat.load_GPU_timestamp("gradient", "copy", t0, tn)
+        stat.load_GPU_timestamp("gradient", "copy", t0, tn) 
+
 
 
     def h2d_synchronize(self, stream: torch.cuda.Stream) -> None:
@@ -783,6 +784,29 @@ class HostBuffer:
                 self._backend.wait(h)
             for i in loaded:
                 self._zero_initialized[i] = True
+
+
+    def storage_to_gpu(self,
+    phase,
+    fds,
+    gpu_target: Tensor,
+    stream: torch.cuda.Stream,) -> None:
+        assert self._backend is not None
+        assert gpu_target.is_cuda
+        stream.wait_stream(torch.cuda.current_stream(gpu_target.device))
+        
+        t0 = time.perf_counter_ns()
+        with torch.cuda.stream(stream):
+            if self._ops is not None:
+                self._ops.gather_activations_direct(fds, gpu_target)
+            else:
+                print("OPS not defined at storage to gpu")
+                exit(1)
+
+        tn = time.perf_counter_ns()
+
+        stat.load_GPU_timestamp("gradient", "copy", t0, tn) 
+
 
     def cpu_to_storage(self, pid: Optional[int] = None) -> None:
         """Flush partition(s) from host cache to NVMe via io_uring."""
