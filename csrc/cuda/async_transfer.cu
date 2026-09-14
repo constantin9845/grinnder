@@ -182,6 +182,23 @@ void close_files(const std::vector<int>& fds) {
   }
 }
 
+#include <torch/extension.h>
+#include <c10/cuda/CUDAStream.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <cuda_runtime.h>
+#include <cufile.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <vector>
+#include <string>
+#include <unordered_map>
+#include <cstring>
+#include <cstdlib>
+
+#define MAX_BATCH_SIZE 4096
+
+extern std::unordered_map<int, CUfileHandle_t> g_cufile_handles;
+
 void gather_partitions_direct(
     int pid,
     const std::vector<int>& fds,
@@ -213,65 +230,84 @@ void gather_partitions_direct(
     int64_t target_nodes = target_file_size / row_bytes;
 
     int64_t curr_offset = target_nodes;
+    size_t total_num_reads = 0;
+
     for (size_t i = 0; i < num_parts; ++i) {
       if (static_cast<int>(i) != pid && boundaries[i].defined() && boundaries[i].numel() > 0) {
         part_offsets[i] = curr_offset;
         curr_offset += boundaries[i].numel();
+        total_num_reads += boundaries[i].numel();
       }
     }
 
     AT_ASSERTM(curr_offset == total_rows, "Gather offset mismatch with destination size");
 
-    // 1. Direct GDS read for target partition (reuses existing registered handle)
+    // 1. Direct GDS read for target partition
     ssize_t ret = cuFileRead(target_handle, dst_raw, target_file_size, 0, 0);
     AT_ASSERTM(ret == target_file_size, "GDS Read failed for target partition");
 
-    // 2. Read boundary partitions using existing handles
-    std::vector<std::future<void>> futures;
-    
+    if (total_num_reads == 0) return;
+
+    // -------------------------------------------------------------------
+    // 2. Prepare full params list (matching benchmark calloc allocation)
+    // -------------------------------------------------------------------
+    CUfileIOParams_t *io_params = (CUfileIOParams_t*)calloc(total_num_reads, sizeof(CUfileIOParams_t));
+    AT_ASSERTM(io_params != nullptr, "Failed to allocate memory for io_params");
+
+    size_t param_idx = 0;
     for (size_t i = 0; i < num_parts; ++i) {
       if (static_cast<int>(i) == pid || !boundaries[i].defined() || boundaries[i].numel() == 0) {
         continue;
       }
 
-      futures.push_back(std::async(std::launch::async, [=, &boundaries]() {
-        int fd = fds[i];
-        CUfileHandle_t handle = g_cufile_handles[fd];
+      int fd = fds[i];
+      CUfileHandle_t handle = g_cufile_handles[fd];
 
-        auto bndry = boundaries[i].to(at::kCPU).contiguous();
-        const int64_t* idx_ptr = bndry.data_ptr<int64_t>();
-        int64_t num_boundary_nodes = bndry.numel();
-        int64_t start_row_offset = part_offsets[i];
+      auto bndry = boundaries[i].to(at::kCPU).contiguous();
+      const int64_t* idx_ptr = bndry.data_ptr<int64_t>();
+      int64_t num_boundary_nodes = bndry.numel();
+      int64_t start_row_offset = part_offsets[i];
 
-        int64_t idx = 0;
-        while (idx < num_boundary_nodes) {
-          int64_t range_start_node = idx_ptr[idx];
-          int64_t range_len = 1;
-
-          while (idx + range_len < num_boundary_nodes && 
-                 idx_ptr[idx + range_len] == range_start_node + range_len) {
-            range_len++;
-          }
-
-          off_t file_offset = range_start_node * row_bytes;
-          size_t read_bytes = range_len * row_bytes;
-          uint8_t* dst_ptr = dst_raw + ((start_row_offset + idx) * row_bytes);
-
-          cuFileRead(handle, dst_ptr, read_bytes, file_offset, 0);
-
-          idx += range_len;
-        }
-      }));
+      for (int64_t idx = 0; idx < num_boundary_nodes; ++idx) {
+        io_params[param_idx].mode = CUFILE_BATCH;
+        io_params[param_idx].opcode = CU_FILE_READ;
+        io_params[param_idx].fh = handle;
+        io_params[param_idx].u.batch.devPtr_base = dst_raw;
+        io_params[param_idx].u.batch.devPtr_offset = (start_row_offset + idx) * row_bytes;
+        io_params[param_idx].u.batch.file_offset = idx_ptr[idx] * row_bytes;
+        io_params[param_idx].u.batch.size = row_bytes;
+        param_idx++;
+      }
     }
 
-    for (auto& f : futures) {
-      f.get();
+    // -------------------------------------------------------------------
+    // 3. Allocate temporary workspace & process in MAX_BATCH_SIZE (4096)
+    //    (Exact 1:1 match with your test 2 benchmark submission structure)
+    // -------------------------------------------------------------------
+    CUfileBatchHandle_t batch_handle;
+    CUfileError_t status = cuFileBatchIOSetUp(&batch_handle, MAX_BATCH_SIZE);
+    AT_ASSERTM(status.err == CU_FILE_SUCCESS, "cuFileBatchIOSetUp failed");
+
+    CUfileIOEvents_t events[MAX_BATCH_SIZE];
+
+    for (size_t offset_idx = 0; offset_idx < total_num_reads; offset_idx += MAX_BATCH_SIZE) {
+      unsigned int current_batch_size = (total_num_reads - offset_idx > MAX_BATCH_SIZE)
+                                        ? MAX_BATCH_SIZE
+                                        : (unsigned int)(total_num_reads - offset_idx);
+
+      status = cuFileBatchIOSubmit(batch_handle, current_batch_size, &io_params[offset_idx], 0);
+      AT_ASSERTM(status.err == CU_FILE_SUCCESS, "cuFileBatchIOSubmit failed");
+
+      unsigned int completed = current_batch_size;
+      status = cuFileBatchIOGetStatus(batch_handle, current_batch_size, &completed, events, NULL);
+      AT_ASSERTM(status.err == CU_FILE_SUCCESS, "cuFileBatchIOGetStatus failed");
     }
 
-    cudaStreamSynchronize(stream);
+    // Cleanup batch resources
+    cuFileBatchIODestroy(batch_handle);
+    free(io_params);
   });
 }
-
 
 
 void scatter_partitions(int pid, torch::Tensor src,
