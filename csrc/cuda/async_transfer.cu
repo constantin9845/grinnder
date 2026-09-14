@@ -195,7 +195,7 @@ void close_files(const std::vector<int>& fds) {
 #include <cstring>
 #include <cstdlib>
 
-#define MAX_BATCH_SIZE 4096
+#define MAX_BATCH_SIZE 256
 
 extern std::unordered_map<int, CUfileHandle_t> g_cufile_handles;
 
@@ -270,7 +270,7 @@ void gather_partitions_direct(
 
       for (int64_t idx = 0; idx < num_boundary_nodes; ++idx) {
         io_params[param_idx].mode = CUFILE_BATCH;
-        io_params[param_idx].opcode = CU_FILE_READ;
+        io_params[param_idx].opcode = CUFILE_READ;
         io_params[param_idx].fh = handle;
         io_params[param_idx].u.batch.devPtr_base = dst_raw;
         io_params[param_idx].u.batch.devPtr_offset = (start_row_offset + idx) * row_bytes;
@@ -375,3 +375,6 @@ void scatter_partitions(int pid, torch::Tensor src,
     });
   });
 }
+
+
+// python3 setup.py build_ext --inplace
