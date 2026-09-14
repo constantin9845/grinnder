@@ -129,22 +129,6 @@ class DeviceBuffer:
             self.allocate(pid)
             host_buffer.async_gather_direct(phase, fds, pid, self._tensors[pid], boundaries, stream)
 
-
-    def storage_to_gpu(
-            self,
-            phase,
-            pid,
-            host_buffer,
-            gpu_target: Tensor,
-            stream: torch.cuda.Stream,
-        ) -> None:
-            """Allocate GPU tensor and gather from host partitions.
-    
-            Combines allocate() + host_buffer.async_gather() for convenience.
-            """
-            self.allocate(pid)
-            host_buffer.storage_to_gpu(phase, pid, gpu_target, stream)
-
     def h2d_synchronize(self, stream: torch.cuda.Stream) -> None:
         """Wait for H2D operations to complete.
 

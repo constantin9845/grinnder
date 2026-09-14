@@ -762,7 +762,6 @@ class Trainer:
         self.host_features[-1].storage_to_gpu(
             phase="loss", 
             pid=first_pid, 
-            host_buffer=self.host_features[3], 
             gpu_target=act_first,
             stream=self.streams.h2d[0]
         )
@@ -787,8 +786,7 @@ class Trainer:
                 
                 self.host_features[-1].storage_to_gpu(
                     phase="loss", 
-                    pid=next_pid, 
-                    host_buffer=self.host_features[3], 
+                    pid=next_pid,
                     gpu_target=act_next,
                     stream=self.streams.h2d[(i + 1) % pool_size]
                 )
@@ -845,7 +843,6 @@ class Trainer:
                 self.host_features[-1].storage_to_gpu(
                     phase="loss", 
                     pid=next_pid, 
-                    host_buffer=self.host_features[3], 
                     gpu_target=act_next,
                     stream=self.streams.h2d[(i + 1) % pool_size]
                 )
