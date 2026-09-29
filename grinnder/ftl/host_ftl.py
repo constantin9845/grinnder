@@ -38,16 +38,6 @@ class FTL:
             for lba, ppa in enumerate(self.mapping_table)
         }
 
-        print(f"Device : {device}")
-        for i in self.mapping_table:
-            print(f"{i.get_data()}")
-
-        print("Index test:")
-        print(self.ppa_to_lba(PPA([3, 3, 0, 63, 63, 0, 1], self.ssd_data)))
-        print(self.ppa_to_lba(self.mapping_table[-1]))
-        print(self.ppa_to_lba(PPA([3, 3, 0, 63, 61, 0, 1], self.ssd_data)))
-        print(self.ppa_to_lba(PPA([0, 0, 0, 0, 16, 0, 1], self.ssd_data)))
-
     def open_device(self, device):
         # open if closed
         pass
@@ -80,7 +70,6 @@ class FTL:
         luns_per_channel = self.layout['lun']
         for lun in range(luns_per_channel):
             self.init_planes([channel, lun], map)
-
 
     def init_planes(self, data, map):
         planes_per_lun = self.layout['plane']
