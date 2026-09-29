@@ -29,7 +29,7 @@ import ppa
 class FTL:
 
     def __init__(self, device):
-        self.layout = self.get_flash_layout(self, device)
+        self.layout = self.get_flash_layout(device)
         self.mapping_table = self.generate_map(self)
 
         print(f"Device : {device}")
