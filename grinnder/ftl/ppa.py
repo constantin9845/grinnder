@@ -15,4 +15,23 @@ class PPA:
         return [self.ch, self.lun, self.pl, self.blk, self.pg, self.sec, self.rsv]
 
     def get_index(self):
-        return self.ch *self.lun *self.pl *self.blk *self.pg *self.sec
+        t = 0
+        if self.ch != 0:
+            t = self.ch
+
+        if self.lun != 0:
+            t *= self.lun
+
+        if self.pl != 0:
+            t *= self.pl
+
+        if self.blk != 0:
+            t *= self.blk
+
+        if self.pg != 0:
+            t *= self.pg
+
+        if self.sec != 0:
+            t *= self.sec
+
+        return t
