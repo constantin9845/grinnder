@@ -23,18 +23,7 @@ PPA:
     CHANNEL
 """
 
-class ppa:
-    def __init__(self, data):
-        self.ch = data[0]
-        self.lun = data[1]
-        self.pl = data[2]
-        self.blk = data[3]
-        self.pg = data[4]
-        self.sec = data[5]
-        self.rsv = 1
-
-    def get_data(self):
-        return [self.ch, self.lun, self.pl, self.blk, self.pg, self.sec, self.rsv]
+import ppa
 
 
 class FTL:
@@ -57,11 +46,11 @@ class FTL:
     def get_flash_layout(self, device):
         # send admin query to ssd
         t = {
-            "ch" : 8,
-            "lun" : 8,
+            "ch" : 4,
+            "lun" : 4,
             "plane" : 1,
-            "block" : 512,
-            "page" : 512,
+            "block" : 64,
+            "page" : 64,
             "sector" : 1
         }
         return t
