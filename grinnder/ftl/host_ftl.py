@@ -30,7 +30,7 @@ class FTL:
 
     def __init__(self, device):
         self.layout = self.get_flash_layout(device)
-        self.mapping_table = self.generate_map(self)
+        self.mapping_table = self.generate_map()
 
         print(f"Device : {device}")
         print(self.mapping_table)
