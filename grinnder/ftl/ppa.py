@@ -21,24 +21,27 @@ class PPA:
         self.npg = ssd_data[4]
         self.nsec = ssd_data[5]
 
-        self.pages_per_plane = self.npg * self.nblk
-        self.pages_per_lun = self.pages_per_plane * self.npl
-        self.pages_per_ch = self.pages_per_lun * self.nlun
-        self.tt_pages = self.pages_per_ch * self.nch
+        self.sec_per_pg    = self.nsec
+        self.sec_per_blk   = self.sec_per_pg  * self.npg
+        self.sec_per_pl    = self.sec_per_blk * self.nblk
+        self.sec_per_lun   = self.sec_per_pl  * self.npl
+        self.sec_per_ch    = self.sec_per_lun * self.nlun
+        self.total_sectors = self.sec_per_ch  * self.nch
 
     def get_data(self):
         return [self.ch, self.lun, self.pl, self.blk, self.pg, self.sec, self.rsv]
 
     def get_index(self):
 
-        pgidx = (
-            (self.nch * self.pages_per_ch) 
-            + (self.nlun * self.pages_per_lun) 
-            + (self.npl * self.pages_per_plane) 
-            + (self.nblk * self.npg) 
-            + self.pg)
+        lba = (
+            (self.ch * self.sec_per_ch) 
+            + (self.lun * self.sec_per_lun) 
+            + (self.pl * self.sec_per_pl) 
+            + (self.blk * self.sec_per_blk) 
+            + (self.pg * self.sec_per_pg) 
+            + self.sec)
         
-        if pgidx > self.tt_pages:
-            print(f"Invalid pgidx = {pgidx}")
+        if lba > self.total_sectors:
+            print(f"Invalid lba = {lba}")
 
-        return pgidx
+        return lba

@@ -33,6 +33,11 @@ class FTL:
         self.ssd_data = [self.layout['ch'], self.layout['lun'], self.layout['plane'], self.layout['block'], self.layout['page'], self.layout['sector']]
         self.mapping_table = self.generate_map()
 
+        self.reverse_table = {
+            tuple(ppa.get_data()[:6]): lba 
+            for lba, ppa in enumerate(self.mapping_table)
+        }
+
         print(f"Device : {device}")
         for i in self.mapping_table:
             print(f"{i.get_data()}")
@@ -103,7 +108,8 @@ class FTL:
         return self.mapping_table[lba]
 
     def ppa_to_lba(self, ppa):
-        return ppa.get_index()
+        ppa_key = tuple(ppa.get_data()[:6])
+        return self.reverse_table.get(ppa_key, None)
 
 
 
