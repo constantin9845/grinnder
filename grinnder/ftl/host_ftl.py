@@ -23,7 +23,7 @@ PPA:
     CHANNEL
 """
 
-import ppa
+from ppa import PPA
 
 
 class FTL:
@@ -88,7 +88,7 @@ class FTL:
         sectors_per_page = self.layout['sector']
         for sector in range(sectors_per_page):
             full = data + [sector]
-            map.append(ppa(full))
+            map.append(PPA(full))
             print(f"Created PPA = {map[-1].get_data()}")
 
 

@@ -1,7 +1,7 @@
 
 import ctypes
 
-class ppa:
+class PPA:
     def __init__(self, data):
         self.ch = data[0]
         self.lun = data[1]
@@ -11,5 +11,5 @@ class ppa:
         self.sec = data[5]
         self.rsv = 1
 
-    def get_data(self):
+    def __repr__(self):
         return [self.ch, self.lun, self.pl, self.blk, self.pg, self.sec, self.rsv]
