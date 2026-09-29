@@ -36,6 +36,11 @@ class FTL:
         for i in self.mapping_table:
             print(f"{i.get_data()}")
 
+        print("Index test:")
+        print(self.ppa_to_lba(PPA([3, 3, 0, 63, 63, 0, 1])))
+        print(self.ppa_to_lba(PPA([3, 3, 0, 63, 61, 0, 1])))
+        print(self.ppa_to_lba(PPA([0, 0, 0, 0, 16, 0, 1])))
+
     def open_device(self, device):
         # open if closed
         pass
@@ -93,10 +98,10 @@ class FTL:
 
 
     def lba_to_ppa(self, lba):
-        pass
+        return self.mapping_table[lba]
 
     def ppa_to_lba(self, ppa):
-        pass
+        return self.mapping_table[ppa.get_index()]
 
 
 

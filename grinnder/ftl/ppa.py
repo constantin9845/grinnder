@@ -13,3 +13,6 @@ class PPA:
 
     def get_data(self):
         return [self.ch, self.lun, self.pl, self.blk, self.pg, self.sec, self.rsv]
+
+    def get_index(self):
+        return self.ch *self.lun *self.pl *self.blk *self.pg *self.sec
