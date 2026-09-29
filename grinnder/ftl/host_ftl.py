@@ -34,7 +34,7 @@ class ppa:
         self.rsv = 1
 
     def get_data(self):
-        return [self.blk, self.pg, self.sec, self.pl, self.lun, self.ch, self.rsv]
+        return [self.ch, self.lun, self.pl, self.blk, self.pg, self.sec, self.rsv]
 
 
 class FTL:
