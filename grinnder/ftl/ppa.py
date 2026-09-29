@@ -11,5 +11,5 @@ class PPA:
         self.sec = data[5]
         self.rsv = 1
 
-    def __repr__(self):
+    def get_data(self):
         return [self.ch, self.lun, self.pl, self.blk, self.pg, self.sec, self.rsv]
