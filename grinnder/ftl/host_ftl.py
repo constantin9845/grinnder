@@ -38,6 +38,7 @@ class FTL:
 
         print("Index test:")
         print(self.ppa_to_lba(PPA([3, 3, 0, 63, 63, 0, 1])))
+        print(self.ppa_to_lba(self.mapping_table[-1]))
         print(self.ppa_to_lba(PPA([3, 3, 0, 63, 61, 0, 1])))
         print(self.ppa_to_lba(PPA([0, 0, 0, 0, 16, 0, 1])))
 
