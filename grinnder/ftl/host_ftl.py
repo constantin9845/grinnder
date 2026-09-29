@@ -100,6 +100,7 @@ class FTL:
         for sector in range(sectors_per_page):
             full = data + [sector]
             map.append(ppa(full))
+            print(f"Created PPA = {map[-1].get_data()}")
 
 
     def lba_to_ppa(self, lba):
