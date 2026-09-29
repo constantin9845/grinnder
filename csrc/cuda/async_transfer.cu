@@ -282,7 +282,6 @@ void gather_partitions_direct(
 
     // -------------------------------------------------------------------
     // 3. Allocate temporary workspace & process in MAX_BATCH_SIZE (4096)
-    //    (Exact 1:1 match with your test 2 benchmark submission structure)
     // -------------------------------------------------------------------
     CUfileBatchHandle_t batch_handle;
     CUfileError_t status = cuFileBatchIOSetUp(&batch_handle, MAX_BATCH_SIZE);

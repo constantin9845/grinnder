@@ -30,6 +30,7 @@ class FTL:
 
     def __init__(self, device):
         self.layout = self.get_flash_layout(device)
+        self.ssd_data = [self.layout['ch'], self.layout['lun'], self.layout['plane'], self.layout['block'], self.layout['page'], self.layout['sector']]
         self.mapping_table = self.generate_map()
 
         print(f"Device : {device}")
@@ -95,7 +96,7 @@ class FTL:
         sectors_per_page = self.layout['sector']
         for sector in range(sectors_per_page):
             full = data + [sector]
-            map.append(PPA(full))
+            map.append(PPA(full, self.ssd_data))
 
 
     def lba_to_ppa(self, lba):
