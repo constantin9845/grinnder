@@ -101,7 +101,7 @@ class FTL:
         return self.mapping_table[lba]
 
     def ppa_to_lba(self, ppa):
-        return self.mapping_table[ppa.get_index()]
+        return ppa.get_index()
 
 
 
