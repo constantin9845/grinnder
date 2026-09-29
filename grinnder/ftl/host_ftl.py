@@ -33,7 +33,8 @@ class FTL:
         self.mapping_table = self.generate_map()
 
         print(f"Device : {device}")
-        print(self.mapping_table)
+        for i in self.mapping_table:
+            print(f"{i.get_data()}")
 
     def open_device(self, device):
         # open if closed
