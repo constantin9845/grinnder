@@ -134,10 +134,10 @@ class FTL:
     def get_flash_layout(self, device):
         # send admin query to ssd
         t = {
-            "ch" : 4,
-            "lun" : 4,
+            "ch" : 8,
+            "lun" : 8,
             "plane" : 1,
-            "block" : 256,
+            "block" : 512,
             "page" : 512,
             "sector" : 1,
             "sector_size" : 4096
