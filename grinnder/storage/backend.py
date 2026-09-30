@@ -169,7 +169,7 @@ class StorageBackend:
 
         print(tensor)
         print(len(tensor))
-        host_ftl.map_tensor(file_id, tensor, 4096)
+        host_ftl.map_tensor(file_id, tensor)
         exit(0)
 
         with open(path, "wb") as f:
