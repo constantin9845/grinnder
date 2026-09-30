@@ -17,6 +17,7 @@ from torch import Tensor
 
 from grinnder.utils import ensure_dir
 from grinnder.stats import stat
+from grinnder.ftl import ftl
 
 
 class StorageBackend:
@@ -168,6 +169,7 @@ class StorageBackend:
 
         print(tensor)
         print(len(tensor))
+        ftl.map_tensor(file_id, tensor, 4096)
         exit(0)
 
         with open(path, "wb") as f:

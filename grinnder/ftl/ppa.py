@@ -1,5 +1,31 @@
-
 import ctypes
+
+# FEMU ppa format
+BLK_BITS = 16
+PG_BITS = 16
+SEC_BITS = 8
+PL_BITS = 8
+LUN_BITS = 8
+CH_BITS = 7
+RSV_BITS = 1
+
+class PPA_Bitfield(ctypes.LittleEndianStructure):
+    _fields_ = [
+        ("blk", ctypes.c_uint64, BLK_BITS),
+        ("pg", ctypes.c_uint64, PG_BITS),
+        ("sec", ctypes.c_uint64, SEC_BITS),
+        ("pl", ctypes.c_uint64, PL_BITS),
+        ("lun", ctypes.c_uint64, LUN_BITS),
+        ("ch", ctypes.c_uint64, CH_BITS),
+        ("rsv", ctypes.c_uint64, RSV_BITS),
+    ]
+
+class StructPPA(ctypes.Union):
+    _anonymous_ = ("g",)
+    _fields_ = [
+        ("g", PPA_Bitfield),
+        ("ppa", ctypes.c_uint64),
+    ]
 
 class PPA:
     def __init__(self, data, ssd_data):
@@ -12,6 +38,15 @@ class PPA:
         self.pg = data[4]
         self.sec = data[5]
         self.rsv = 1
+
+        self._c_ppa = StructPPA()
+        self._c_ppa.blk = self.blk
+        self._c_ppa.pg = self.pg
+        self._c_ppa.sec = self.sec
+        self._c_ppa.pl = self.pl
+        self._c_ppa.lun = self.lun
+        self._c_ppa.ch = self.ch
+        self._c_ppa.rsv = self.rsv
 
         # ssd data
         self.nch = ssd_data[0]
@@ -30,6 +65,24 @@ class PPA:
 
     def get_data(self):
         return [self.ch, self.lun, self.pl, self.blk, self.pg, self.sec, self.rsv]
+
+    def to_uint64(self):
+        return self._c_ppa.ppa
+
+    @classmethod
+    def from_uint64(cls, raw_ppa):
+        c_ppa = StructPPA(ppa=raw_ppa)
+        return cls(
+            [
+                c_ppa.ch,
+                c_ppa.lun,
+                c_ppa.pl,
+                c_ppa.blk,
+                c_ppa.pg,
+                c_ppa.sec,
+                c_ppa.rsv,
+            ]
+        )
 
     def get_index(self):
 
