@@ -110,7 +110,8 @@ class FTL:
             self.layout['plane'], 
             self.layout['block'], 
             self.layout['page'], 
-            self.layout['sector']
+            self.layout['sector'],
+            self.layout['sector_size'],
         ]
         self.mapping_table = self.generate_map()
 
@@ -136,9 +137,10 @@ class FTL:
             "ch" : 4,
             "lun" : 4,
             "plane" : 1,
-            "block" : 64,
-            "page" : 64,
-            "sector" : 1
+            "block" : 256,
+            "page" : 512,
+            "sector" : 1,
+            "sector_size" : 4096
         }
         return t
 
@@ -184,7 +186,7 @@ class FTL:
         ppa_key = tuple(ppa.get_data()[:6])
         return self.reverse_table.get(ppa_key, None)
 
-    def map_tensor(self, file_id, tensor, sector_size):
+    def map_tensor(self, file_id, tensor):
 
         if file_id in self.tensor_table:
             raise KeyError(f"Tensor '{file_id}' is already registered!")
@@ -193,7 +195,7 @@ class FTL:
         element_size = tensor.element_size()  
         total_elements = tensor.numel()
         total_bytes = total_elements * element_size
-        sectors_needed = (total_bytes + sector_size - 1) // sector_size
+        sectors_needed = (total_bytes + self.ssd_data[-1] - 1) // self.ssd_data[-1]
 
         start_lba = self.next_free_lba
         end_lba = start_lba + sectors_needed - 1
@@ -213,7 +215,7 @@ class FTL:
             "num_elements": total_elements,
             "element_size": element_size,
             "total_bytes": total_bytes,
-            "sector_size": sector_size,
+            "sector_size": self.ssd_data[-1],
             "start_lba": start_lba,
             "end_lba": end_lba,
             "num_sectors": sectors_needed,
