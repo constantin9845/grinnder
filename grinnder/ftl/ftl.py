@@ -264,6 +264,20 @@ class FTL:
 
         self._ops.device_write(self.device_fd, tensor, ppa_tensor, self.ssd_data[-1])
 
+    def verify_write(self, meta, tensor, file_id):
+        assert tensor.is_cuda, "device_read_and_verify requires a CUDA tensor"
+        assert tensor.is_contiguous(), "device_read_and_verify requires contiguous tensor"
+
+        ppa_tensor = torch.tensor(meta['ppa_uint64_list'], dtype=torch.int64, device="cpu")
+
+        is_correct = self._ops.device_read_and_verify(
+            self.device_fd,
+            tensor,
+            ppa_tensor,
+            self.ssd_data[-1]  # sector size
+        )
+        return is_correct
+
 
 
 

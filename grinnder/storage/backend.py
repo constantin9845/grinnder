@@ -169,6 +169,10 @@ class StorageBackend:
 
         meta = host_ftl.map_tensor(file_id, tensor)
         host_ftl.device_write(meta, tensor, file_id)
+
+        verify = host_ftl.verify_write(meta, tensor, file_id)
+        assert verify, f"Data verification failed for file_id={file_id}! DRAM contents corrupted."
+
         return 0
 
 
