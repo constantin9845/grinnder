@@ -245,4 +245,4 @@ class FTL:
 
 
 
-ftl = FTL(None)
+host_ftl = FTL(None)
