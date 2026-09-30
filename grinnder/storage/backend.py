@@ -166,6 +166,10 @@ class StorageBackend:
         nbytes = tensor.numel() * tensor.element_size()
         buffer = (ctypes.c_char * nbytes).from_address(ptr)
 
+        print(tensor)
+        print(len(tensor))
+        exit(0)
+
         with open(path, "wb") as f:
             f.write(buffer)
 
