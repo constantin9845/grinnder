@@ -167,10 +167,9 @@ class StorageBackend:
         nbytes = tensor.numel() * tensor.element_size()
         buffer = (ctypes.c_char * nbytes).from_address(ptr)
 
-        print(tensor)
-        print(len(tensor))
         host_ftl.map_tensor(file_id, tensor)
-        exit(0)
+        return 0
+
 
         with open(path, "wb") as f:
             f.write(buffer)
