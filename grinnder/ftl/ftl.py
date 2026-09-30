@@ -1,13 +1,22 @@
 import torch
+import os
 import ctypes
+
+def _load_ops():
+    """Lazy-load C++ extension ops."""
+    try:
+        import grinnder._C as _C
+        return _C
+    except ImportError:
+        return None
 
 # FEMU ppa format
 BLK_BITS = 16
 PG_BITS = 16
 SEC_BITS = 8
-PL_BITS = 8
-LUN_BITS = 8
-CH_BITS = 7
+PL_BITS = 4
+LUN_BITS = 7
+CH_BITS = 12
 RSV_BITS = 1
 
 class PPA_Bitfield(ctypes.LittleEndianStructure):
@@ -123,13 +132,16 @@ class FTL:
         self.next_free_lba = 0
         self.tensor_table = {}
 
+        self._ops = _load_ops()
+
+        self.device_fd = self.open_device("/dev/nvme0n1")
+
     def open_device(self, device):
         # open if closed
-        pass
+        return os.open(device, os.RDWR | os.O_DIRECT)
 
     def close_device(self, device):
-        # close if open
-        pass
+        device.close()
 
     def get_flash_layout(self, device):
         # send admin query to ssd
@@ -243,6 +255,14 @@ class FTL:
         if file_id in self.tensor_table:
             del self.tensor_table[file_id]
             print(f"[FTL] Unmapped tensor '{file_id}'")
+
+    def device_write(self, meta, tensor, file_id):
+        assert tensor.is_cuda
+        assert tensor.is_contiguous()
+
+        ppa_tensor = torch.tensor(meta['ppa_uint64_list'], dtype=torch.int64, device="cpu")
+
+        self._ops.device_write(self.device_fd, tensor, ppa_tensor, self.ssd_data[-1])
 
 
 

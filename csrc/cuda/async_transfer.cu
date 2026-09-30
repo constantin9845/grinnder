@@ -359,6 +359,75 @@ void gather_activations_direct(
 }
 
 
+
+extern std::unordered_map<int, CUfileHandle_t> g_cufile_handles3;
+
+void device_write(
+    int raw_nvme_fd,
+    torch::Tensor src,
+    torch::Tensor ppa_list,
+    int sector_size
+){
+
+    AT_ASSERTM(src.is_cuda(), "Source tensor must be on CUDA device");
+    AT_ASSERTM(src.is_contiguous(), "Source tensor must be contiguous");
+    AT_ASSERTM(ppa_list.is_contiguous(), "PPA tensor must be contiguous");
+
+    auto stream = at::cuda::getCurrentCUDAStream(src.get_device());
+    c10::cuda::CUDAStreamGuard guard(stream);
+
+    CUfileHandle_t nvme_handle = g_cufile_handles3[raw_nvme_fd];
+    uint8_t* src_raw = reinterpret_cast<uint8_t*>(src.data_ptr());
+
+    int64_t total_bytes = src.numel() * src.element_size();
+    int64_t num_sectors = ppa_list.numel();
+
+    const int64_t* ppa_ptr = ppa_list.data_ptr<int64_t>();
+
+    CUfileIOParams_t *io_params = (CUfileIOParams_t*)calloc(num_sectors, sizeof(CUfileIOParams_t));
+    AT_ASSERTM(io_params != nullptr, "Failed to allocate io_params");
+
+    for (int64_t i = 0; i < num_sectors; ++i) {
+        uint64_t raw_ppa = static_cast<uint64_t>(ppa_ptr[i]);
+
+        int64_t dev_offset = i * sector_size;
+        int64_t write_bytes = std::min<int64_t>(sector_size, total_bytes - dev_offset);
+
+        io_params[i].mode = CUFILE_BATCH;
+        io_params[i].opcode = CUFILE_WRITE;
+        io_params[i].fh = nvme_handle;
+        io_params[i].u.batch.devPtr_base = src_raw;
+        io_params[i].u.batch.devPtr_offset = dev_offset;
+        
+        // Encode 64-bit PPA as byte offset for NVMe driver
+        io_params[i].u.batch.file_offset = static_cast<off_t>(raw_ppa * sector_size);
+        io_params[i].u.batch.size = write_bytes;
+    }
+
+    CUfileBatchHandle_t batch_handle;
+    CUfileError_t status = cuFileBatchIOSetUp(&batch_handle, MAX_BATCH_SIZE);
+    AT_ASSERTM(status.err == CU_FILE_SUCCESS, "cuFileBatchIOSetUp failed");
+
+    CUfileIOEvents_t events[MAX_BATCH_SIZE];
+
+    for (size_t offset_idx = 0; offset_idx < num_sectors; offset_idx += MAX_BATCH_SIZE) {
+        unsigned int current_batch_size = (num_sectors - offset_idx > MAX_BATCH_SIZE)
+                                         ? MAX_BATCH_SIZE
+                                         : (unsigned int)(num_sectors - offset_idx);
+
+        status = cuFileBatchIOSubmit(batch_handle, current_batch_size, &io_params[offset_idx], 0);
+        AT_ASSERTM(status.err == CU_FILE_SUCCESS, "cuFileBatchIOSubmit write failed");
+
+        unsigned int completed = current_batch_size;
+        status = cuFileBatchIOGetStatus(batch_handle, current_batch_size, &completed, events, NULL);
+        AT_ASSERTM(status.err == CU_FILE_SUCCESS, "cuFileBatchIOGetStatus write failed");
+    }
+
+    cuFileBatchIODestroy(batch_handle);
+    free(io_params);
+
+}
+
 void scatter_partitions(int pid, torch::Tensor src,
                         std::vector<torch::Tensor> dsts,
                         std::vector<torch::Tensor> boundaries) {
