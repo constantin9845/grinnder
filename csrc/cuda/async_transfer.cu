@@ -363,7 +363,7 @@ void device_write(
     auto stream = at::cuda::getCurrentCUDAStream(src.get_device());
     c10::cuda::CUDAStreamGuard guard(stream);
 
-    CUfileHandle_t nvme_handle = get_cufile_handle(raw_nvme_fd);
+    CUfileHandle_t nvme_handle = raw_nvme_fd;
     uint8_t* src_raw = reinterpret_cast<uint8_t*>(src.data_ptr());
 
     int64_t total_bytes = src.numel() * src.element_size();
