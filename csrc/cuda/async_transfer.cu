@@ -69,6 +69,28 @@ void close_files(const std::vector<int>& fds) {
   }
 }
 
+int64_t register_fd(int raw_fd) {
+    CUfileDescr_t descr;
+    std::memset(&descr, 0, sizeof(descr));
+
+    // Handle type for standard Linux POSIX raw block devices / files
+    descr.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
+    descr.handle.fd = raw_fd;
+
+    CUfileHandle_t nvme_handle = nullptr;
+    CUfileError_t status = cuFileHandleRegister(&nvme_handle, &descr);
+
+    TORCH_CHECK(
+        status.err == CU_FILE_SUCCESS,
+        "cuFileHandleRegister failed for fd ", raw_fd,
+        " with error code: ", static_cast<int>(status.err)
+    );
+
+    // Cast the opaque struct pointer to int64_t for safely passing to Python
+    return static_cast<int64_t>(reinterpret_cast<uintptr_t>(nvme_handle));
+}
+
+
 static ThreadPool &getH2DPool() {
   static ThreadPool pool;
   return pool;
@@ -350,7 +372,7 @@ void gather_activations_direct(
 
 
 void device_write(
-    int raw_nvme_fd,
+    int64_t fd,
     torch::Tensor src,
     torch::Tensor ppa_list,
     int sector_size
@@ -363,7 +385,7 @@ void device_write(
     auto stream = at::cuda::getCurrentCUDAStream(src.get_device());
     c10::cuda::CUDAStreamGuard guard(stream);
 
-    CUfileHandle_t nvme_handle = raw_nvme_fd;
+    CUfileHandle_t nvme_handle = fd;
     uint8_t* src_raw = reinterpret_cast<uint8_t*>(src.data_ptr());
 
     int64_t total_bytes = src.numel() * src.element_size();
@@ -416,7 +438,7 @@ void device_write(
 }
 
 bool device_read_and_verify(
-    int raw_nvme_fd,
+    int64_t fd,
     torch::Tensor expected_src,  /* Ground truth tensor (on CUDA) */
     torch::Tensor ppa_list,      /* Tensor of uint64 PPAs */
     int sector_size
@@ -428,7 +450,7 @@ bool device_read_and_verify(
     auto stream = at::cuda::getCurrentCUDAStream(expected_src.get_device());
     c10::cuda::CUDAStreamGuard guard(stream);
 
-    CUfileHandle_t nvme_handle = get_cufile_handle(raw_nvme_fd);
+    CUfileHandle_t nvme_handle = fd;
 
     int64_t total_bytes = expected_src.numel() * expected_src.element_size();
     int64_t num_sectors = ppa_list.numel();

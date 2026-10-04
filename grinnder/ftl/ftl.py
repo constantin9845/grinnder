@@ -137,6 +137,7 @@ class FTL:
         self._ops = _load_ops()
 
         self.device_fd = self.open_device("/dev/nvme0n1")
+        self.cuFD = self._ops.register_fd(self.device_fd)
 
     def open_device(self, device):
         # open if closed
@@ -272,7 +273,7 @@ class FTL:
 
         ppa_tensor = self._convert_ppas_to_tensor(meta['ppa_uint64_list'])
 
-        self._ops.device_write(self.device_fd, tensor, ppa_tensor, self.ssd_data[-1])
+        self._ops.device_write(self.cuFD, tensor, ppa_tensor, self.ssd_data[-1])
 
     def verify_write(self, meta, tensor, file_id):
         assert tensor.is_cuda, "device_read_and_verify requires a CUDA tensor"
@@ -281,7 +282,7 @@ class FTL:
         ppa_tensor = self._convert_ppas_to_tensor(meta['ppa_uint64_list'])
 
         is_correct = self._ops.device_read_and_verify(
-            self.device_fd,
+            self.cuFD,
             tensor,
             ppa_tensor,
             self.ssd_data[-1]  # sector size

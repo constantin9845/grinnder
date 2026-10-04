@@ -44,3 +44,6 @@ void device_write(
     torch::Tensor ppa_list,
     int sector_size
 );
+
+
+int64_t register_fd(int raw_fd);
