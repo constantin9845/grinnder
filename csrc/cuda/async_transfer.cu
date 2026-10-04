@@ -404,7 +404,7 @@ void device_write(
 
         io_params[i].mode = CUFILE_BATCH;
         io_params[i].opcode = CUFILE_WRITE;
-        io_params[i].fh = fd;
+        io_params[i].fh = reinterpret_cast<CUfileHandle_t>(static_cast<uintptr_t>(fd));;
         io_params[i].u.batch.devPtr_base = src_raw;
         io_params[i].u.batch.devPtr_offset = dev_offset;
         
@@ -473,7 +473,7 @@ bool device_read_and_verify(
 
         io_params[i].mode = CUFILE_BATCH;
         io_params[i].opcode = CUFILE_READ; /* Reading back from NVMe to GPU */
-        io_params[i].fh = fd;
+        io_params[i].fh = reinterpret_cast<CUfileHandle_t>(static_cast<uintptr_t>(fd));;
         io_params[i].u.batch.devPtr_base = dst_raw;
         io_params[i].u.batch.devPtr_offset = dev_offset;
         
