@@ -496,7 +496,7 @@ bool device_read_and_verify(
 
         /* Validate individual batch status results */
         for (unsigned int e = 0; e < completed; ++e) {
-            AT_ASSERTM(events[e].status.err == CU_FILE_SUCCESS || events[e].status == CU_FILE_SUCCESS, "cuFile batch IO read event error");
+            AT_ASSERTM(events[e].status == CU_FILE_SUCCESS, "cuFile batch IO read event error");
         }
     }
 
