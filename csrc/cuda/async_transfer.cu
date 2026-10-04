@@ -197,8 +197,6 @@ void close_files(const std::vector<int>& fds) {
 
 #define MAX_BATCH_SIZE 256
 
-extern std::unordered_map<int, CUfileHandle_t> g_cufile_handles;
-
 void gather_partitions_direct(
     int pid,
     const std::vector<int>& fds,
@@ -308,9 +306,6 @@ void gather_partitions_direct(
   });
 }
 
-
-extern std::unordered_map<int, CUfileHandle_t> g_cufile_handles2;
-
 void gather_activations_direct(
     const std::string& filepath,
     torch::Tensor dst) {
@@ -360,8 +355,6 @@ void gather_activations_direct(
 
 
 
-extern std::unordered_map<int, CUfileHandle_t> g_cufile_handles3;
-
 void device_write(
     int raw_nvme_fd,
     torch::Tensor src,
@@ -376,7 +369,7 @@ void device_write(
     auto stream = at::cuda::getCurrentCUDAStream(src.get_device());
     c10::cuda::CUDAStreamGuard guard(stream);
 
-    CUfileHandle_t nvme_handle = g_cufile_handles3[raw_nvme_fd];
+    CUfileHandle_t nvme_handle = g_cufile_handles[raw_nvme_fd];
     uint8_t* src_raw = reinterpret_cast<uint8_t*>(src.data_ptr());
 
     int64_t total_bytes = src.numel() * src.element_size();
@@ -428,9 +421,6 @@ void device_write(
 
 }
 
-
-extern std::unordered_map<int, CUfileHandle_t> g_cufile_handles4;
-
 bool device_read_and_verify(
     int raw_nvme_fd,
     torch::Tensor expected_src,  /* Ground truth tensor (on CUDA) */
@@ -444,7 +434,7 @@ bool device_read_and_verify(
     auto stream = at::cuda::getCurrentCUDAStream(expected_src.get_device());
     c10::cuda::CUDAStreamGuard guard(stream);
 
-    CUfileHandle_t nvme_handle = g_cufile_handles3[raw_nvme_fd];
+    CUfileHandle_t nvme_handle = g_cufile_handles[raw_nvme_fd];
 
     int64_t total_bytes = expected_src.numel() * expected_src.element_size();
     int64_t num_sectors = ppa_list.numel();
