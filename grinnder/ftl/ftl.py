@@ -270,7 +270,7 @@ class FTL:
         assert not tensor.is_cuda, "device write uses cpu tensor"
         assert tensor.is_contiguous(), "device_read_and_verify requires contiguous tensor"
 
-        ppa_tensor = self._convert_ppas_to_tensor(meta['ppa_uint64_list'], dtype=torch.int64, device="cpu")
+        ppa_tensor = self._convert_ppas_to_tensor(meta['ppa_uint64_list'])
 
         self._ops.device_write(self.device_fd, tensor, ppa_tensor, self.ssd_data[-1])
 
@@ -278,7 +278,7 @@ class FTL:
         assert tensor.is_cuda, "device_read_and_verify requires a CUDA tensor"
         assert tensor.is_contiguous(), "device_read_and_verify requires contiguous tensor"
 
-        ppa_tensor = self._convert_ppas_to_tensor(meta['ppa_uint64_list'], dtype=torch.int64, device="cpu")
+        ppa_tensor = self._convert_ppas_to_tensor(meta['ppa_uint64_list'])
 
         is_correct = self._ops.device_read_and_verify(
             self.device_fd,
