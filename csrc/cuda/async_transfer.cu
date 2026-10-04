@@ -385,7 +385,7 @@ void device_write(
     auto stream = at::cuda::getCurrentCUDAStream(src.get_device());
     c10::cuda::CUDAStreamGuard guard(stream);
 
-    CUfileHandle_t nvme_handle = fd;
+    //CUfileHandle_t nvme_handle = fd;
     uint8_t* src_raw = reinterpret_cast<uint8_t*>(src.data_ptr());
 
     int64_t total_bytes = src.numel() * src.element_size();
@@ -404,7 +404,7 @@ void device_write(
 
         io_params[i].mode = CUFILE_BATCH;
         io_params[i].opcode = CUFILE_WRITE;
-        io_params[i].fh = nvme_handle;
+        io_params[i].fh = fd;
         io_params[i].u.batch.devPtr_base = src_raw;
         io_params[i].u.batch.devPtr_offset = dev_offset;
         
@@ -450,7 +450,7 @@ bool device_read_and_verify(
     auto stream = at::cuda::getCurrentCUDAStream(expected_src.get_device());
     c10::cuda::CUDAStreamGuard guard(stream);
 
-    CUfileHandle_t nvme_handle = fd;
+    //CUfileHandle_t nvme_handle = fd;
 
     int64_t total_bytes = expected_src.numel() * expected_src.element_size();
     int64_t num_sectors = ppa_list.numel();
@@ -473,7 +473,7 @@ bool device_read_and_verify(
 
         io_params[i].mode = CUFILE_BATCH;
         io_params[i].opcode = CUFILE_READ; /* Reading back from NVMe to GPU */
-        io_params[i].fh = nvme_handle;
+        io_params[i].fh = fd;
         io_params[i].u.batch.devPtr_base = dst_raw;
         io_params[i].u.batch.devPtr_offset = dev_offset;
         
