@@ -215,7 +215,7 @@ void gather_partitions_direct(
     std::vector<int64_t> part_offsets(num_parts, 0);
 
     int target_fd = fds[pid];
-    CUfileHandle_t target_handle = get_cufile_handle(target_fd)
+    CUfileHandle_t target_handle = get_cufile_handle(target_fd);
 
     off_t target_file_size = lseek(target_fd, 0, SEEK_END);
     int64_t target_nodes = target_file_size / row_bytes;
