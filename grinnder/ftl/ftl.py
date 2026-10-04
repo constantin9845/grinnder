@@ -1,6 +1,7 @@
 import torch
 import os
 import ctypes
+import numpy
 
 def _load_ops():
     """Lazy-load C++ extension ops."""
@@ -80,7 +81,7 @@ class PPA:
         return self._c_ppa.ppa
 
     @classmethod
-    def from_uint64(cls, raw_ppa):
+    def from_uint64(cls, raw_ppa, ssd_data=None):
         c_ppa = StructPPA(ppa=raw_ppa)
         return cls(
             [
@@ -91,7 +92,8 @@ class PPA:
                 c_ppa.pg,
                 c_ppa.sec,
                 c_ppa.rsv,
-            ]
+            ],
+            ssd_data=ssd_data
         )
 
     def get_index(self):
@@ -259,11 +261,16 @@ class FTL:
             del self.tensor_table[file_id]
             print(f"[FTL] Unmapped tensor '{file_id}'")
 
+
+    def _convert_ppas_to_tensor(self, ppa_list):
+        np_ppas = numpy.array(ppa_list, dtype=numpy.uint64).view(numpy.int64)
+        return torch.from_numpy(np_ppas)
+
     def device_write(self, meta, tensor, file_id):
         assert not tensor.is_cuda, "device write uses cpu tensor"
         assert tensor.is_contiguous(), "device_read_and_verify requires contiguous tensor"
 
-        ppa_tensor = torch.tensor(meta['ppa_uint64_list'], dtype=torch.int64, device="cpu")
+        ppa_tensor = self._convert_ppas_to_tensor(meta['ppa_uint64_list'], dtype=torch.int64, device="cpu")
 
         self._ops.device_write(self.device_fd, tensor, ppa_tensor, self.ssd_data[-1])
 
@@ -271,7 +278,7 @@ class FTL:
         assert tensor.is_cuda, "device_read_and_verify requires a CUDA tensor"
         assert tensor.is_contiguous(), "device_read_and_verify requires contiguous tensor"
 
-        ppa_tensor = torch.tensor(meta['ppa_uint64_list'], dtype=torch.int64, device="cpu")
+        ppa_tensor = self._convert_ppas_to_tensor(meta['ppa_uint64_list'], dtype=torch.int64, device="cpu")
 
         is_correct = self._ops.device_read_and_verify(
             self.device_fd,
