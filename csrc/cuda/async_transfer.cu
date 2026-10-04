@@ -4,6 +4,71 @@
 
 #include "../thread_pool.h"
 
+#include <fcntl.h>
+#include <unistd.h>
+#include <vector>
+#include <string>
+#include <unordered_map>
+#include <cstring>
+#include <torch/extension.h>
+#include <c10/cuda/CUDAStream.h>
+#include <c10/cuda/CUDAGuard.h> 
+#include <cuda_runtime.h>
+#include <cufile.h>
+#include <future>
+#include <cstdlib>
+#include <mutex>
+
+static std::unordered_map<int, CUfileHandle_t> g_cufile_handles;
+static std::mutex g_cufile_handles_mutex;
+
+static CUfileHandle_t get_cufile_handle(int fd) {
+  std::lock_guard<std::mutex> lock(g_cufile_handles_mutex);
+  auto it = g_cufile_handles.find(fd);
+  AT_ASSERTM(it != g_cufile_handles.end(), 
+             "File descriptor " + std::to_string(fd) + " not registered in g_cufile_handles");
+  return it->second;
+}
+
+std::vector<int> open_files(const std::vector<std::string>& file_paths) {
+  std::vector<int> fds;
+  fds.reserve(file_paths.size());
+
+  for (const auto& path : file_paths) {
+    int fd = open(path.c_str(), O_RDONLY | O_DIRECT);
+    AT_ASSERTM(fd >= 0, "Failed to open file with O_DIRECT: " + path);
+
+    CUfileDescr_t desc;
+    memset(&desc, 0, sizeof(CUfileDescr_t));
+    desc.handle.fd = fd;
+    desc.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
+
+    CUfileHandle_t handle;
+    CUfileError_t status = cuFileHandleRegister(&handle, &desc);
+    AT_ASSERTM(status.err == CU_FILE_SUCCESS, 
+               "cuFileHandleRegister failed for file: " + path);
+
+    {
+      std::lock_guard<std::mutex> lock(g_cufile_handles_mutex);
+      g_cufile_handles[fd] = handle;
+    }
+    fds.push_back(fd);
+  }
+  return fds;
+}
+
+void close_files(const std::vector<int>& fds) {
+  std::lock_guard<std::mutex> lock(g_cufile_handles_mutex);
+  for (int fd : fds) {
+    auto it = g_cufile_handles.find(fd);
+    if (it != g_cufile_handles.end()) {
+      cuFileHandleDeregister(it->second);
+      g_cufile_handles.erase(it);
+    }
+    close(fd);
+  }
+}
+
 static ThreadPool &getH2DPool() {
   static ThreadPool pool;
   return pool;
@@ -58,6 +123,7 @@ void h2d_copy_async(torch::Tensor src, torch::Tensor dst) {
 }
 
 
+// Default grinnder
 void gather_partitions(int pid, std::vector<torch::Tensor> srcs,
                        torch::Tensor dst,
                        std::vector<torch::Tensor> boundaries) {
@@ -121,94 +187,9 @@ void gather_partitions(int pid, std::vector<torch::Tensor> srcs,
 }
 
 
-
-#include <fcntl.h>
-#include <unistd.h>
-#include <vector>
-#include <string>
-#include <unordered_map>
-#include <cstring>
-#include <torch/extension.h>
-#include <c10/cuda/CUDAStream.h>
-#include <c10/cuda/CUDAGuard.h> 
-#include <cuda_runtime.h>
-#include <cufile.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <vector>
-#include <string>
-#include <future>
-#include <cstring>
-#include <mutex>
-
-// Global storage to keep track of active CUfile handles by file descriptor
-static std::unordered_map<int, CUfileHandle_t> g_cufile_handles;
-static std::mutex g_cufile_handles_mutex;
-
-static CUfileHandle_t get_cufile_handle(int fd) {
-  std::lock_guard<std::mutex> lock(g_cufile_handles_mutex);
-  auto it = g_cufile_handles.find(fd);
-  AT_ASSERTM(it != g_cufile_handles.end(), 
-             "File descriptor " + std::to_string(fd) + " not registered in g_cufile_handles");
-  return it->second;
-}
-
-// Opens files with O_DIRECT and registers them with GDS cuFile
-std::vector<int> open_files(const std::vector<std::string>& file_paths) {
-  std::vector<int> fds;
-  fds.reserve(file_paths.size());
-
-  for (const auto& path : file_paths) {
-    int fd = open(path.c_str(), O_RDONLY | O_DIRECT);
-    AT_ASSERTM(fd >= 0, "Failed to open file with O_DIRECT: " + path);
-
-    CUfileDescr_t desc;
-    memset(&desc, 0, sizeof(CUfileDescr_t));
-    desc.handle.fd = fd;
-    desc.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
-
-    CUfileHandle_t handle;
-    CUfileError_t status = cuFileHandleRegister(&handle, &desc);
-    AT_ASSERTM(status.err == CU_FILE_SUCCESS, 
-               "cuFileHandleRegister failed for file: " + path);
-
-    {
-      std::lock_guard<std::mutex> lock(g_cufile_handles_mutex);
-      g_cufile_handles[fd] = handle;
-    }
-    fds.push_back(fd);
-  }
-  return fds;
-}
-
-// Deregisters GDS handles and closes open file descriptors
-void close_files(const std::vector<int>& fds) {
-  std::lock_guard<std::mutex> lock(g_cufile_handles_mutex);
-  for (int fd : fds) {
-    auto it = g_cufile_handles.find(fd);
-    if (it != g_cufile_handles.end()) {
-      cuFileHandleDeregister(it->second);
-      g_cufile_handles.erase(it);
-    }
-    close(fd);
-  }
-}
-
-#include <torch/extension.h>
-#include <c10/cuda/CUDAStream.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <cuda_runtime.h>
-#include <cufile.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <vector>
-#include <string>
-#include <unordered_map>
-#include <cstring>
-#include <cstdlib>
-
 #define MAX_BATCH_SIZE 256
 
+// Read tensors directly from partitions
 void gather_partitions_direct(
     int pid,
     const std::vector<int>& fds,
@@ -317,6 +298,7 @@ void gather_partitions_direct(
     free(io_params);
   });
 }
+
 
 void gather_activations_direct(
     const std::string& filepath,
