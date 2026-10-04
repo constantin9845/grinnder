@@ -415,6 +415,8 @@ void device_write(
             " (PPA: ", raw_ppa, "). Expected ", write_bytes,
             " bytes, but wrote ", bytes_written
         );
+
+        printf("Wrote sector = %d\n", i);
     }
 }
 
