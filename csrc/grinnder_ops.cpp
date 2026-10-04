@@ -39,5 +39,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("open_files", &open_files, "Open and register GDS partition files (CUDA)");
   m.def("close_files", &close_files, "Deregister GDS handles and close file descriptors (CUDA)");
   m.def("device_write", &device_write, "Write CPU tensors to storage");
+  m.def("device_read_and_verify", &device_read_and_verify, "Write CPU tensors to storage and verify no corruption");
   m.def("register_fd", &register_fd, "register fd with CUfile");
 }

@@ -39,9 +39,16 @@ void h2d_synchronize();
 void d2h_synchronize();
 
 void device_write(
-    int raw_nvme_fd,
+    int64_t fd,
     torch::Tensor src,
     torch::Tensor ppa_list,
+    int sector_size
+);
+
+bool device_read_and_verify(
+    int64_t fd,
+    torch::Tensor expected_src,  /* Ground truth tensor (on CUDA) */
+    torch::Tensor ppa_list,      /* Tensor of uint64 PPAs */
     int sector_size
 );
 
