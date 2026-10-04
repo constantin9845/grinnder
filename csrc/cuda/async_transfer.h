@@ -37,3 +37,10 @@ void close_files(const std::vector<int>& fds);
 // Thread pool synchronization
 void h2d_synchronize();
 void d2h_synchronize();
+
+void device_write(
+    int raw_nvme_fd,
+    torch::Tensor src,
+    torch::Tensor ppa_list,
+    int sector_size
+);
