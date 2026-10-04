@@ -260,8 +260,8 @@ class FTL:
             print(f"[FTL] Unmapped tensor '{file_id}'")
 
     def device_write(self, meta, tensor, file_id):
-        assert tensor.is_cuda
-        assert tensor.is_contiguous()
+        assert not tensor.is_cuda, "device write uses cpu tensor"
+        assert tensor.is_contiguous(), "device_read_and_verify requires contiguous tensor"
 
         ppa_tensor = torch.tensor(meta['ppa_uint64_list'], dtype=torch.int64, device="cpu")
 
