@@ -279,8 +279,3 @@ class FTL:
             self.ssd_data[-1]  # sector size
         )
         return is_correct
-
-
-
-
-host_ftl = FTL(None)

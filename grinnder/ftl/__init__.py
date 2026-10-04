@@ -1,6 +1,5 @@
 """Host side FTL"""
 
+from grinnder.ftl.ftl import FTL
 
-from grinnder.ftl.ftl import host_ftl
-
-__all__ = ["host_ftl"]
+__all__ = ["FTL"]

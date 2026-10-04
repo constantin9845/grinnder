@@ -17,7 +17,7 @@ from torch import Tensor
 
 from grinnder.utils import ensure_dir
 from grinnder.stats import stat
-from grinnder.ftl import host_ftl
+from grinnder.ftl import FTL
 
 
 class StorageBackend:
@@ -59,6 +59,8 @@ class StorageBackend:
                 "and the kernel supports io_uring (Linux 5.1+). "
                 "The bundled liburing is in third_party/liburing/."
             )
+        
+        self.host_ftl = FTL(None)
 
     def _path(self, file_id: str) -> str:
         return os.path.join(self._storage_dir, f"{file_id}.pt")
@@ -167,10 +169,10 @@ class StorageBackend:
         nbytes = tensor.numel() * tensor.element_size()
         buffer = (ctypes.c_char * nbytes).from_address(ptr)
 
-        meta = host_ftl.map_tensor(file_id, tensor)
-        host_ftl.device_write(meta, tensor, file_id)
+        meta = self.host_ftl.map_tensor(file_id, tensor)
+        self.host_ftl.device_write(meta, tensor, file_id)
 
-        verify = host_ftl.verify_write(meta, tensor, file_id)
+        verify = self.host_ftl.verify_write(meta, tensor, file_id)
         assert verify, f"Data verification failed for file_id={file_id}! DRAM contents corrupted."
 
         return 0
