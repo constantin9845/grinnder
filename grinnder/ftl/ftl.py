@@ -138,7 +138,7 @@ class FTL:
 
     def open_device(self, device):
         # open if closed
-        return os.open(device, os.RDWR | os.O_DIRECT)
+        return os.open(device, os.O_RDWR | os.O_DIRECT)
 
     def close_device(self, device):
         device.close()
