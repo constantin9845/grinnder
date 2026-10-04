@@ -159,8 +159,10 @@ class FTL:
     def generate_map(self):
         map = []
         nchannels = self.layout['ch']
+        print("Starting init SSD\n")
         for channel in range(nchannels):
             self.init_ch(channel, map)
+            print(f"Init channel {channel} done")
 
         return map
 
