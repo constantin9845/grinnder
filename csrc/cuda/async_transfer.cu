@@ -139,9 +139,19 @@ void gather_partitions(int pid, std::vector<torch::Tensor> srcs,
 #include <string>
 #include <future>
 #include <cstring>
+#include <mutex>
 
 // Global storage to keep track of active CUfile handles by file descriptor
 static std::unordered_map<int, CUfileHandle_t> g_cufile_handles;
+static std::mutex g_cufile_handles_mutex;
+
+static CUfileHandle_t get_cufile_handle(int fd) {
+  std::lock_guard<std::mutex> lock(g_cufile_handles_mutex);
+  auto it = g_cufile_handles.find(fd);
+  AT_ASSERTM(it != g_cufile_handles.end(), 
+             "File descriptor " + std::to_string(fd) + " not registered in g_cufile_handles");
+  return it->second;
+}
 
 // Opens files with O_DIRECT and registers them with GDS cuFile
 std::vector<int> open_files(const std::vector<std::string>& file_paths) {
@@ -162,16 +172,18 @@ std::vector<int> open_files(const std::vector<std::string>& file_paths) {
     AT_ASSERTM(status.err == CU_FILE_SUCCESS, 
                "cuFileHandleRegister failed for file: " + path);
 
-    // Track the handle globally so gather operations can reuse it
-    g_cufile_handles[fd] = handle;
+    {
+      std::lock_guard<std::mutex> lock(g_cufile_handles_mutex);
+      g_cufile_handles[fd] = handle;
+    }
     fds.push_back(fd);
   }
-
   return fds;
 }
 
 // Deregisters GDS handles and closes open file descriptors
 void close_files(const std::vector<int>& fds) {
+  std::lock_guard<std::mutex> lock(g_cufile_handles_mutex);
   for (int fd : fds) {
     auto it = g_cufile_handles.find(fd);
     if (it != g_cufile_handles.end()) {
@@ -222,7 +234,7 @@ void gather_partitions_direct(
     std::vector<int64_t> part_offsets(num_parts, 0);
 
     int target_fd = fds[pid];
-    CUfileHandle_t target_handle = g_cufile_handles[target_fd];
+    CUfileHandle_t target_handle = get_cufile_handle(target_fd)
 
     off_t target_file_size = lseek(target_fd, 0, SEEK_END);
     int64_t target_nodes = target_file_size / row_bytes;
@@ -259,7 +271,7 @@ void gather_partitions_direct(
       }
 
       int fd = fds[i];
-      CUfileHandle_t handle = g_cufile_handles[fd];
+      CUfileHandle_t handle = get_cufile_handle(fd);
 
       auto bndry = boundaries[i].to(at::kCPU).contiguous();
       const int64_t* idx_ptr = bndry.data_ptr<int64_t>();
@@ -369,7 +381,7 @@ void device_write(
     auto stream = at::cuda::getCurrentCUDAStream(src.get_device());
     c10::cuda::CUDAStreamGuard guard(stream);
 
-    CUfileHandle_t nvme_handle = g_cufile_handles[raw_nvme_fd];
+    CUfileHandle_t nvme_handle = get_cufile_handle(raw_nvme_fd);
     uint8_t* src_raw = reinterpret_cast<uint8_t*>(src.data_ptr());
 
     int64_t total_bytes = src.numel() * src.element_size();
@@ -434,7 +446,7 @@ bool device_read_and_verify(
     auto stream = at::cuda::getCurrentCUDAStream(expected_src.get_device());
     c10::cuda::CUDAStreamGuard guard(stream);
 
-    CUfileHandle_t nvme_handle = g_cufile_handles[raw_nvme_fd];
+    CUfileHandle_t nvme_handle = get_cufile_handle(raw_nvme_fd);
 
     int64_t total_bytes = expected_src.numel() * expected_src.element_size();
     int64_t num_sectors = ppa_list.numel();
