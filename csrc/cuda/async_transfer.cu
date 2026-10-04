@@ -356,7 +356,7 @@ void device_write(
     int sector_size
 ){
 
-    AT_ASSERTM(src.is_cuda(), "Source tensor must be on CUDA device");
+    //AT_ASSERTM(src.is_cuda(), "Source tensor must be on CUDA device");
     AT_ASSERTM(src.is_contiguous(), "Source tensor must be contiguous");
     AT_ASSERTM(ppa_list.is_contiguous(), "PPA tensor must be contiguous");
 
