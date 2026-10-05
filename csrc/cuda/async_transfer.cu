@@ -416,9 +416,9 @@ void device_write(
             " (PPA: ", raw_ppa, ", offset: ", file_offset, "). ",
             "Error: ", strerror(errno), " (errno ", errno, ")"
         );
-    }
 
-        printf("Wrote sector = %d\n", i);
+        printf("Wrote sector = %d | ppa = %u\n", i, raw_ppa);
+    }
     }
 }
 
