@@ -409,12 +409,14 @@ void device_write(
             file_offset
         );
 
+        if (bytes_written != write_bytes) {
         TORCH_CHECK(
-            bytes_written == write_bytes,
+            false,
             "pwrite failed at sector ", i,
-            " (PPA: ", raw_ppa, "). Expected ", write_bytes,
-            " bytes, but wrote ", bytes_written
+            " (PPA: ", raw_ppa, ", offset: ", file_offset, "). ",
+            "Error: ", strerror(errno), " (errno ", errno, ")"
         );
+    }
 
         printf("Wrote sector = %d\n", i);
     }
