@@ -372,6 +372,8 @@ void gather_activations_direct(
 }
 
 
+#include <sys/ioctl.h>
+#include <linux/nvme_ioctl.h>
 
 void device_write(
     int64_t fd,
@@ -399,26 +401,28 @@ void device_write(
 
         if (write_bytes <= 0) break;
 
-        // Encode 64-bit PPA as byte offset for NVMe driver
-        off_t file_offset = static_cast<off_t>(raw_ppa);
+        struct nvme_user_io io {};
+        io.opcode = 0x01; // nvme_cmd_write
+        io.flags = 0;
+        io.control = 0;
+        io.metadata = 0;
+        io.addr = reinterpret_cast<uint64_t>(src_raw + dev_offset);
 
-        ssize_t bytes_written = pwrite(
-            raw_fd,
-            src_raw + dev_offset,
-            static_cast<size_t>(write_bytes),
-            file_offset
-        );
+        io.slba = raw_ppa;
 
-        if (bytes_written != write_bytes) {
-        TORCH_CHECK(
-            false,
-            "pwrite failed at sector ", i,
-            " (PPA: ", raw_ppa, ", offset: ", file_offset, "). ",
-            "Error: ", strerror(errno), " (errno ", errno, ")"
-        );
+        io.nblocks = (write_bytes / sector_size) - 1; 
+        io.dlength = static_cast<uint32_t>(write_bytes);
 
-        printf("Wrote sector = %d | ppa = %u\n", i, raw_ppa);
-    }
+        int ret = ioctl(raw_fd, NVME_IOCTL_SUBMIT_IO, &io);
+
+        if (ret < 0) {
+            TORCH_CHECK(
+                false,
+                "NVME_IOCTL_SUBMIT_IO write failed at sector ", i,
+                " (PPA: ", raw_ppa, "). Error: ", strerror(errno),
+                " (errno ", errno, ")"
+            );
+        }
     }
 }
 
