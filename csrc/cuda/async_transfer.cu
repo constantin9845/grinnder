@@ -400,7 +400,7 @@ void device_write(
         if (write_bytes <= 0) break;
 
         // Encode 64-bit PPA as byte offset for NVMe driver
-        off_t file_offset = static_cast<off_t>(raw_ppa * sector_size);
+        off_t file_offset = static_cast<off_t>(raw_ppa);
 
         ssize_t bytes_written = pwrite(
             raw_fd,
