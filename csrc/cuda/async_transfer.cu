@@ -406,12 +406,12 @@ void device_write(
         io.flags = 0;
         io.control = 0;
         io.metadata = 0;
+
         io.addr = reinterpret_cast<uint64_t>(src_raw + dev_offset);
 
         io.slba = raw_ppa;
 
         io.nblocks = (write_bytes / sector_size) - 1; 
-        io.dlen = static_cast<uint32_t>(write_bytes);
 
         int ret = ioctl(raw_fd, NVME_IOCTL_SUBMIT_IO, &io);
 
