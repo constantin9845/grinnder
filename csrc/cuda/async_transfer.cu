@@ -415,6 +415,8 @@ void device_write(
 
         int ret = ioctl(raw_fd, NVME_IOCTL_SUBMIT_IO, &io);
 
+        printf("ret = %d\n", ret)
+
         if (ret < 0) {
             TORCH_CHECK(
                 false,
