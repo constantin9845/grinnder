@@ -16,8 +16,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Gather features from host partitions to GPU tensor");
   m.def("gather_partitions_direct", &gather_partitions_direct,
         "Gather features from storage files to GPU tensor");
-  m.def("gather_partitions_direct_raw", &gather_partitions_direct_raw,
-        "Gather features from raw block device to GPU tensor");
   m.def("gather_activations_direct", &gather_activations_direct,
         "Gather activations from storage files to GPU tensor (full files)");
   m.def("scatter_partitions", &scatter_partitions,
@@ -43,4 +41,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("device_write", &device_write, "Write CPU tensors to storage");
   m.def("device_read_and_verify", &device_read_and_verify, "Write CPU tensors to storage and verify no corruption");
   m.def("register_fd", &register_fd, "register fd with CUfile");
+  m.def("gather_partitions_direct_raw", &gather_partitions_direct_raw, "Gather features from raw block device to GPU tensor");
 }

@@ -20,16 +20,6 @@ void gather_partitions_direct(
     torch::Tensor dst,
     std::vector<torch::Tensor> boundaries);
 
-void gather_partitions_direct_raw(
-  int pid,
-  int dev_fd,                                   
-  torch::Tensor dst,
-  std::vector<torch::Tensor> boundaries,
-  std::vector<torch::Tensor> boundary_ppas,       
-  std::vector<torch::Tensor> boundary_page_offs,  
-  int64_t row_bytes
-);
-
 void gather_activations_direct(
     const std::string& filepath,
     torch::Tensor dst);
@@ -66,3 +56,13 @@ bool device_read_and_verify(
 
 
 int64_t register_fd(int raw_fd);
+
+void gather_partitions_direct_raw(
+  int pid,
+  int dev_fd,                                   
+  torch::Tensor dst,
+  std::vector<torch::Tensor> boundaries,
+  std::vector<torch::Tensor> boundary_ppas,       
+  std::vector<torch::Tensor> boundary_page_offs,  
+  int64_t row_bytes
+);
