@@ -59,7 +59,7 @@ int64_t register_fd(int raw_fd);
 
 void gather_partitions_direct_raw(
   int pid,
-  int dev_fd,                                   
+  CUfileHandle_t dev_handle,                                    
   torch::Tensor dst,
   std::vector<torch::Tensor> boundaries,
   std::vector<torch::Tensor> boundary_ppas,       
