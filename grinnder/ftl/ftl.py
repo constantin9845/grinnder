@@ -256,6 +256,35 @@ class FTL:
         )
         return self.tensor_table[file_id]
 
+    def get_boundary_row_info(self, file_id, row_idx):
+        if file_id not in self.tensor_table:
+            raise KeyError(f"Tensor '{file_id}' not found in FTL table.")
+        
+        meta = self.tensor_table[file_id]
+
+        shape = meta["shape"]
+        num_cols = shape[1] if len(shape) > 1 else 1
+        row_size_bytes = num_cols * meta["element_size"]
+
+        start_byte = row_idx * row_size_bytes
+        end_byte = start_byte + row_size_bytes - 1
+
+        bytes_per_page = meta["sector_size"]  # 4096
+        start_page_idx = start_byte // bytes_per_page
+        end_page_idx = end_byte // bytes_per_page
+
+        target_ppas = meta["ppa_uint64_list"][start_page_idx : end_page_idx + 1]
+
+        in_page_offset = start_byte % bytes_per_page
+
+        return {
+            "row_idx": row_idx,
+            "ppas": target_ppas,
+            "ppa_tensor": self._convert_ppas_to_tensor(target_ppas),
+            "num_pages": len(target_ppas),
+            "in_page_offset": in_page_offset,
+            "row_size_bytes": row_size_bytes,
+        }
 
     def get_tensor_ppa_map(self, file_id):
         if(file_id) not in self.tensor_table:
@@ -268,7 +297,6 @@ class FTL:
         if file_id in self.tensor_table:
             del self.tensor_table[file_id]
             print(f"[FTL] Unmapped tensor '{file_id}'")
-
 
     def _convert_ppas_to_tensor(self, ppa_list):
         np_ppas = numpy.array(ppa_list, dtype=numpy.uint64).view(numpy.int64)

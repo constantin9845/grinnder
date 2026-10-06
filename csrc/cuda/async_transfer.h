@@ -20,9 +20,21 @@ void gather_partitions_direct(
     torch::Tensor dst,
     std::vector<torch::Tensor> boundaries);
 
+void gather_partitions_direct_raw(
+  int pid,
+  int dev_fd,                                   
+  torch::Tensor dst,
+  std::vector<torch::Tensor> boundaries,
+  std::vector<torch::Tensor> boundary_ppas,       
+  std::vector<torch::Tensor> boundary_page_offs,  
+  int64_t row_bytes
+);
+
 void gather_activations_direct(
     const std::string& filepath,
     torch::Tensor dst);
+
+
 
 // Scatter: one GPU tensor -> multiple host partitions with accumulation
 // Layout matches gather. Accumulates into dst partitions.

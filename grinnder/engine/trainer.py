@@ -361,7 +361,7 @@ class Trainer:
             self._progress(f"FORWARD LAYER {layer_id + 1}/{self.model.num_layers} START")
             self.cache.cache_tracker_print()
 
-            self.fds = self.host_features[layer_id].open_files(self.graph.num_parts)
+            #self.fds = self.host_features[layer_id].open_files(self.graph.num_parts)
 
             self._forward_layer(layer_id)
 
@@ -536,7 +536,7 @@ class Trainer:
         # Prologue: prefetch first assigned partition
         #self._prepare_cache_partition(layer_id, pids[0], "forward")
         t0 = time.perf_counter_ns()
-        self.device_features[layer_id].async_gather_direct(
+        self.device_features[layer_id].async_gather_direct_raw(
             "forward",
             fds=self.fds,
             pid=pids[0],

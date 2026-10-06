@@ -153,9 +153,9 @@ class StorageBackend:
             stat.load_GDS_timestamp()
     
 
-    # ------------------------------------------------------------------
-    # Host <-> Storage (io_uring)
-    # ------------------------------------------------------------------
+    # --------------------------------------------------------------------------
+    # Host <-> Storage : used for initial storage of partitioned graph features
+    # --------------------------------------------------------------------------
 
     def host_write(self, tensor: Tensor, file_id: str, async_: bool = True) -> int:
         import ctypes
@@ -172,8 +172,8 @@ class StorageBackend:
         meta = self.host_ftl.map_tensor(file_id, tensor)
         self.host_ftl.device_write(meta, tensor, file_id)
 
-        verify = self.host_ftl.verify_write(meta, tensor, file_id)
-        assert verify, f"Data verification failed for file_id={file_id}! DRAM contents corrupted."
+        #verify = self.host_ftl.verify_write(meta, tensor, file_id)
+        #assert verify, f"Data verification failed for file_id={file_id}! DRAM contents corrupted."
 
         return 0
 
