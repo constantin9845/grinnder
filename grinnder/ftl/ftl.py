@@ -277,7 +277,7 @@ class FTL:
         self._ops.device_write(self.cuFD, tensor, ppa_tensor, self.ssd_data[-1])
 
     def verify_write(self, meta, tensor, file_id):
-        assert tensor.is_cuda, "device_read_and_verify requires a CUDA tensor"
+        assert not tensor.is_cuda, "device_read_and_verify requires a CUDA tensor"
         assert tensor.is_contiguous(), "device_read_and_verify requires contiguous tensor"
 
         ppa_tensor = self._convert_ppas_to_tensor(meta['ppa_uint64_list'])
