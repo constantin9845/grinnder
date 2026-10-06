@@ -415,7 +415,7 @@ void device_write(
 
         io.slba = raw_ppa;
 
-        io.nblocks = static_cast<uint16_t>((read_bytes + sector_size - 1) / sector_size - 1);
+        io.nblocks = 0;
 
         int ret = ioctl(raw_fd, NVME_IOCTL_SUBMIT_IO, &io);
 
