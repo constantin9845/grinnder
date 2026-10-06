@@ -48,7 +48,7 @@ class PPA:
         self.blk = data[3]
         self.pg = data[4]
         self.sec = data[5]
-        self.rsv = 0
+        self.rsv = 1
 
         self._c_ppa = StructPPA()
         self._c_ppa.blk = self.blk
@@ -214,7 +214,13 @@ class FTL:
         element_size = tensor.element_size()  
         total_elements = tensor.numel()
         total_bytes = total_elements * element_size
-        sectors_needed = (total_bytes + self.ssd_data[-1] - 1) // self.ssd_data[-1]
+
+        bytes_per_page = self.ssd_data[5] * self.ssd_data[6]  # 8 * 512 = 4096
+        pages_needed = (total_bytes + bytes_per_page - 1) // bytes_per_page
+        sectors_needed = pages_needed * self.ssd_data[5]
+
+        if self.next_free_lba % self.ssd_data[5] != 0:
+            self.next_free_lba += (self.ssd_data[5] - (self.next_free_lba % self.ssd_data[5]))
 
         start_lba = self.next_free_lba
         end_lba = start_lba + sectors_needed - 1
@@ -222,9 +228,9 @@ class FTL:
         if end_lba >= len(self.mapping_table):
             raise MemoryError("Out of SSD capacity!")
 
-        mapped_lbas = list(range(start_lba, end_lba + 1))
+        page_start_lbas = [lba for lba in range(start_lba, end_lba + 1, self.ssd_data[5])]
         mapped_ppas = [
-            self.lba_to_ppa(lba).to_uint64() for lba in mapped_lbas
+            self.lba_to_ppa(lba).to_uint64() for lba in page_start_lbas
         ]
 
         self.tensor_table[file_id] = {
@@ -234,12 +240,12 @@ class FTL:
             "num_elements": total_elements,
             "element_size": element_size,
             "total_bytes": total_bytes,
-            "sector_size": self.ssd_data[-1],
+            "sector_size": bytes_per_page,  # Pass 4096
             "start_lba": start_lba,
             "end_lba": end_lba,
-            "num_sectors": sectors_needed,
-            "lba_list": mapped_lbas,  # Array of allocated LBAs
-            "ppa_uint64_list": mapped_ppas,  # Array of FEMU packed uint64 PPAs
+            "num_sectors": len(page_start_lbas), # Number of 4KB transfers
+            "lba_list": page_start_lbas,
+            "ppa_uint64_list": mapped_ppas,
         }
 
         self.next_free_lba = end_lba + 1

@@ -392,11 +392,10 @@ void device_write(
     const int64_t* ppa_ptr = ppa_list.data_ptr<int64_t>();
 
     int64_t total_bytes = src.numel() * src.element_size();
-    int64_t num_sectors = ppa_list.numel();
-
+    int64_t num_pages = ppa_list.numel();
     int raw_fd = static_cast<int>(fd);
 
-    for (int64_t i = 0; i < num_sectors; ++i) {
+    for (int64_t i = 0; i < num_pages; ++i) {
         uint64_t raw_ppa = static_cast<uint64_t>(ppa_ptr[i]);
 
         int64_t dev_offset = i * sector_size;
@@ -407,15 +406,9 @@ void device_write(
         struct nvme_user_io io {};
         std::memset(&io, 0, sizeof(io));
         io.opcode = 0x01; // nvme_cmd_write
-        io.flags = 0;
-        io.control = 0;
-        io.metadata = 0;
-
         io.addr = reinterpret_cast<uint64_t>(src_raw + dev_offset);
-
         io.slba = raw_ppa;
-
-        io.nblocks = 0;
+        io.nblocks = 7;
 
         int ret = ioctl(raw_fd, NVME_IOCTL_SUBMIT_IO, &io);
 
@@ -445,7 +438,7 @@ bool device_read_and_verify(
     TORCH_CHECK(ppa_list.is_contiguous(), "PPA tensor must be contiguous");
 
     int64_t total_bytes = expected_src.numel() * expected_src.element_size();
-    int64_t num_sectors = ppa_list.numel();
+    int64_t num_pages = ppa_list.numel();
     int raw_fd = static_cast<int>(fd);
 
     /* 1. Allocate a CPU destination buffer matching expected_src dimensions/dtype */
@@ -459,7 +452,7 @@ bool device_read_and_verify(
     const int64_t* ppa_ptr = ppa_list.data_ptr<int64_t>();
 
     /* 2. Read sectors via NVMe IOCTL opcode 0x02 (nvme_cmd_read) */
-    for (int64_t i = 0; i < num_sectors; ++i) {
+    for (int64_t i = 0; i < num_pages; ++i) {
         uint64_t raw_ppa = static_cast<uint64_t>(ppa_ptr[i]);
 
         int64_t dev_offset = i * sector_size;
@@ -482,7 +475,7 @@ bool device_read_and_verify(
         io.slba = raw_ppa;
         
         // NVMe nblocks is 0-based
-        io.nblocks = 0;
+        io.nblocks = 7;
 
         int ret = ioctl(raw_fd, NVME_IOCTL_SUBMIT_IO, &io);
 
@@ -494,45 +487,45 @@ bool device_read_and_verify(
                 " | System Error: ", strerror(errno), " (errno ", errno, ")"
             );
         }
+    }
 
-        int64_t diff_count = 0;
-        int64_t first_diff_byte = -1;
+    int64_t diff_count = 0;
+    int64_t first_diff_byte = -1;
 
-        for (int64_t b = 0; b < total_bytes; ++b) {
-            if (src_raw[b] != dst_raw[b]) {
-                if (first_diff_byte == -1) {
-                    first_diff_byte = b;
-                }
-                diff_count++;
+    for (int64_t b = 0; b < total_bytes; ++b) {
+        if (src_raw[b] != dst_raw[b]) {
+            if (first_diff_byte == -1) {
+                first_diff_byte = b;
             }
+            diff_count++;
         }
+    }
 
-        if (diff_count > 0) {
-          int64_t diff_sector_idx = first_diff_byte / sector_size;
-          int64_t byte_in_sector = first_diff_byte % sector_size;
-          uint64_t diff_ppa = static_cast<uint64_t>(ppa_ptr[diff_sector_idx]);
+    if (diff_count > 0) {
+        int64_t diff_page_idx = first_diff_byte / sector_size;
+        int64_t byte_in_page = first_diff_byte % sector_size;
+        uint64_t diff_ppa = static_cast<uint64_t>(ppa_ptr[diff_page_idx]);
 
-          printf("\n================ [VERIFICATION DIFF DETECTED] ================\n");
-          printf(" Total bytes checked : %ld\n", total_bytes);
-          printf(" Total mismatched bytes : %ld / %ld\n", diff_count, total_bytes);
-          printf(" First mismatch at byte : %ld\n", first_diff_byte);
-          printf(" -> Sector Index      : %ld\n", diff_sector_idx);
-          printf(" -> Byte within Sector: %ld\n", byte_in_sector);
-          printf(" -> Target PPA        : 0x%016lx\n", diff_ppa);
-          printf("\n Hex Dump around first mismatch (Offset %ld):\n", first_diff_byte);
-          
-          int64_t start = std::max<int64_t>(0, first_diff_byte - 16);
-          int64_t end = std::min<int64_t>(total_bytes, first_diff_byte + 32);
+        printf("\n================ [VERIFICATION DIFF DETECTED] ================\n");
+        printf(" Total bytes checked    : %ld\n", total_bytes);
+        printf(" Total mismatched bytes: %ld / %ld\n", diff_count, total_bytes);
+        printf(" First mismatch at byte : %ld\n", first_diff_byte);
+        printf(" -> Page Index          : %ld\n", diff_page_idx);
+        printf(" -> Byte within Page    : %ld\n", byte_in_page);
+        printf(" -> Target PPA          : 0x%016lx\n", diff_ppa);
+        printf("\n Hex Dump around first mismatch (Offset %ld):\n", first_diff_byte);
+        
+        int64_t start = std::max<int64_t>(0, first_diff_byte - 16);
+        int64_t end = std::min<int64_t>(total_bytes, first_diff_byte + 32);
 
-          printf(" Offset | Expected (Ground Truth)   | Read-back (From NVMe)\n");
-          printf(" ---------------------------------------------------------\n");
-          for (int64_t k = start; k < end; ++k) {
-              printf(" %06ld | 0x%02x %s                      | 0x%02x\n", 
-                    k, src_raw[k], (src_raw[k] == dst_raw[k]) ? "==" : "!=", dst_raw[k]);
-          }
-          printf("==============================================================\n\n");
-          return false;
-      }
+        printf(" Offset | Expected (Ground Truth)   | Read-back (From NVMe)\n");
+        printf(" ---------------------------------------------------------\n");
+        for (int64_t k = start; k < end; ++k) {
+            printf(" %06ld | 0x%02x %s                      | 0x%02x\n", 
+                  k, src_raw[k], (src_raw[k] == dst_raw[k]) ? "==" : "!=", dst_raw[k]);
+        }
+        printf("==============================================================\n\n");
+        return false;
     }
 
     /* 3. Perform byte-for-byte CPU tensor comparison */
