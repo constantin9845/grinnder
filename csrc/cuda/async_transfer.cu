@@ -493,10 +493,6 @@ bool device_read_and_verify(
                 " | System Error: ", strerror(errno), " (errno ", errno, ")"
             );
         }
-
-        if (read_bytes < sector_size) {
-            std::memcpy(dst_raw + dev_offset, page_buf.data(), read_bytes);
-        }
     }
 
     /* 3. Perform byte-for-byte CPU tensor comparison */
