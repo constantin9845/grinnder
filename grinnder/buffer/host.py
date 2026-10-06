@@ -756,7 +756,7 @@ class HostBuffer:
             if self._ops is not None:
                 self._ops.gather_partitions_direct_raw(
                     pid, 
-                    fd, 
+                    self._backend.host_ftl.cuFD, 
                     gpu_target, 
                     bndries,
                     bndry_ppas,

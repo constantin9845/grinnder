@@ -351,7 +351,7 @@ __global__ void gather_unaligned_rows_kernel(
 
 void gather_partitions_direct_raw(
   int pid,
-  int dev_fd,                                   
+  CUfileHandle_t dev_handle,                                   
   torch::Tensor dst,
   std::vector<torch::Tensor> boundaries,
   std::vector<torch::Tensor> boundary_ppas,       
@@ -371,14 +371,6 @@ void gather_partitions_direct_raw(
 
     uint8_t* dst_raw = reinterpret_cast<uint8_t*>(dst.data_ptr());
     size_t num_parts = boundary_ppas.size();
-
-    CUfileHandle_t dev_handle;
-    CUfileDescr_t descr{};
-    descr.handle.fd = dev_fd;
-    descr.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
-
-    CUfileError_t status = cuFileHandleRegister(&dev_handle, &descr);
-    AT_ASSERTM(status.err == CU_FILE_SUCCESS, "cuFileHandleRegister failed for raw block device");
 
     size_t boundary_reads = 0;
     for (size_t i = 0; i < num_parts; ++i) {
@@ -417,11 +409,6 @@ void gather_partitions_direct_raw(
           cudaMemcpyAsync(dst_raw + dst_byte_offset, tmp_buf.data() + in_page_off, row_bytes, cudaMemcpyHostToDevice, stream);
         }
       }
-    }
-
-    if (boundary_reads == 0) {
-      cuFileHandleDeregister(dev_handle);
-      return;
     }
 
     int64_t scratch_size = boundary_reads * (2 * PAGE_SIZE);
@@ -513,7 +500,6 @@ void gather_partitions_direct_raw(
         row_bytes,
         boundary_reads);
 
-    cuFileHandleDeregister(dev_handle);
 
   });
 

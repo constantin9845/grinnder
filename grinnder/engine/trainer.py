@@ -570,7 +570,7 @@ class Trainer:
                     next_pool = (i + 1) % pool_size
                     #self._prepare_cache_partition(layer_id, next_pid, "forward")
                     t0 = time.perf_counter_ns()
-                    self.device_features[layer_id].async_gather_direct(
+                    self.device_features[layer_id].async_gather_direct_raw(
                         "forward",
                         fds=self.fds,
                         pid=next_pid,
@@ -667,7 +667,7 @@ class Trainer:
                     next_pid = pids[i + 1]
                     #self._prepare_cache_partition(layer_id, next_pid, "forward")
                     t0 = time.perf_counter_ns()
-                    self.device_features[layer_id].async_gather_direct(
+                    self.device_features[layer_id].async_gather_direct_raw(
                         "forward",
                         fds=self.fds,
                         pid=next_pid,
