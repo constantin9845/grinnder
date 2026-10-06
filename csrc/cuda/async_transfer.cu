@@ -557,6 +557,13 @@ void gather_activations_direct(
 
 #include <sys/ioctl.h>
 #include <linux/nvme_ioctl.h>
+#include <future>
+#include <thread>
+#include <torch/extension.h>
+
+static std::atomic<int64_t> g_handle_counter{1};
+static std::unordered_map<int64_t, std::future<void>> g_pending_writes;
+static std::mutex g_write_mutex;
 
 void device_write(
     int64_t fd,
@@ -568,18 +575,20 @@ void device_write(
     TORCH_CHECK(src.is_contiguous(), "Source tensor must be contiguous");
     TORCH_CHECK(ppa_list.is_contiguous(), "PPA tensor must be contiguous");
 
-    const uint8_t* src_raw = reinterpret_cast<const uint8_t*>(src.data_ptr());
-    const int64_t* ppa_ptr = ppa_list.data_ptr<int64_t>();
+    int64_t handle_id = g_handle_counter.fetch_add(1);
 
-    int64_t total_bytes = src.numel() * src.element_size();
-    int64_t num_pages = ppa_list.numel();
-    int raw_fd = static_cast<int>(fd);
+    auto fut = std::async(std::launch::async, [fd, src, ppa_list, sector_size](){
+      const uint8_t* src_raw = reinterpret_cast<const uint8_t*>(src.data_ptr());
+      const int64_t* ppa_ptr = ppa_list.data_ptr<int64_t>();
 
-    for (int64_t i = 0; i < num_pages; ++i) {
+      int64_t total_bytes = src.numel() * src.element_size();
+      int64_t num_pages = ppa_list.numel();
+      int raw_fd = static_cast<int>(fd);
+
+      for (int64_t i = 0; i < num_pages; ++i){
         uint64_t raw_ppa = static_cast<uint64_t>(ppa_ptr[i]);
-
-        int64_t dev_offset = i * (sector_size*8);
-        int64_t write_bytes = std::min<int64_t>((sector_size*8), total_bytes - dev_offset);
+        int64_t dev_offset = i * (sector_size * 8);
+        int64_t write_bytes = std::min<int64_t>((sector_size * 8), total_bytes - dev_offset);
 
         if (write_bytes <= 0) break;
 
@@ -588,22 +597,28 @@ void device_write(
         io.opcode = 0x01; // nvme_cmd_write
         io.addr = reinterpret_cast<uint64_t>(src_raw + dev_offset);
         io.slba = raw_ppa;
-        io.nblocks = 7;
+        io.nblocks = 7; // 8 sectors (4KB)
 
         int ret = ioctl(raw_fd, NVME_IOCTL_SUBMIT_IO, &io);
+        TORCH_CHECK(ret == 0, "Async NVMe write failed at page ", i, " PPA: ", raw_ppa);
+      }
+    });
 
-        if (ret < 0) {
-            TORCH_CHECK(
-                false,
-                "NVME_IOCTL_SUBMIT_IO write failed at sector ", i,
-                " (PPA: ", raw_ppa, "). Error: ", strerror(errno),
-                " (errno ", errno, ")"
-            );
-        }
-        else if(ret > 0){
-          printf("ret = %d\n", ret);
-        }
+    std::lock_guard<std::mutex> lock(g_write_mutex);
+    g_pending_writes[handle_id] = std::move(fut);
+    return handle_id;
+}
+
+void device_write_wait(int64_t handle_id) {
+    std::future<void> fut;
+    {
+        std::lock_guard<std::mutex> lock(g_write_mutex);
+        auto it = g_pending_writes.find(handle_id);
+        if (it == g_pending_writes.end()) return;
+        fut = std::move(it->second);
+        g_pending_writes.erase(it);
     }
+    fut.get(); 
 }
 
 

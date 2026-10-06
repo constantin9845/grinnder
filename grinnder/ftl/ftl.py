@@ -74,6 +74,8 @@ class PPA:
         self.sec_per_ch    = self.sec_per_lun * self.nlun
         self.total_sectors = self.sec_per_ch  * self.nch
 
+        self._pending_handles = []
+
     def get_data(self):
         return [self.ch, self.lun, self.pl, self.blk, self.pg, self.sec, self.rsv]
 
@@ -308,7 +310,17 @@ class FTL:
 
         ppa_tensor = self._convert_ppas_to_tensor(meta['ppa_uint64_list'])
 
-        self._ops.device_write(self.cuFD, tensor, ppa_tensor, self.ssd_data[-1])
+        handle = self._ops.device_write(self.cuFD, tensor, ppa_tensor, self.ssd_data[-1])
+        return handle
+    
+    def device_write_wait(self, handle):
+        self._ops.device_write_wait(handle)
+
+    def wait_all(self) -> None:
+        """Wait for all background prefill partition writes to finish."""
+        for h in self._pending_handles:
+            self.wait(h)
+        self._pending_handles.clear()
 
     def verify_write(self, meta, tensor, file_id):
         assert not tensor.is_cuda, "device_read_and_verify requires a CUDA tensor"

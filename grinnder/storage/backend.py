@@ -170,12 +170,13 @@ class StorageBackend:
         buffer = (ctypes.c_char * nbytes).from_address(ptr)
 
         meta = self.host_ftl.map_tensor(file_id, tensor)
-        self.host_ftl.device_write(meta, tensor, file_id)
+        handle = self.host_ftl.device_write(meta, tensor, file_id)
+        
 
         #verify = self.host_ftl.verify_write(meta, tensor, file_id)
         #assert verify, f"Data verification failed for file_id={file_id}! DRAM contents corrupted."
 
-        return 0
+        return handle
 
 
         with open(path, "wb") as f:
@@ -186,6 +187,16 @@ class StorageBackend:
         return self._io_engine.submit_write(
             path, tensor, 0, tensor.numel() * tensor.element_size()
         )
+    
+    def wait(self, handle: int) -> None:
+        if handle > 0:
+            self.host_ftl.device_write_wait(handle)
+
+    def wait_all(self) -> None:
+        """Wait for all background prefill partition writes to finish."""
+        self.host_ftl.wait_all()
+
+    
 
     def host_read(self, file_id: str, tensor: Tensor, async_: bool = True) -> int:
         """Read from NVMe into a CPU tensor via io_uring.

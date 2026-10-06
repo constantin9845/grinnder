@@ -129,6 +129,22 @@ class DeviceBuffer:
             self.allocate(pid)
             host_buffer.async_gather_direct(phase, fds, pid, self._tensors[pid], boundaries, stream)
 
+    def async_gather_direct_raw(
+            self,
+            phase,
+            fds,
+            pid: int,
+            host_buffer: HostBuffer,
+            boundaries: List[Optional[Tensor]],
+            stream: torch.cuda.Stream
+        ) -> None:
+            """Allocate GPU tensor and gather from host partitions.
+    
+            Combines allocate() + host_buffer.async_gather() for convenience.
+            """
+            self.allocate(pid)
+            host_buffer.async_gather_direct_raw(phase, fds, pid, self._tensors[pid], boundaries, stream)
+
 
     def storage_to_gpu(
             self,

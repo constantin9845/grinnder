@@ -67,3 +67,5 @@ void gather_partitions_direct_raw(
   std::vector<torch::Tensor> boundary_page_offs,  
   int64_t row_bytes
 );
+
+void device_write_wait(int64_t handle_id);
