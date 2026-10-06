@@ -405,6 +405,7 @@ void device_write(
         if (write_bytes <= 0) break;
 
         struct nvme_user_io io {};
+        std::memset(&io, 0, sizeof(io));
         io.opcode = 0x01; // nvme_cmd_write
         io.flags = 0;
         io.control = 0;
@@ -414,7 +415,7 @@ void device_write(
 
         io.slba = raw_ppa;
 
-        io.nblocks = (write_bytes / sector_size) - 1; 
+        io.nblocks = static_cast<uint16_t>((read_bytes + sector_size - 1) / sector_size - 1);
 
         int ret = ioctl(raw_fd, NVME_IOCTL_SUBMIT_IO, &io);
 
@@ -452,7 +453,7 @@ bool device_read_and_verify(
     int raw_fd = static_cast<int>(fd);
 
     /* 1. Allocate a CPU destination buffer matching expected_src dimensions/dtype */
-    torch::Tensor read_cpu = torch::empty(
+    torch::Tensor read_cpu = torch::zeros(
         expected_src.sizes(),
         torch::TensorOptions().dtype(expected_src.dtype()).device(torch::kCPU)
     );
@@ -501,6 +502,9 @@ bool device_read_and_verify(
     /* 3. Perform byte-for-byte CPU tensor comparison */
     return torch::equal(expected_src, read_cpu);
 }
+
+
+
 void scatter_partitions(int pid, torch::Tensor src,
                         std::vector<torch::Tensor> dsts,
                         std::vector<torch::Tensor> boundaries) {
