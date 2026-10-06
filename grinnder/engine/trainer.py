@@ -200,9 +200,6 @@ class Trainer:
                 f"parts={self.graph.num_parts} feat_dim={self.graph.feat_dim}",
                 flush=True,
             )
-
-        handles = []
-
         for pid in range(self.graph.num_parts):
             start = time.perf_counter()
             feat = self.graph.partition_features(pid)
@@ -210,23 +207,17 @@ class Trainer:
             del feat
             gc.collect()
             if self._uses_partition_lru():
-                h = self.host_features[0].cpu_to_storage(pid)
-                if h is not None and h > 0:
-                    handles.append((pid, h))
-
+                self.host_features[0].cpu_to_storage(pid)
+                self.host_features[0].release(pid)
             if log_progress:
                 print(
                     f"    prefill input features {pid + 1}/{self.graph.num_parts} "
                     f"time_s={time.perf_counter() - start:.3f}",
                     flush=True,
                 )
-
-        for pid, h in handles:
-            self._backend.wait(h)
-            self.host_features[0].release(pid)
-
         if log_progress:
             print("    prefill input features done", flush=True)
+
 
     @staticmethod
     def _tensor_nbytes(tensor: Optional[Any]) -> int:

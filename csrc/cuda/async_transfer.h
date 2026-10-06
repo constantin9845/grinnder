@@ -1,7 +1,7 @@
 #pragma once
 
 #include <torch/extension.h>
-#include <cufile.h>
+
 
 // D2H: GPU -> CPU host tensor (on current CUDA stream, via D2H thread pool)
 void d2h_copy_async(torch::Tensor src, torch::Tensor dst);
@@ -41,7 +41,7 @@ void close_files(const std::vector<int>& fds);
 void h2d_synchronize();
 void d2h_synchronize();
 
-int64_t device_write(
+void device_write(
     int64_t fd,
     torch::Tensor src,
     torch::Tensor ppa_list,
@@ -67,5 +67,3 @@ void gather_partitions_direct_raw(
   std::vector<torch::Tensor> boundary_page_offs,  
   int64_t row_bytes
 );
-
-void device_write_wait(int64_t handle_id);
