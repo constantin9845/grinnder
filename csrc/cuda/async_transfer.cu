@@ -515,7 +515,7 @@ void gather_partitions_direct_raw(
 
     cuFileHandleDeregister(dev_handle);
 
-  })
+  });
 
 }
 
