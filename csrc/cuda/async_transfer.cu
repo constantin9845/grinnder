@@ -493,6 +493,45 @@ bool device_read_and_verify(
                 " | System Error: ", strerror(errno), " (errno ", errno, ")"
             );
         }
+
+        int64_t diff_count = 0;
+        int64_t first_diff_byte = -1;
+
+        for (int64_t b = 0; b < total_bytes; ++b) {
+            if (src_raw[b] != dst_raw[b]) {
+                if (first_diff_byte == -1) {
+                    first_diff_byte = b;
+                }
+                diff_count++;
+            }
+        }
+
+        if (diff_count > 0) {
+          int64_t diff_sector_idx = first_diff_byte / sector_size;
+          int64_t byte_in_sector = first_diff_byte % sector_size;
+          uint64_t diff_ppa = static_cast<uint64_t>(ppa_ptr[diff_sector_idx]);
+
+          printf("\n================ [VERIFICATION DIFF DETECTED] ================\n");
+          printf(" Total bytes checked : %ld\n", total_bytes);
+          printf(" Total mismatched bytes : %ld / %ld\n", diff_count, total_bytes);
+          printf(" First mismatch at byte : %ld\n", first_diff_byte);
+          printf(" -> Sector Index      : %ld\n", diff_sector_idx);
+          printf(" -> Byte within Sector: %ld\n", byte_in_sector);
+          printf(" -> Target PPA        : 0x%016lx\n", diff_ppa);
+          printf("\n Hex Dump around first mismatch (Offset %ld):\n", first_diff_byte);
+          
+          int64_t start = std::max<int64_t>(0, first_diff_byte - 16);
+          int64_t end = std::min<int64_t>(total_bytes, first_diff_byte + 32);
+
+          printf(" Offset | Expected (Ground Truth)   | Read-back (From NVMe)\n");
+          printf(" ---------------------------------------------------------\n");
+          for (int64_t k = start; k < end; ++k) {
+              printf(" %06ld | 0x%02x %s                      | 0x%02x\n", 
+                    k, src_raw[k], (src_raw[k] == dst_raw[k]) ? "==" : "!=", dst_raw[k]);
+          }
+          printf("==============================================================\n\n");
+          return false;
+      }
     }
 
     /* 3. Perform byte-for-byte CPU tensor comparison */
