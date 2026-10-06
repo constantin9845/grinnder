@@ -156,8 +156,8 @@ class FTL:
             "plane" : 1,
             "block" : 512,
             "page" : 512,
-            "sector" : 1,
-            "sector_size" : 4096
+            "sector" : 8,
+            "sector_size" : 512
         }
         return t
 
