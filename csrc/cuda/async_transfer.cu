@@ -465,7 +465,7 @@ void gather_partitions_direct_raw(
     }
 
     CUfileBatchHandle_t batch_handle;
-    status = cuFileBatchIOSetUp(&batch_handle, MAX_BATCH_SIZE);
+    CUfileError_t status = cuFileBatchIOSetUp(&batch_handle, MAX_BATCH_SIZE);
     AT_ASSERTM(status.err == CU_FILE_SUCCESS, "cuFileBatchIOSetUp failed");
 
     CUfileIOEvents_t events[MAX_BATCH_SIZE];
