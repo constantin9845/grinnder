@@ -48,7 +48,7 @@ class PPA:
         self.blk = data[3]
         self.pg = data[4]
         self.sec = data[5]
-        self.rsv = 1
+        self.rsv = 0
 
         self._c_ppa = StructPPA()
         self._c_ppa.blk = self.blk
