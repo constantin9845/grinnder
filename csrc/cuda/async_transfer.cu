@@ -565,7 +565,7 @@ static std::atomic<int64_t> g_handle_counter{1};
 static std::unordered_map<int64_t, std::future<void>> g_pending_writes;
 static std::mutex g_write_mutex;
 
-void device_write(
+int64_t device_write(
     int64_t fd,
     torch::Tensor src,
     torch::Tensor ppa_list,

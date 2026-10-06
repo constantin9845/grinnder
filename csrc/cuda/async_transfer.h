@@ -41,7 +41,7 @@ void close_files(const std::vector<int>& fds);
 void h2d_synchronize();
 void d2h_synchronize();
 
-void device_write(
+int64_t device_write(
     int64_t fd,
     torch::Tensor src,
     torch::Tensor ppa_list,
