@@ -435,13 +435,15 @@ void device_write(
 
 
 
+
+
 bool device_read_and_verify(
     int64_t fd,
-    torch::Tensor expected_src,  /* Ground truth tensor (on CUDA) */
+    torch::Tensor expected_src,  /* Ground truth CPU tensor */
     torch::Tensor ppa_list,      /* Tensor of uint64 PPAs */
     int sector_size
 ) {
-    TORCH_CHECK(expected_src.is_cuda(), "expected_src tensor must be on CUDA");
+    TORCH_CHECK(!expected_src.is_cuda(), "expected_src tensor must be on CPU");
     TORCH_CHECK(expected_src.is_contiguous(), "expected_src tensor must be contiguous");
     TORCH_CHECK(ppa_list.is_contiguous(), "PPA tensor must be contiguous");
 
@@ -449,11 +451,12 @@ bool device_read_and_verify(
     int64_t num_sectors = ppa_list.numel();
     int raw_fd = static_cast<int>(fd);
 
-    /* 1. Allocate a CPU staging buffer to perform NVME_IOCTL_SUBMIT_IO reads */
+    /* 1. Allocate a CPU destination buffer matching expected_src dimensions/dtype */
     torch::Tensor read_cpu = torch::empty(
         expected_src.sizes(),
         torch::TensorOptions().dtype(expected_src.dtype()).device(torch::kCPU)
     );
+    
     uint8_t* dst_raw = reinterpret_cast<uint8_t*>(read_cpu.data_ptr());
     const int64_t* ppa_ptr = ppa_list.data_ptr<int64_t>();
 
@@ -474,13 +477,13 @@ bool device_read_and_verify(
         io.control = 0;
         io.metadata = 0;
         
-        // Destination host memory pointer
+        // Target buffer pointer inside read_cpu
         io.addr = reinterpret_cast<uint64_t>(dst_raw + dev_offset);
         
-        // Raw PPA (with Bit 63 set) passed straight to cdw10/cdw11
+        // Pass OCSSD PPA directly to cdw10/cdw11
         io.slba = raw_ppa;
         
-        // nblocks is 0-based in NVMe spec
+        // NVMe nblocks is 0-based
         io.nblocks = static_cast<uint16_t>((read_bytes / sector_size) - 1);
 
         int ret = ioctl(raw_fd, NVME_IOCTL_SUBMIT_IO, &io);
@@ -495,20 +498,9 @@ bool device_read_and_verify(
         }
     }
 
-    /* 3. Copy CPU read-back data to GPU for equality comparison */
-    auto stream = at::cuda::getCurrentCUDAStream(expected_src.get_device());
-    c10::cuda::CUDAStreamGuard guard(stream);
-
-    torch::Tensor read_gpu = read_cpu.to(expected_src.device(), /*non_blocking=*/false);
-
-    /* 4. Ensure CUDA stream completes before verification */
-    stream.synchronize();
-
-    /* 5. Compare expected GPU tensor with read-back GPU tensor */
-    bool is_equal = torch::equal(expected_src, read_gpu);
-    return is_equal;
+    /* 3. Perform byte-for-byte CPU tensor comparison */
+    return torch::equal(expected_src, read_cpu);
 }
-
 void scatter_partitions(int pid, torch::Tensor src,
                         std::vector<torch::Tensor> dsts,
                         std::vector<torch::Tensor> boundaries) {
