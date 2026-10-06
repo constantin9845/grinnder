@@ -415,7 +415,7 @@ void device_write(
 
         io.slba = raw_ppa;
 
-        io.nblocks = 0;
+        io.nblocks = 7;
 
         int ret = ioctl(raw_fd, NVME_IOCTL_SUBMIT_IO, &io);
 
@@ -482,7 +482,7 @@ bool device_read_and_verify(
         io.slba = raw_ppa;
         
         // NVMe nblocks is 0-based
-        io.nblocks = 0;
+        io.nblocks = 7;
 
         int ret = ioctl(raw_fd, NVME_IOCTL_SUBMIT_IO, &io);
 
