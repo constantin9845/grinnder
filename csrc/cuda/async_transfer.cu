@@ -455,6 +455,7 @@ bool device_read_and_verify(
     );
     
     uint8_t* dst_raw = reinterpret_cast<uint8_t*>(read_cpu.data_ptr());
+    const uint8_t* src_raw = reinterpret_cast<const uint8_t*>(expected_src.data_ptr());
     const int64_t* ppa_ptr = ppa_list.data_ptr<int64_t>();
 
     /* 2. Read sectors via NVMe IOCTL opcode 0x02 (nvme_cmd_read) */
