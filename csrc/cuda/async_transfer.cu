@@ -434,10 +434,6 @@ void device_write(
 }
 
 
-
-
-
-
 bool device_read_and_verify(
     int64_t fd,
     torch::Tensor expected_src,  /* Ground truth CPU tensor */
@@ -485,7 +481,7 @@ bool device_read_and_verify(
         io.slba = raw_ppa;
         
         // NVMe nblocks is 0-based
-        io.nblocks = static_cast<uint16_t>((read_bytes / sector_size) - 1);
+        io.nblocks = 0;
 
         int ret = ioctl(raw_fd, NVME_IOCTL_SUBMIT_IO, &io);
 
@@ -496,6 +492,10 @@ bool device_read_and_verify(
                 " (PPA: ", raw_ppa, "). Return code: ", ret,
                 " | System Error: ", strerror(errno), " (errno ", errno, ")"
             );
+        }
+
+        if (read_bytes < sector_size) {
+            std::memcpy(dst_raw + dev_offset, page_buf.data(), read_bytes);
         }
     }
 
