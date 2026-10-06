@@ -398,8 +398,8 @@ void device_write(
     for (int64_t i = 0; i < num_pages; ++i) {
         uint64_t raw_ppa = static_cast<uint64_t>(ppa_ptr[i]);
 
-        int64_t dev_offset = i * sector_size;
-        int64_t write_bytes = std::min<int64_t>(sector_size, total_bytes - dev_offset);
+        int64_t dev_offset = i * (sector_size*8);
+        int64_t write_bytes = std::min<int64_t>((sector_size*8), total_bytes - dev_offset);
 
         if (write_bytes <= 0) break;
 
@@ -455,8 +455,8 @@ bool device_read_and_verify(
     for (int64_t i = 0; i < num_pages; ++i) {
         uint64_t raw_ppa = static_cast<uint64_t>(ppa_ptr[i]);
 
-        int64_t dev_offset = i * sector_size;
-        int64_t read_bytes = std::min<int64_t>(sector_size, total_bytes - dev_offset);
+        int64_t dev_offset = i * (sector_size*8);
+        int64_t read_bytes = std::min<int64_t>((sector_size*8), total_bytes - dev_offset);
 
         if (read_bytes <= 0) break;
 
@@ -502,8 +502,8 @@ bool device_read_and_verify(
     }
 
     if (diff_count > 0) {
-        int64_t diff_page_idx = first_diff_byte / sector_size;
-        int64_t byte_in_page = first_diff_byte % sector_size;
+        int64_t diff_page_idx = first_diff_byte / (sector_size*8);
+        int64_t byte_in_page = first_diff_byte % (sector_size*8);
         uint64_t diff_ppa = static_cast<uint64_t>(ppa_ptr[diff_page_idx]);
 
         printf("\n================ [VERIFICATION DIFF DETECTED] ================\n");
