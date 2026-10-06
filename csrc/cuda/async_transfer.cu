@@ -20,6 +20,9 @@
 #include <mutex>
 #include <algorithm>
 #include <cstdint>
+#include <cerrno>
+#include <sys/ioctl.h>
+#include <linux/nvme_ioctl.h>
 
 static std::unordered_map<int, CUfileHandle_t> g_cufile_handles;
 static std::mutex g_cufile_handles_mutex;
@@ -431,86 +434,80 @@ void device_write(
 
 
 
+
 bool device_read_and_verify(
     int64_t fd,
     torch::Tensor expected_src,  /* Ground truth tensor (on CUDA) */
     torch::Tensor ppa_list,      /* Tensor of uint64 PPAs */
     int sector_size
-){
-  AT_ASSERTM(expected_src.is_cuda(), "Expected source tensor must be on CUDA device");
-    AT_ASSERTM(expected_src.is_contiguous(), "Expected source tensor must be contiguous");
-    AT_ASSERTM(ppa_list.is_contiguous(), "PPA tensor must be contiguous");
-
-    auto stream = at::cuda::getCurrentCUDAStream(expected_src.get_device());
-    c10::cuda::CUDAStreamGuard guard(stream);
-
-    //CUfileHandle_t nvme_handle = fd;
+) {
+    TORCH_CHECK(expected_src.is_cuda(), "expected_src tensor must be on CUDA");
+    TORCH_CHECK(expected_src.is_contiguous(), "expected_src tensor must be contiguous");
+    TORCH_CHECK(ppa_list.is_contiguous(), "PPA tensor must be contiguous");
 
     int64_t total_bytes = expected_src.numel() * expected_src.element_size();
     int64_t num_sectors = ppa_list.numel();
+    int raw_fd = static_cast<int>(fd);
 
-    /* 1. Allocate a destination GPU buffer matching expected_src size and device */
-    torch::Tensor read_dst = torch::empty_like(expected_src);
-    uint8_t* dst_raw = reinterpret_cast<uint8_t*>(read_dst.data_ptr());
-
+    /* 1. Allocate a CPU staging buffer to perform NVME_IOCTL_SUBMIT_IO reads */
+    torch::Tensor read_cpu = torch::empty(
+        expected_src.sizes(),
+        torch::TensorOptions().dtype(expected_src.dtype()).device(torch::kCPU)
+    );
+    uint8_t* dst_raw = reinterpret_cast<uint8_t*>(read_cpu.data_ptr());
     const int64_t* ppa_ptr = ppa_list.data_ptr<int64_t>();
 
-    CUfileIOParams_t *io_params = (CUfileIOParams_t*)calloc(num_sectors, sizeof(CUfileIOParams_t));
-    AT_ASSERTM(io_params != nullptr, "Failed to allocate io_params");
-
-
+    /* 2. Read sectors via NVMe IOCTL opcode 0x02 (nvme_cmd_read) */
     for (int64_t i = 0; i < num_sectors; ++i) {
         uint64_t raw_ppa = static_cast<uint64_t>(ppa_ptr[i]);
 
         int64_t dev_offset = i * sector_size;
         int64_t read_bytes = std::min<int64_t>(sector_size, total_bytes - dev_offset);
 
-        io_params[i].mode = CUFILE_BATCH;
-        io_params[i].opcode = CUFILE_READ; /* Reading back from NVMe to GPU */
-        io_params[i].fh = reinterpret_cast<CUfileHandle_t>(static_cast<uintptr_t>(fd));;
-        io_params[i].u.batch.devPtr_base = dst_raw;
-        io_params[i].u.batch.devPtr_offset = dev_offset;
+        if (read_bytes <= 0) break;
+
+        struct nvme_user_io io {};
+        std::memset(&io, 0, sizeof(io));
+
+        io.opcode = 0x02; // nvme_cmd_read
+        io.flags = 0;
+        io.control = 0;
+        io.metadata = 0;
         
-        /* Send raw PPA encoded for NVMe backend translation */
-        io_params[i].u.batch.file_offset = static_cast<off_t>(raw_ppa * sector_size);
-        io_params[i].u.batch.size = read_bytes;
-    }
+        // Destination host memory pointer
+        io.addr = reinterpret_cast<uint64_t>(dst_raw + dev_offset);
+        
+        // Raw PPA (with Bit 63 set) passed straight to cdw10/cdw11
+        io.slba = raw_ppa;
+        
+        // nblocks is 0-based in NVMe spec
+        io.nblocks = static_cast<uint16_t>((read_bytes / sector_size) - 1);
 
-    CUfileBatchHandle_t batch_handle;
-    CUfileError_t status = cuFileBatchIOSetUp(&batch_handle, MAX_BATCH_SIZE);
-    AT_ASSERTM(status.err == CU_FILE_SUCCESS, "cuFileBatchIOSetUp failed");
+        int ret = ioctl(raw_fd, NVME_IOCTL_SUBMIT_IO, &io);
 
-    CUfileIOEvents_t events[MAX_BATCH_SIZE];
-
-    for (size_t offset_idx = 0; offset_idx < num_sectors; offset_idx += MAX_BATCH_SIZE) {
-        unsigned int current_batch_size = (num_sectors - offset_idx > MAX_BATCH_SIZE)
-                                         ? MAX_BATCH_SIZE
-                                         : (unsigned int)(num_sectors - offset_idx);
-
-        status = cuFileBatchIOSubmit(batch_handle, current_batch_size, &io_params[offset_idx], 0);
-        AT_ASSERTM(status.err == CU_FILE_SUCCESS, "cuFileBatchIOSubmit read failed");
-
-        unsigned int completed = current_batch_size;
-        status = cuFileBatchIOGetStatus(batch_handle, current_batch_size, &completed, events, NULL);
-        AT_ASSERTM(status.err == CU_FILE_SUCCESS, "cuFileBatchIOGetStatus read failed");
-
-        /* Validate individual batch status results */
-        for (unsigned int e = 0; e < completed; ++e) {
-            AT_ASSERTM(events[e].status == CU_FILE_SUCCESS, "cuFile batch IO read event error");
+        if (ret != 0) {
+            TORCH_CHECK(
+                false,
+                "NVME_IOCTL_SUBMIT_IO read failed at sector ", i,
+                " (PPA: ", raw_ppa, "). Return code: ", ret,
+                " | System Error: ", strerror(errno), " (errno ", errno, ")"
+            );
         }
     }
 
-    cuFileBatchIODestroy(batch_handle);
-    free(io_params);
+    /* 3. Copy CPU read-back data to GPU for equality comparison */
+    auto stream = at::cuda::getCurrentCUDAStream(expected_src.get_device());
+    c10::cuda::CUDAStreamGuard guard(stream);
+
+    torch::Tensor read_gpu = read_cpu.to(expected_src.device(), /*non_blocking=*/false);
 
     /* 4. Ensure CUDA stream completes before verification */
     stream.synchronize();
 
-    /* 5. Compare written source tensor with read-back target tensor */
-    bool is_equal = torch::equal(expected_src, read_dst);
+    /* 5. Compare expected GPU tensor with read-back GPU tensor */
+    bool is_equal = torch::equal(expected_src, read_gpu);
     return is_equal;
 }
-
 
 void scatter_partitions(int pid, torch::Tensor src,
                         std::vector<torch::Tensor> dsts,
