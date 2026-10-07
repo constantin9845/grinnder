@@ -49,7 +49,7 @@ class FTL:
         self.cuFD = self._ops.register_fd(self.device_fd) if self._ops is not None else None
 
     def open_device(self, device):
-        return os.open(device, os.O_RDWR)
+        return os.open("/dev/nvme0n1", os.O_RDWR)
 
     def close_device(self):
         if hasattr(self, 'device_fd') and self.device_fd is not None:
