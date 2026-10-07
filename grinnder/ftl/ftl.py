@@ -999,21 +999,6 @@ class FTL:
             ),
         }
 
-    def get_flash_layout(
-        self,
-        device,
-    ):
-
-        return {
-            "ch": self.nch,
-            "lun": self.nlun,
-            "plane": self.npl,
-            "block": self.nblk,
-            "page": self.npg,
-            "sector": self.nsec,
-            "sector_size": self.sector_size,
-        }
-
     def open_device(self, device="/dev/nvme0n1"):
 
         return os.open(
