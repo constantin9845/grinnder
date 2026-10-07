@@ -194,7 +194,7 @@ class PPA:
 
 
 class FTL:
-    def __init__(self, ssd_data, device="/dev/nvme0n1"):
+    def __init__(self, device="/dev/nvme0n1"):
 
         '''
             1 sector = 512 B
@@ -206,13 +206,23 @@ class FTL:
 
             LPN -> physical page PPA
         '''
+        self.layout = self.get_flash_layout(device)
+        self.ssd_data = [
+            self.layout['ch'], 
+            self.layout['lun'], 
+            self.layout['plane'], 
+            self.layout['block'], 
+            self.layout['page'], 
+            self.layout['sector'],
+            self.layout['sector_size'],
+        ]
 
-        self.nch = ssd_data[0]
-        self.nlun = ssd_data[1]
-        self.npl = ssd_data[2]
-        self.nblk = ssd_data[3]
-        self.npg = ssd_data[4]
-        self.nsec = ssd_data[5]
+        self.nch = self.ssd_data[0]
+        self.nlun = self.ssd_data[1]
+        self.npl = self.ssd_data[2]
+        self.nblk = self.ssd_data[3]
+        self.npg = self.ssd_data[4]
+        self.nsec = self.ssd_data[5]
 
         self.sector_size = 512
         self.page_size = (self.nsec * self.sector_size)
@@ -255,6 +265,17 @@ class FTL:
         self._ops = _load_ops()
         self.device_fd = self.open_device(device)
         self.cuFD = self._ops.register_fd(self.device_fd) if self._ops is not None else None
+
+    def get_flash_layout(self, device):
+        return {
+            "ch" : 8,
+            "lun" : 8,
+            "plane" : 1,
+            "block" : 512,
+            "page" : 512,
+            "sector" : 8,
+            "sector_size" : 512
+        }
 
     def lba_to_lpn(self, lba):
         if lba < 0 or lba >= self.total_lba:
