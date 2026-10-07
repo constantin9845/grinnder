@@ -651,6 +651,7 @@ class FTL:
             "num_elements": total_elements,
             "element_size": element_size,
             "total_bytes": total_bytes,
+            "physical_bytes": pages_needed * bytes_per_page,
             "sector_size": bytes_per_page,
             "start_lba": start_lba,
             "end_lba": end_lba,
@@ -872,9 +873,6 @@ class FTL:
         tensor,
         file_id,
     ):
-        assert not tensor.is_cuda, (
-            "device write uses cpu tensor"
-        )
 
         assert tensor.is_contiguous(), (
             "device write requires contiguous tensor"

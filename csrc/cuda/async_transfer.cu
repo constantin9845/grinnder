@@ -608,6 +608,196 @@ void device_write(
     }
 }
 
+void gpu_write(
+  int pid,
+  int64_t dev_handle_ptr,
+  torch::Tensor src,
+  std::vector<torch::Tensor> boundaries,
+  std::vector<torch::Tensor> boundary_ppas,
+  std::vector<torch::Tensor> boundary_page_offs,
+  int64_t row_bytes
+){
+  AT_ASSERTM(src.is_cuda(), "Source must be a CUDA tensor");
+  AT_ASSERTM(src.is_contiguous(), "Source must be contiguous");
+
+  CUfileHandle_t dev_handle = reinterpret_cast<CUfileHandle_t>(static_cast<uintptr_t>(dev_handle_ptr));
+
+  auto stream = at::cuda::getCurrentCUDAStream(src.get_device());
+
+  getH2DPool().run([=]{
+
+    c10::cuda::CUDAStreamGuard guard(stream);
+
+      uint8_t* src_raw =
+      reinterpret_cast<uint8_t*>(src.data_ptr());
+
+      size_t num_parts = boundary_ppas.size();
+
+      size_t boundary_writes = 0;
+
+      for (size_t i = 0; i < num_parts; ++i) {
+          if (static_cast<int>(i) != pid &&
+              boundaries[i].defined() &&
+              boundaries[i].numel() > 0) {
+
+              boundary_writes += boundaries[i].numel();
+          }
+      }
+
+      int64_t target_nodes = boundaries[pid].defined() ? boundaries[pid].numel() : 0;
+
+      if (target_nodes > 0 && boundary_ppas[pid].defined() && boundary_ppas[pid].numel() > 0){
+        auto target_ppas =
+                boundary_ppas[pid].to(at::kCPU).contiguous();
+
+        auto target_offs =
+            boundary_page_offs[pid].to(at::kCPU).contiguous();
+
+        const uint64_t* ppa_ptr =
+            reinterpret_cast<const uint64_t*>(
+                target_ppas.data_ptr()
+            );
+
+        const int64_t* off_ptr =
+            target_offs.data_ptr<int64_t>();
+
+        for (int64_t r = 0; r < target_nodes; ++r){
+          uint64_t target_ppa =
+              ppa_ptr[r];
+
+          int64_t in_page_off =
+              off_ptr[r];
+
+          int64_t src_byte_offset =
+              r * row_bytes;
+
+          if (in_page_off == 0 &&
+              (row_bytes % PAGE_SIZE == 0)) {
+
+              ssize_t ret = cuFileWrite(
+                  dev_handle,
+                  src_raw + src_byte_offset,
+                  row_bytes,
+                  target_ppa,
+                  0
+              );
+
+              AT_ASSERTM(
+                  ret == row_bytes,
+                  "GDS Write failed for target partition row"
+              );
+          }
+          else{
+            int num_pages = (in_page_off + row_bytes > PAGE_SIZE) ? 2 : 1;
+
+            int64_t dma_bytes = num_pages * PAGE_SIZE;
+
+            std::vector<uint8_t> tmp_buf(dma_bytes);
+
+            ssize_t ret = cuFileRead(
+                        dev_handle,
+                        tmp_buf.data(),
+                        dma_bytes,
+                        target_ppa,
+                        0
+                    );
+
+            AT_ASSERTM(ret == dma_bytes,"GDS Read failed before unaligned write");
+
+            cudaMemcpy(
+                        tmp_buf.data() + in_page_off,
+                        src_raw + src_byte_offset,
+                        row_bytes,
+                        cudaMemcpyDeviceToHost
+                    );
+
+            ret = cuFileWrite(
+                        dev_handle,
+                        tmp_buf.data(),
+                        dma_bytes,
+                        target_ppa,
+                        0
+                    );
+
+            AT_ASSERTM(
+                ret == dma_bytes,
+                "GDS Write failed for unaligned target row"
+            );
+          }
+        }
+      }
+
+      if (boundary_writes == 0) {
+            return;
+        }
+
+      int64_t scratch_size = boundary_writes * (2 * PAGE_SIZE);
+
+      torch::Tensor gpu_scratch =
+            torch::empty(
+                {scratch_size},
+                torch::dtype(torch::kUInt8)
+                    .device(src.device())
+            );
+
+      uint8_t* scratch_raw =
+            reinterpret_cast<uint8_t*>(
+                gpu_scratch.data_ptr()
+            );
+
+      CUfileIOParams_t* io_params =
+            (CUfileIOParams_t*)calloc(
+                boundary_writes,
+                sizeof(CUfileIOParams_t)
+            );
+
+
+      AT_ASSERTM(
+            io_params != nullptr,
+            "Failed to allocate memory for io_params"
+        );
+
+      std::vector<int64_t> h_src_offsets(
+          boundary_writes
+      );
+
+      std::vector<int64_t> h_scratch_offsets(
+          boundary_writes
+      );
+
+      std::vector<int64_t> h_in_page_offsets(
+          boundary_writes
+      );
+
+      std::vector<int64_t> h_dma_sizes(
+          boundary_writes
+      );
+
+      size_t param_idx = 0;
+
+      int64_t curr_src_row = target_nodes;
+
+      int64_t curr_scratch_byte = 0;
+
+      for (size_t i = 0; i < num_parts; ++i){
+        if(static_cast<int>(i) == pid || !boundaries[i].defined() || boundaries[i].numel() == 0){
+          continue;
+        }
+
+        auto ppas = boundary_ppas[i].to(at::kCPU).contiguous();
+        auto offsets = boundary_page_offs[i].to(at::kCPU).contiguous();
+
+        const uint64_t* ppa_ptr = reinterpret_cast<const uint64_t*>(ppas.data_ptr());
+        const int64_t* off_ptr = offsets.data_ptr<int64_t>();
+        int64_t num_rows = boundaries[i].numel();
+
+        for (int64_t r = 0; r < num_rows; ++r){
+          
+        }
+
+      }
+  })
+}
 
 bool device_read_and_verify(
     int64_t fd,
