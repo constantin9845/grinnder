@@ -703,7 +703,7 @@ class HostBuffer:
         for i in range(self.num_parts):
             file_id = f"{self._file_prefix}_p{i}"
             meta = self._backend.host_ftl.tensor_table[file_id]
-            ppa_list = meta["ppa_uint64_list"]  # NumPy array or Tensor
+            ppa_list = meta["ppa_uint64_list"] 
 
             if i == pid:
                 num_target_rows = (

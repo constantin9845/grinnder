@@ -56,12 +56,43 @@ class PPA:
         self.npg = ssd_data[4]
         self.nsec = ssd_data[5]
 
-        self.sec_per_pg    = self.nsec
-        self.sec_per_blk   = self.sec_per_pg  * self.npg
-        self.sec_per_pl    = self.sec_per_blk * self.nblk
-        self.sec_per_lun   = self.sec_per_pl  * self.npl
-        self.sec_per_ch    = self.sec_per_lun * self.nlun
-        self.total_sectors = self.sec_per_ch  * self.nch
+        self.sec_per_pg = self.nsec
+
+        self.sec_per_blk = (
+            self.sec_per_pg * self.npg
+        )
+
+        self.sec_per_pl = (
+            self.sec_per_blk * self.nblk
+        )
+
+        self.sec_per_lun = (
+            self.sec_per_pl * self.npl
+        )
+
+        self.sec_per_ch = (
+            self.sec_per_lun * self.nlun
+        )
+
+        self.total_sectors = (
+            self.sec_per_ch * self.nch
+        )
+
+        self.pages_per_plane = (
+            self.nblk * self.npg
+        )
+
+        self.pages_per_lun = (
+            self.npl * self.pages_per_plane
+        )
+
+        self.pages_per_channel = (
+            self.nlun * self.pages_per_lun
+        )
+
+        self.total_pages = (
+            self.nch * self.pages_per_channel
+        )
 
     def get_data(self):
         return [self.ch, self.lun, self.pl, self.blk, self.pg, self.sec, self.rsv]
@@ -70,7 +101,7 @@ class PPA:
         return self._c_ppa.ppa
 
     @classmethod
-    def from_uint64(cls, raw_ppa):
+    def from_uint64(cls, raw_ppa, ssd_data):
         c_ppa = StructPPA(ppa=raw_ppa)
         return cls(
             [
@@ -81,20 +112,26 @@ class PPA:
                 c_ppa.pg,
                 c_ppa.sec,
                 c_ppa.rsv,
-            ]
+            ],
+            ssd_data
         )
 
     def get_index(self):
 
-        lba = (
-            (self.ch * self.sec_per_ch) 
-            + (self.lun * self.sec_per_lun) 
-            + (self.pl * self.sec_per_pl) 
-            + (self.blk * self.sec_per_blk) 
-            + (self.pg * self.sec_per_pg) 
-            + self.sec)
-        
-        if lba > self.total_sectors:
-            print(f"Invalid lba = {lba}")
+        index = (
+            (self.ch * self.sec_per_ch)
+            + (self.lun * self.sec_per_lun)
+            + (self.pl * self.sec_per_pl)
+            + (self.blk * self.sec_per_blk)
+            + (self.pg * self.sec_per_pg)
+            + self.sec
+        )
 
-        return lba
+        if index >= self.total_sectors:
+            raise ValueError(
+                f"Invalid physical sector index: {index}"
+            )
+
+        return index
+
+    
