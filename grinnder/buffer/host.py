@@ -841,15 +841,23 @@ class HostBuffer:
         self, pid: int, gpu_data: Tensor, stream: torch.cuda.Stream
     ) -> None:
         """Bypass: write GPU tensor directly to NVMe storage.
-
-        With GDS, kvikio uses a direct GPU-to-NVMe path. If direct GDS is not
-        available, kvikio may use a compatible staging path internally.
         """
         assert self._backend is not None, "StorageBackend required for bypass"
         file_id = f"{self._file_prefix}_p{pid}"
         stream.wait_stream(torch.cuda.current_stream(gpu_data.device))
         stream.synchronize()
         self._backend.gpu_write(gpu_data, file_id, stream)
+
+    def async_bypass_to_storage_raw(
+            self, pid: int, gpu_data: Tensor, stream: torch.cuda.Stream
+        ) -> None:
+            """Bypass: write GPU tensor directly to NVMe storage.
+            """
+            assert self._backend is not None, "StorageBackend required for bypass"
+            file_id = f"{self._file_prefix}_p{pid}"
+            stream.wait_stream(torch.cuda.current_stream(gpu_data.device))
+            stream.synchronize()
+            self._backend.host_write(gpu_data, file_id)
 
     # ------------------------------------------------------------------
     # Storage <-> Host (cache management)
@@ -933,6 +941,8 @@ class HostBuffer:
                 handles.append(h)
             for h in handles:
                 self._backend.wait(h)
+
+
 
     # ------------------------------------------------------------------
     # Utility
