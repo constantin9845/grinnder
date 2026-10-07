@@ -671,27 +671,20 @@ class HostBuffer:
     # ------------------------------------------------------------------
 
     def async_gather_direct_raw(
-    self,
-    phase,
-    fds,
-    pid: int,
-    gpu_target: Tensor,
-    boundaries: List[Optional[Tensor]],
-    stream: torch.cuda.Stream,
-) -> None:
+        self,
+        phase,
+        fds,
+        pid: int,
+        gpu_target: Tensor,
+        boundaries: List[Optional[Tensor]],
+        stream: torch.cuda.Stream,
+    ) -> None:
         """Gather features directly from NVMe files to GPU VRAM via GDS.
 
         GPU layout: [intra(pid) | boundary_from_p0 | ... | boundary_from_pN]
-
-        Args:
-            phase: Current execution phase name for stats.
-            pid: Target partition index.
-            gpu_target: Pre-allocated CUDA tensor [total_nodes, feature_dim].
-            boundaries: boundaries[src_pid] = index tensor into partition src_pid.
-                        boundaries[pid] = None (intra-partition, copied contiguously).
-            stream: CUDA stream for non-blocking asynchronous execution.
         """
-        import os
+        import time
+        import numpy as np
 
         t0 = time.perf_counter_ns()
 
@@ -708,51 +701,57 @@ class HostBuffer:
         bndry_page_offs = []
 
         for i in range(self.num_parts):
-
             file_id = f"{self._file_prefix}_p{i}"
             meta = self._backend.host_ftl.tensor_table[file_id]
-            ppa_list = meta["ppa_uint64_list"]
+            ppa_list = meta["ppa_uint64_list"]  # NumPy array or Tensor
 
             if i == pid:
-                num_target_rows = boundaries[pid].numel() if boundaries[pid] is not None else (gpu_target.size(0) - sum(b.numel() for b in boundaries if b is not None and b is not boundaries[pid]))
+                num_target_rows = (
+                    boundaries[pid].numel()
+                    if boundaries[pid] is not None
+                    else (gpu_target.size(0) - sum(b.numel() for b in boundaries if b is not None and b is not boundaries[pid]))
+                )
                 bndries.append(torch.arange(num_target_rows, dtype=torch.long))
 
-                target_ppas = []
-                target_offs = []
+                # Vectorized row -> page calculation for target partition
+                row_indices = np.arange(num_target_rows, dtype=np.int64)
+                start_bytes = row_indices * row_bytes
+                start_page_indices = start_bytes // bytes_per_page
+                in_page_offsets = start_bytes % bytes_per_page
 
-                for row_idx in range(num_target_rows):
-                    start_byte = row_idx * row_bytes
-                    start_page_idx = start_byte // bytes_per_page
-                    target_ppas.append(ppa_list[start_page_idx])
-                    target_offs.append(start_byte % bytes_per_page)
+                if isinstance(ppa_list, torch.Tensor):
+                    target_ppas_np = ppa_list.cpu().numpy()[start_page_indices]
+                else:
+                    target_ppas_np = ppa_list[start_page_indices]
 
-                bndry_ppas.append(torch.tensor(target_ppas, dtype=torch.uint64))
-                bndry_page_offs.append(torch.tensor(target_offs, dtype=torch.long))
+                # Convert to int64 bit-reinterpreted Torch Tensors (safe for PyTorch)
+                bndry_ppas.append(torch.from_numpy(target_ppas_np.view(np.int64)))
+                bndry_page_offs.append(torch.from_numpy(in_page_offsets))
 
             elif boundaries[i] is None or boundaries[i].numel() == 0:
                 bndries.append(torch.empty(0, dtype=torch.long))
-                bndry_ppas.append(torch.empty(0, dtype=torch.uint64))
+                bndry_ppas.append(torch.empty(0, dtype=torch.int64))
                 bndry_page_offs.append(torch.empty(0, dtype=torch.long))
 
             else:
                 bnd = boundaries[i].cpu()
                 bndries.append(bnd)
 
-                row_ppas = []
-                in_page_offs = []
+                # Vectorized row -> page calculation for boundary partitions
+                bnd_np = bnd.numpy()
+                start_bytes = bnd_np * row_bytes
+                start_page_indices = start_bytes // bytes_per_page
+                in_page_offsets = start_bytes % bytes_per_page
 
-                for row_idx in bnd.tolist():
-                    start_byte = row_idx * row_bytes
-                    start_page_idx = start_byte // bytes_per_page
-                    row_ppas.append(ppa_list[start_page_idx])
-                    in_page_offs.append(start_byte % bytes_per_page)
+                if isinstance(ppa_list, torch.Tensor):
+                    row_ppas_np = ppa_list.cpu().numpy()[start_page_indices]
+                else:
+                    row_ppas_np = ppa_list[start_page_indices]
 
-                bndry_ppas.append(torch.tensor(row_ppas, dtype=torch.uint64))
-                bndry_page_offs.append(torch.tensor(in_page_offs, dtype=torch.long))
+                bndry_ppas.append(torch.from_numpy(row_ppas_np.view(np.int64)))
+                bndry_page_offs.append(torch.from_numpy(in_page_offsets))
 
-    
         with torch.cuda.stream(stream):
-
             if self._ops is not None:
                 self._ops.gather_partitions_direct_raw(
                     pid, 
@@ -763,126 +762,6 @@ class HostBuffer:
                     bndry_page_offs,
                     row_bytes
                 )
-                print("Not a fallback")
-
-            else:
-
-                # --------------------------------------------------------
-                # Fallback
-                # --------------------------------------------------------
-
-                print("Fallback")
-
-                offset = num_nodes[pid]
-
-                # read full target partition fill
-                self._backend.gpu_read_direct(
-                    status=0,
-                    fd=None,
-                    file_id=f"{self._backend._storage_dir}/{self._file_prefix}_p{pid}",
-                    tensor=gpu_target[:offset],
-                    offset=0,
-                    stream=stream,
-                )
-
-                print("Target partition loaded")
-
-                # --------------------------------------------------------
-                # Load only required boundary file rows
-                # --------------------------------------------------------
-
-                for i in range(self.num_parts):
-
-                    if i == pid or bndries[i].numel() == 0:
-                        continue
-
-                    part_file = file_paths[i]
-                    indices = bndries[i]
-                    num_rows = indices.size(0)
-                    part_file_size = file_sizes[i]
-                    max_valid_nodes = num_nodes[i]
-
-                    if indices.device.type != "cpu":
-                        indices = indices.cpu()
-
-
-                    fd = None
-
-                    # iterate nodes from partition
-                    for k in range(num_rows):
-
-                        node_idx = indices[k].item()
-                        file_offset = node_idx * row_bytes
-
-                        # Exactly one output row, preserving index_select order.
-                        dest_row = gpu_target[
-                            offset : offset + 1
-                        ]
-
-                        if k == 0 and num_rows == 1:
-                            # Single row: open, read, close
-                            fd = self._backend.gpu_read_direct(
-                                status=0,
-                                fd=None,
-                                file_id=f"{self._backend._storage_dir}/{self._file_prefix}_p{i}",
-                                tensor=dest_row,
-                                offset=file_offset,
-                                stream=stream,
-                            )
-
-                        elif k == 0:
-                            # First row: open handle + read
-                            fd = self._backend.gpu_read_direct(
-                                status=1,
-                                fd=None,
-                                file_id=f"{self._backend._storage_dir}/{self._file_prefix}_p{i}",
-                                tensor=dest_row,
-                                offset=file_offset,
-                                stream=stream,
-                            )
-
-                        elif k != num_rows - 1:
-                            # Middle row: use persistent fd
-                            fd = self._backend.gpu_read_direct(
-                                status=2,
-                                fd=fd,
-                                file_id=f"{self._backend._storage_dir}/{self._file_prefix}_p{i}",
-                                tensor=dest_row,
-                                offset=file_offset,
-                                stream=stream,
-                            )
-
-                        else:
-                            # Last row: read + close
-                            fd = self._backend.gpu_read_direct(
-                                status=3,
-                                fd=fd,
-                                file_id=f"{self._backend._storage_dir}/{self._file_prefix}_p{i}",
-                                tensor=dest_row,
-                                offset=file_offset,
-                                stream=stream,
-                            )
-
-                        offset += 1
-
-                    print(f"Boundary partition {i} data loaded")
-
-                # --------------------------------------------------------
-                # Final sanity check
-                # --------------------------------------------------------
-
-                expected_offset = (
-                    target_partition_nodes +
-                    boundary_nodes
-                )
-
-                if offset != expected_offset:
-                    raise RuntimeError(
-                        f"Gather offset mismatch:\n"
-                        f"  final offset = {offset}\n"
-                        f"  expected = {expected_offset}"
-                    )
-
 
         bt = gpu_target.numel() * gpu_target.element_size()
         gb = round(bt / (1024**3), 3)
@@ -891,7 +770,6 @@ class HostBuffer:
             f"\tPartition {pid} loads "
             f"{gb} GB from other partitions"
         )
-
 
     # ------------------------------------------------------------------
     # Scatter: one GPU tensor -> multiple host partitions (with accumulation)

@@ -33,7 +33,7 @@ class FTL:
             self.layout['sector_size'],
         ]
 
-        # SSD Geometry Sector Offsets (Replaces generating a 134M element mapping list)
+
         self.sec_per_pg    = self.layout['sector']
         self.sec_per_blk   = self.sec_per_pg  * self.layout['page']
         self.sec_per_pl    = self.sec_per_blk * self.layout['block']
