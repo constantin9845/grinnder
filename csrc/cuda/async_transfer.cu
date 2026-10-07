@@ -351,7 +351,7 @@ __global__ void gather_unaligned_rows_kernel(
 
 void gather_partitions_direct_raw(
   int pid,
-  CUfileHandle_t dev_handle,                                   
+  int64_t dev_handle_ptr,                                   
   torch::Tensor dst,
   std::vector<torch::Tensor> boundaries,
   std::vector<torch::Tensor> boundary_ppas,       
@@ -362,6 +362,8 @@ void gather_partitions_direct_raw(
 
   AT_ASSERTM(dst.is_cuda(), "Destination must be a CUDA tensor");
   AT_ASSERTM(dst.is_contiguous(), "Destination must be contiguous");
+
+  CUfileHandle_t dev_handle = reinterpret_cast<CUfileHandle_t>(static_cast<uintptr_t>(dev_handle_ptr));
 
   auto stream = at::cuda::getCurrentCUDAStream(dst.get_device());
 
