@@ -1002,7 +1002,7 @@ class FTL:
     def open_device(self, device="/dev/nvme0n1"):
 
         return os.open(
-            device,
+            "/dev/nvme0n1",
             os.O_RDWR,
         )
 
