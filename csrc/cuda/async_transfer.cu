@@ -586,12 +586,14 @@ void device_write(
 
         if (write_bytes <= 0) break;
 
+        int64_t sectors = (write_bytes + sector_size - 1) / sector_size;
+
         struct nvme_user_io io {};
         std::memset(&io, 0, sizeof(io));
         io.opcode = 0x01; 
         io.addr = reinterpret_cast<uint64_t>(src_raw + dev_offset);
         io.slba = raw_ppa;
-        io.nblocks = 31;
+        io.nblocks = sectors-1;
 
         int ret = ioctl(raw_fd, NVME_IOCTL_SUBMIT_IO, &io);
 
@@ -655,6 +657,8 @@ bool device_read_and_verify(
 
         if (read_bytes <= 0) break;
 
+        int64_t sectors = (write_bytes + sector_size - 1) / sector_size;
+
         struct nvme_user_io io {};
         std::memset(&io, 0, sizeof(io));
 
@@ -670,7 +674,7 @@ bool device_read_and_verify(
         io.slba = raw_ppa;
         
         // NVMe nblocks is 0-based
-        io.nblocks = 31;
+        io.nblocks = sectors-1;
 
         int ret = ioctl(raw_fd, NVME_IOCTL_SUBMIT_IO, &io);
 
