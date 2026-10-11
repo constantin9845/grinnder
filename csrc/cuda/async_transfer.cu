@@ -697,8 +697,8 @@ bool device_read_and_verify(
     }
 
     if (diff_count > 0) {
-        int64_t diff_page_idx = first_diff_byte / (sector_size*8);
-        int64_t byte_in_page = first_diff_byte % (sector_size*8);
+        int64_t diff_page_idx = first_diff_byte / (sector_size*32);
+        int64_t byte_in_page = first_diff_byte % (sector_size*32);
         uint64_t diff_ppa = static_cast<uint64_t>(ppa_ptr[diff_page_idx]);
 
         printf("\n================ [VERIFICATION DIFF DETECTED] ================\n");
