@@ -581,8 +581,8 @@ void device_write(
     for (int64_t i = 0; i < num_pages; ++i) {
         uint64_t raw_ppa = static_cast<uint64_t>(ppa_ptr[i]);
 
-        int64_t dev_offset = i * (sector_size*8);
-        int64_t write_bytes = std::min<int64_t>((sector_size*8), total_bytes - dev_offset);
+        int64_t dev_offset = i * (sector_size*32);
+        int64_t write_bytes = std::min<int64_t>((sector_size*32), total_bytes - dev_offset);
 
         if (write_bytes <= 0) break;
 
@@ -591,7 +591,7 @@ void device_write(
         io.opcode = 0x01; 
         io.addr = reinterpret_cast<uint64_t>(src_raw + dev_offset);
         io.slba = raw_ppa;
-        io.nblocks = 7;
+        io.nblocks = 31;
 
         int ret = ioctl(raw_fd, NVME_IOCTL_SUBMIT_IO, &io);
 
@@ -650,8 +650,8 @@ bool device_read_and_verify(
     for (int64_t i = 0; i < num_pages; ++i) {
         uint64_t raw_ppa = static_cast<uint64_t>(ppa_ptr[i]);
 
-        int64_t dev_offset = i * (sector_size*8);
-        int64_t read_bytes = std::min<int64_t>((sector_size*8), total_bytes - dev_offset);
+        int64_t dev_offset = i * (sector_size*32);
+        int64_t read_bytes = std::min<int64_t>((sector_size*32), total_bytes - dev_offset);
 
         if (read_bytes <= 0) break;
 
@@ -670,7 +670,7 @@ bool device_read_and_verify(
         io.slba = raw_ppa;
         
         // NVMe nblocks is 0-based
-        io.nblocks = 7;
+        io.nblocks = 31;
 
         int ret = ioctl(raw_fd, NVME_IOCTL_SUBMIT_IO, &io);
 
