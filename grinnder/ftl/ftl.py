@@ -194,12 +194,12 @@ class PPA:
 
 
 class FTL:
-    def __init__(self, device="/dev/nvme0n1"):
+    def __init__(self, device="/dev/nvme0n1", row_size=4096):
 
         '''
             1 sector = 512 B
-            8 sectors = 4096 B
-            NAND page = 4 KiB
+            32 sectors
+            NAND page = 16 KiB
 
             1 LPN = 1 NAND page
             1 LPN = 8 LBAs/sectors
@@ -227,6 +227,9 @@ class FTL:
         self.sector_size = 512
         self.page_size = (self.nsec * self.sector_size)
         self.pages_per_block = self.npg
+
+        self.row_size = row_size
+        self.rows_per_page = self.page_size // self.row_size
 
         self.pages_per_plane = (
             self.nblk * self.npg
@@ -271,9 +274,9 @@ class FTL:
             "ch" : 8,
             "lun" : 8,
             "plane" : 1,
-            "block" : 512,
-            "page" : 512,
-            "sector" : 8,
+            "block" : 256,
+            "page" : 256,
+            "sector" : 32,
             "sector_size" : 512
         }
 
@@ -577,9 +580,7 @@ class FTL:
 
         element_size = tensor.element_size()
         total_elements = tensor.numel()
-        total_bytes = (
-            total_elements * element_size
-        )
+        total_bytes = total_elements * element_size
 
         sectors_per_page = self.nsec
 
@@ -717,75 +718,24 @@ class FTL:
             )
 
         meta = self.tensor_table[file_id]
+        row_byte_offset = row_idx * self.row_size
+        page_idx = row_byte_offset // self.page_size
+        offset = (row_byte_offset % self.page_size) // self.row_size
 
-        shape = meta["shape"]
+        start_lpn = meta["start_lba"] // self.nsec
+        lpn = start_lpn + page_idx
+        mapping = self.get_mapping(lpn)
+        _, ppa, _ = mapping
 
-        if len(shape) > 1:
-            num_cols = shape[1]
-        else:
-            num_cols = 1
+        ppa_uint64 = np.array([ppa.to_uint64()], dtype=np.uint64)
 
-        row_size_bytes = (
-            num_cols
-            * meta["element_size"]
-        )
-
-        start_byte = (
-            row_idx * row_size_bytes
-        )
-
-        end_byte = (
-            start_byte
-            + row_size_bytes
-            - 1
-        )
-
-        bytes_per_page = (
-            meta["sector_size"]
-        )
-
-        start_page_idx = (
-            start_byte // bytes_per_page
-        )
-
-        end_page_idx = (
-            end_byte // bytes_per_page
-        )
-
-        current_ppas = (
-            self._get_tensor_current_ppas(
-                file_id
-            )
-        )
-
-        target_ppas = (
-            current_ppas[
-                start_page_idx:
-                end_page_idx + 1
-            ]
-        )
-
-        in_page_offset = (
-            start_byte
-            % bytes_per_page
-        )
 
         return {
             "row_idx": row_idx,
-
-            "ppas": target_ppas,
-
-            "ppa_tensor": (
-                self._convert_ppas_to_tensor(
-                    target_ppas
-                )
-            ),
-
-            "num_pages": len(target_ppas),
-
-            "in_page_offset": in_page_offset,
-
-            "row_size_bytes": row_size_bytes,
+            "lpn": lpn,
+            "ppa": ppa.to_uint64(),
+            "ppa_tensor": self._convert_ppas_to_tensor(ppa_uint64),
+            "offset": offset,
         }
 
     def get_tensor_ppa_map(

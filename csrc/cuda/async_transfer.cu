@@ -261,6 +261,7 @@ void gather_partitions_direct(
     AT_ASSERTM(curr_offset == total_rows, "Gather offset mismatch with destination size");
 
     // 1. Direct GDS read for target partition
+    // arguments : [ fd, base addr in VRAM, size (to read), file_offset, offset inside VRAM ]
     ssize_t ret = cuFileRead(target_handle, dst_raw, target_file_size, 0, 0);
     AT_ASSERTM(ret == target_file_size, "GDS Read failed for target partition");
 
@@ -587,7 +588,7 @@ void device_write(
 
         struct nvme_user_io io {};
         std::memset(&io, 0, sizeof(io));
-        io.opcode = 0x01; // nvme_cmd_write
+        io.opcode = 0x01; 
         io.addr = reinterpret_cast<uint64_t>(src_raw + dev_offset);
         io.slba = raw_ppa;
         io.nblocks = 7;
