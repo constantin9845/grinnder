@@ -657,7 +657,7 @@ bool device_read_and_verify(
 
         if (read_bytes <= 0) break;
 
-        int64_t sectors = (write_bytes + sector_size - 1) / sector_size;
+        int64_t sectors = (read_bytes + sector_size - 1) / sector_size;
 
         struct nvme_user_io io {};
         std::memset(&io, 0, sizeof(io));
