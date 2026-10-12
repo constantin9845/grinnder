@@ -65,5 +65,6 @@ void gather_partitions_direct_raw(
   std::vector<torch::Tensor> boundaries,
   std::vector<torch::Tensor> boundary_ppas,       
   std::vector<torch::Tensor> boundary_page_offs,  
+  std::vector<torch::Tensor> boundary_row_offsets, 
   int64_t row_bytes
 );

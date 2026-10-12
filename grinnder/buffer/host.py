@@ -694,11 +694,12 @@ class HostBuffer:
         feature_dim = gpu_target.size(1)
         bytes_per_elem = gpu_target.element_size()
         row_bytes = feature_dim * bytes_per_elem
-        bytes_per_page = 4096 
+        bytes_per_page = self._backend.host_ftl.page_size 
 
         bndries = []
         bndry_ppas = []
-        bndry_page_offs = []
+        bndry_page_offs = [] # Byte offsets within each physical page
+        bndry_row_offsets = [] # Row-slot indices within each physical page
 
         for i in range(self.num_parts):
             file_id = f"{self._file_prefix}_p{i}"
@@ -709,47 +710,80 @@ class HostBuffer:
                 num_target_rows = (
                     boundaries[pid].numel()
                     if boundaries[pid] is not None
-                    else (gpu_target.size(0) - sum(b.numel() for b in boundaries if b is not None and b is not boundaries[pid]))
+                    else (
+                        gpu_target.size(0) 
+                        - sum(
+                            b.numel() 
+                            for j, b in enumerate(boundaries) 
+                            if j != pid and b is not None
+                            )
+                    )
                 )
+
                 bndries.append(torch.arange(num_target_rows, dtype=torch.long))
 
                 # Vectorized row -> page calculation for target partition
                 row_indices = np.arange(num_target_rows, dtype=np.int64)
                 start_bytes = row_indices * row_bytes
                 start_page_indices = start_bytes // bytes_per_page
-                in_page_offsets = start_bytes % bytes_per_page
+                in_page_byte_offsets = start_bytes % bytes_per_page
+                in_page_row_offsets = in_page_byte_offsets // row_bytes
 
                 if isinstance(ppa_list, torch.Tensor):
-                    target_ppas_np = ppa_list.cpu().numpy()[start_page_indices]
+                    ppa_np = ppa_list.cpu().numpy()
                 else:
-                    target_ppas_np = ppa_list[start_page_indices]
+                    ppa_np = np.asarray(ppa_list)
 
-                # Convert to int64 bit-reinterpreted Torch Tensors (safe for PyTorch)
-                bndry_ppas.append(torch.from_numpy(target_ppas_np.view(np.int64)))
-                bndry_page_offs.append(torch.from_numpy(in_page_offsets))
+                target_ppas_np = ppa_np[start_page_indices]
+
+                bndry_ppas.append(
+                    torch.from_numpy(
+                        np.asarray(target_ppas_np, dtype=np.uint64).view(np.int64).copy()
+                    )
+                )
+
+                bndry_page_offs.append(
+                    torch.from_numpy(in_page_byte_offsets.copy())
+                )
+                bndry_row_offsets.append(
+                    torch.from_numpy(in_page_row_offsets.copy())
+                )
 
             elif boundaries[i] is None or boundaries[i].numel() == 0:
                 bndries.append(torch.empty(0, dtype=torch.long))
                 bndry_ppas.append(torch.empty(0, dtype=torch.int64))
                 bndry_page_offs.append(torch.empty(0, dtype=torch.long))
+                bndry_row_offsets.append(torch.empty(0, dtype=torch.long))
 
             else:
-                bnd = boundaries[i].cpu()
+                bnd = boundaries[i].cpu().to(torch.long)
                 bndries.append(bnd)
 
                 # Vectorized row -> page calculation for boundary partitions
                 bnd_np = bnd.numpy()
                 start_bytes = bnd_np * row_bytes
                 start_page_indices = start_bytes // bytes_per_page
-                in_page_offsets = start_bytes % bytes_per_page
+                in_page_byte_offsets = start_bytes % bytes_per_page
+                in_page_row_offsets = in_page_byte_offsets // row_bytes
 
                 if isinstance(ppa_list, torch.Tensor):
-                    row_ppas_np = ppa_list.cpu().numpy()[start_page_indices]
+                    ppa_np = ppa_list.cpu().numpy()
                 else:
-                    row_ppas_np = ppa_list[start_page_indices]
+                    ppa_np = np.asarray(ppa_list)
 
-                bndry_ppas.append(torch.from_numpy(row_ppas_np.view(np.int64)))
-                bndry_page_offs.append(torch.from_numpy(in_page_offsets))
+                row_ppas_np = ppa_np[start_page_indices]
+
+                bndry_ppas.append(
+                    torch.from_numpy(
+                        np.asarray(row_ppas_np, dtype=np.uint64).view(np.int64).copy()
+                    )
+                )
+                bndry_page_offs.append(
+                    torch.from_numpy(in_page_byte_offsets.copy())
+                )
+                bndry_row_offsets.append(
+                    torch.from_numpy(in_page_row_offsets.copy())
+                )
 
         with torch.cuda.stream(stream):
             if self._ops is not None:
@@ -760,6 +794,7 @@ class HostBuffer:
                     bndries,
                     bndry_ppas,
                     bndry_page_offs,
+                    bndry_row_offsets,
                     row_bytes
                 )
 

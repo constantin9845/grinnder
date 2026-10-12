@@ -175,6 +175,7 @@ class StorageBackend:
         verify = self.host_ftl.verify_write(meta, tensor, file_id)
         assert verify, f"Data verification failed for file_id={file_id}! DRAM contents corrupted."
         return 0
+    
 
     def host_read(self, file_id: str, tensor: Tensor, async_: bool = True) -> int:
         """Read from NVMe into a CPU tensor via io_uring.

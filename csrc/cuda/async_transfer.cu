@@ -24,6 +24,7 @@
 #include <sys/ioctl.h>
 #include <linux/nvme_ioctl.h>
 
+
 static std::unordered_map<int, CUfileHandle_t> g_cufile_handles;
 static std::mutex g_cufile_handles_mutex;
 
@@ -328,27 +329,32 @@ void gather_partitions_direct(
 }
 
 
-#define PAGE_SIZE 4096
+#define PAGE_SIZE 16*1024
 
-__global__ void gather_unaligned_rows_kernel(
-    const uint8_t* __restrict__ scratch_ptr,
-    uint8_t* __restrict__ dst_raw,
-    const int64_t* __restrict__ dst_offsets,
-    const int64_t* __restrict__ scratch_offsets,
-    const int64_t* __restrict__ in_page_offsets,
-    int64_t row_bytes,
-    int64_t num_items) {
 
-  int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx >= num_items) return;
+static inline uint64_t encode_row_request_ppa(
+    int rows_per_page,
+    uint64_t raw_ppa,
+    int64_t row_offset)
+{
+    constexpr uint64_t PL_SHIFT = 40;
+    constexpr uint64_t PL_MASK = 0xFULL;
 
-  const uint8_t* src = scratch_ptr + scratch_offsets[idx] + in_page_offsets[idx];
-  uint8_t* dst = dst_raw + dst_offsets[idx];
+    TORCH_CHECK(
+        row_offset >= 0 && row_offset < rows_per_page,
+        "Invalid row offset: ", row_offset
+    );
 
-  for (int64_t b = 0; b < row_bytes; ++b) {
-    dst[b] = src[b];
-  }
+    // Mapped PPAs must use plane 0. The request uses
+    // the plane field to carry the row index instead.
+    TORCH_CHECK(
+        ((raw_ppa >> PL_SHIFT) & PL_MASK) == 0,
+        "Expected mapped PPA with plane = 0"
+    );
+
+    return (raw_ppa & ~(PL_MASK << PL_SHIFT)) | (static_cast<uint64_t>(row_offset) << PL_SHIFT);
 }
+
 
 void gather_partitions_direct_raw(
   int pid,
@@ -357,13 +363,22 @@ void gather_partitions_direct_raw(
   std::vector<torch::Tensor> boundaries,
   std::vector<torch::Tensor> boundary_ppas,       
   std::vector<torch::Tensor> boundary_page_offs,  
+  std::vector<torch::Tensor> boundary_row_offsets, 
   int64_t row_bytes
 
 ){
 
   AT_ASSERTM(dst.is_cuda(), "Destination must be a CUDA tensor");
   AT_ASSERTM(dst.is_contiguous(), "Destination must be contiguous");
+  TORCH_CHECK(row_bytes > 0, "row_bytes must be positive");
 
+  const size_t num_parts = boundary_ppas.size();
+
+  TORCH_CHECK(pid >= 0 && static_cast<size_t>(pid) < num_parts, "Invalid partition ID");
+  TORCH_CHECK(boundaries.size() == num_parts, "boundaries and boundary_ppas size mismatch");
+  TORCH_CHECK(boundary_row_offsets.size() == num_parts, "boundary_row_offsets and boundary_ppas size mismatch");
+
+  (void)boundary_page_offs;
   CUfileHandle_t dev_handle = reinterpret_cast<CUfileHandle_t>(static_cast<uintptr_t>(dev_handle_ptr));
 
   auto stream = at::cuda::getCurrentCUDAStream(dst.get_device());
@@ -373,139 +388,167 @@ void gather_partitions_direct_raw(
     c10::cuda::CUDAStreamGuard guard(stream);
 
     uint8_t* dst_raw = reinterpret_cast<uint8_t*>(dst.data_ptr());
-    size_t num_parts = boundary_ppas.size();
 
+    // rows from other partitions
     size_t boundary_reads = 0;
+
     for (size_t i = 0; i < num_parts; ++i) {
-      if (static_cast<int>(i) != pid && boundaries[i].defined() && boundaries[i].numel() > 0) {
-        boundary_reads += boundaries[i].numel();
-      }
+        if (static_cast<int>(i) != pid &&
+            boundaries[i].defined() &&
+            boundaries[i].numel() > 0) {
+            boundary_reads += boundaries[i].numel();
+        }
     }
 
-    int64_t target_nodes = boundaries[pid].defined() ? boundaries[pid].numel() : (dst.size(0) - boundary_reads);
+    const int64_t target_nodes = boundaries[pid].defined() ? boundaries[pid].numel() : (dst.size(0) - static_cast<int64_t>(boundary_reads));
 
-    if (target_nodes > 0 && boundary_ppas[pid].defined() && boundary_ppas[pid].numel() > 0){
+    TORCH_CHECK(target_nodes >= 0, "Invalid target row count");
+    TORCH_CHECK(
+        target_nodes + static_cast<int64_t>(boundary_reads)
+            <= dst.size(0),
+        "Requested rows exceed destination tensor size"
+    );
+
+    
+    // ---------------------------------------------------------
+    // 1. Full target partition
+    // ---------------------------------------------------------
+    if(target_nodes > 0){
+      TORCH_CHECK(boundary_ppas[pid].defined(),
+                  "Target PPAs are undefined");
+      TORCH_CHECK(boundary_row_offsets[pid].defined(),
+                  "Target row offsets are undefined");
+
+
       auto target_ppas = boundary_ppas[pid].to(at::kCPU).contiguous();
-      auto target_offs = boundary_page_offs[pid].to(at::kCPU).contiguous();
+      auto target_rows = boundary_row_offsets[pid].to(at::kCPU).contiguous();
 
-      const uint64_t* ppa_ptr = reinterpret_cast<const uint64_t*>(target_ppas.data_ptr());
-      const int64_t* off_ptr = target_offs.data_ptr<int64_t>();
+      TORCH_CHECK(target_ppas.numel() >= target_nodes,
+                  "Not enough target PPAs");
+      TORCH_CHECK(target_rows.numel() >= target_nodes,
+                  "Not enough target row offsets");
 
-      for (int64_t r = 0; r < target_nodes; ++r){
-        uint64_t target_ppa = ppa_ptr[r];
-        int64_t in_page_off = off_ptr[r];
-        int64_t dst_byte_offset = r * row_bytes;
+      const uint64_t* ppa_ptr = target_ppas.data_ptr<uint64_t>();
+      const int64_t* row_ptr = target_rows.data_ptr<int64_t>();
 
-        if (in_page_off == 0 && (row_bytes % PAGE_SIZE == 0)){
-          ssize_t ret = cuFileRead(dev_handle, dst_raw + dst_byte_offset, row_bytes, target_ppa, 0);
-          AT_ASSERTM(ret == row_bytes, "GDS Read failed for target partition row");
-        }
-        else{
-          int num_pages = (in_page_off + row_bytes > PAGE_SIZE) ? 2 : 1;
-          int64_t dma_bytes = num_pages * PAGE_SIZE;
+      for (int64_t r = 0; r<target_nodes; ++r){
+        const uint64_t raw_ppa = ppa_ptr[r];
+        const int64_t row_offset = row_ptr[r];
 
-          // Temporary host buffer or small scratch read
-          std::vector<uint8_t> tmp_buf(dma_bytes);
-          ssize_t ret = cuFileRead(dev_handle, tmp_buf.data(), dma_bytes, target_ppa, 0);
-          AT_ASSERTM(ret == dma_bytes, "GDS Read failed for target partition unaligned row");
+        const uint64_t request_ppa = encode_row_request_ppa(raw_ppa, row_offset);
 
-          cudaMemcpyAsync(dst_raw + dst_byte_offset, tmp_buf.data() + in_page_off, row_bytes, cudaMemcpyHostToDevice, stream);
-        }
+        const int64_t dst_byte_offset = r * row_bytes;
+
+        // FEMU will return only this row (not full page)
+        // add batch io
+        const ssize_t ret = cuFileRead(
+            dev_handle,
+            dst_raw + dst_byte_offset,
+            row_bytes,
+            static_cast<int64_t>(request_ppa),
+            0
+        );
+
+        TORCH_CHECK(
+            ret == row_bytes,
+            "GDS target row read failed: row=", r,
+            ", returned=", ret,
+            ", expected=", row_bytes
+        );
       }
     }
 
-    int64_t scratch_size = boundary_reads * (2 * PAGE_SIZE);
-    torch::Tensor gpu_scratch = torch::empty({scratch_size}, torch::dtype(torch::kUInt8).device(dst.device()));
-    uint8_t* scratch_raw = reinterpret_cast<uint8_t*>(gpu_scratch.data_ptr());
+    // ---------------------------------------------------------
+    // 2. Read boundary rows 
+    // ---------------------------------------------------------
 
-    CUfileIOParams_t* io_params = (CUfileIOParams_t*)calloc(boundary_reads, sizeof(CUfileIOParams_t));
-    AT_ASSERTM(io_params != nullptr, "Failed to allocate memory for io_params");
+    if (boundary_reads == 0) {
+      return;
+    }
 
-    std::vector<int64_t> h_dst_offsets(boundary_reads);
-    std::vector<int64_t> h_scratch_offsets(boundary_reads);
-    std::vector<int64_t> h_in_page_offsets(boundary_reads);
-
+    std::vector<CUfileIOParams_t> io_params(boundary_reads);
     size_t param_idx = 0;
     int64_t curr_dst_row = target_nodes;
-    int64_t curr_scratch_byte = 0;
 
     for (size_t i = 0; i < num_parts; ++i){
-      if (static_cast<int>(i) == pid || !boundaries[i].defined() || boundaries[i].numel() == 0) {
+      if (static_cast<int>(i) == pid ||
+        !boundaries[i].defined() ||
+        boundaries[i].numel() == 0){
         continue;
       }
 
-      auto ppas = boundary_ppas[i].to(at::kCPU).contiguous();
-      auto offsets = boundary_page_offs[i].to(at::kCPU).contiguous();
+      TORCH_CHECK(boundary_ppas[i].defined(),
+                  "Boundary PPAs are undefined for partition ", i);
+      TORCH_CHECK(boundary_row_offsets[i].defined(),
+                  "Boundary row offsets are undefined for partition ", i);
 
-      const uint64_t* ppa_ptr = reinterpret_cast<const uint64_t*>(ppas.data_ptr());
-      const int64_t* off_ptr = offsets.data_ptr<int64_t>();
-      int64_t num_rows = boundaries[i].numel();
+
+      auto ppas = boundary_ppas[i].to(at::kCPU).contiguous();
+      auto rows = boundary_row_offsets[i].to(at::kCPU).contiguous();
+      const int64_t num_rows = boundaries[i].numel();
+
+      TORCH_CHECK(ppas.numel() >= num_rows,
+                  "Not enough boundary PPAs for partition ", i);
+      TORCH_CHECK(rows.numel() >= num_rows,
+                  "Not enough boundary row offsets for partition ", i);
+
+      const uint64_t* ppa_ptr = ppas.data_ptr<uint64_t>();
+      const int64_t* row_ptr = rows.data_ptr<int64_t>();
 
       for (int64_t r = 0; r < num_rows; ++r){
-        uint64_t raw_ppa = ppa_ptr[r];
-        int64_t in_page_off = off_ptr[r];
-        int64_t dst_byte_offset = curr_dst_row * row_bytes;
+        const uint64_t raw_ppa = ppa_ptr[r];
+        const int64_t row_offset = row_ptr[r];
 
-        int num_pages = (in_page_off + row_bytes > PAGE_SIZE) ? 2 : 1;
-        int64_t dma_bytes = num_pages * PAGE_SIZE;
+        const uint64_t request_ppa = encode_row_request_ppa(raw_ppa, row_offset);
+        const int64_t dst_byte_offset = curr_dst_row * row_bytes;
 
-        io_params[param_idx].mode = CUFILE_BATCH;
-        io_params[param_idx].opcode = CUFILE_READ;
-        io_params[param_idx].fh = dev_handle;
-        io_params[param_idx].u.batch.devPtr_base = scratch_raw;
-        io_params[param_idx].u.batch.devPtr_offset = curr_scratch_byte;
-        io_params[param_idx].u.batch.file_offset = raw_ppa; // raw ppa
-        io_params[param_idx].u.batch.size = dma_bytes;
+        CUfileIOParams_t& param = io_params[param_idx];
 
-        h_dst_offsets[param_idx] = dst_byte_offset;
-        h_scratch_offsets[param_idx] = curr_scratch_byte;
-        h_in_page_offsets[param_idx] = in_page_off;
+        param.mode = CUFILE_BATCH;
+        param.opcode = CUFILE_READ;
+        param.fh = dev_handle;
+        param.u.batch.devPtr_base = dst_raw;
+        param.u.batch.devPtr_offset = dst_byte_offset;
+        param.u.batch.file_offset = static_cast<int64_t>(request_ppa); // raw ppa + in-page offset
+        param.u.batch.size = row_bytes;
 
-        curr_scratch_byte += dma_bytes;
-        curr_dst_row++;
-        param_idx++;
+        ++curr_dst_row;
+        ++param_idx;
       }
     }
 
+    TORCH_CHECK(param_idx == boundary_reads, "Internal boundary read count mismatch");
+
     CUfileBatchHandle_t batch_handle;
     CUfileError_t status = cuFileBatchIOSetUp(&batch_handle, MAX_BATCH_SIZE);
-    AT_ASSERTM(status.err == CU_FILE_SUCCESS, "cuFileBatchIOSetUp failed");
-
+    TORCH_CHECK(status.err == CU_FILE_SUCCESS, "cuFileBatchIOSetUp failed");
     CUfileIOEvents_t events[MAX_BATCH_SIZE];
 
     for (size_t offset_idx = 0; offset_idx < boundary_reads; offset_idx += MAX_BATCH_SIZE){
-      unsigned int current_batch_size = std::min<size_t>(MAX_BATCH_SIZE, boundary_reads - offset_idx);
+      const unsigned int current_batch_size = static_cast<unsigned int>(std::min<size_t>(MAX_BATCH_SIZE,boundary_reads - offset_idx));
 
-      status = cuFileBatchIOSubmit(batch_handle, current_batch_size, &io_params[offset_idx], 0);
-      AT_ASSERTM(status.err == CU_FILE_SUCCESS, "cuFileBatchIOSubmit failed");
+      status = cuFileBatchIOSubmit(batch_handle,current_batch_size,io_params.data() + offset_idx,0);
 
-      unsigned int completed = current_batch_size;
-      status = cuFileBatchIOGetStatus(batch_handle, current_batch_size, &completed, events, NULL);
-      AT_ASSERTM(status.err == CU_FILE_SUCCESS, "cuFileBatchIOGetStatus failed");
+      TORCH_CHECK(status.err == CU_FILE_SUCCESS, "cuFileBatchIOSubmit failed");
+
+      unsigned int completed = 0;
+
+      status = cuFileBatchIOGetStatus(
+          batch_handle,
+          current_batch_size,
+          &completed,
+          events,
+          nullptr
+      );
+
+      TORCH_CHECK(status.err == CU_FILE_SUCCESS, "cuFileBatchIOGetStatus failed");
+      TORCH_CHECK(completed == current_batch_size, "Not all boundary reads completed");
     }
 
     cuFileBatchIODestroy(batch_handle);
-    free(io_params);
-
-    torch::Tensor d_dst_offsets = torch::from_blob(h_dst_offsets.data(), {static_cast<int64_t>(boundary_reads)}, torch::kInt64).to(dst.device());
-    torch::Tensor d_scratch_offsets = torch::from_blob(h_scratch_offsets.data(), {static_cast<int64_t>(boundary_reads)}, torch::kInt64).to(dst.device());
-    torch::Tensor d_in_page_offsets = torch::from_blob(h_in_page_offsets.data(), {static_cast<int64_t>(boundary_reads)}, torch::kInt64).to(dst.device());
-
-    int threads = 256;
-    int blocks = (boundary_reads + threads - 1) / threads;
-
-    gather_unaligned_rows_kernel<<<blocks, threads, 0, stream>>>(
-        scratch_raw,
-        dst_raw,
-        d_dst_offsets.data_ptr<int64_t>(),
-        d_scratch_offsets.data_ptr<int64_t>(),
-        d_in_page_offsets.data_ptr<int64_t>(),
-        row_bytes,
-        boundary_reads);
-
-
   });
 
+  C10_CUDA_CHECK(cudaGetLastError());
 }
 
 
