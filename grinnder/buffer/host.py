@@ -729,6 +729,8 @@ class HostBuffer:
                 in_page_byte_offsets = start_bytes % bytes_per_page
                 in_page_row_offsets = in_page_byte_offsets // row_bytes
 
+                rows_per_page = self._backend.host_ftl.page_size // row_bytes
+
                 if isinstance(ppa_list, torch.Tensor):
                     ppa_np = ppa_list.cpu().numpy()
                 else:
@@ -795,6 +797,7 @@ class HostBuffer:
                     bndry_ppas,
                     bndry_page_offs,
                     bndry_row_offsets,
+                    rows_per_page,
                     row_bytes
                 )
 

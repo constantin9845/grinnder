@@ -364,8 +364,8 @@ void gather_partitions_direct_raw(
   std::vector<torch::Tensor> boundary_ppas,       
   std::vector<torch::Tensor> boundary_page_offs,  
   std::vector<torch::Tensor> boundary_row_offsets, 
+  int rows_per_page,
   int64_t row_bytes
-
 ){
 
   AT_ASSERTM(dst.is_cuda(), "Destination must be a CUDA tensor");
@@ -435,7 +435,7 @@ void gather_partitions_direct_raw(
         const uint64_t raw_ppa = ppa_ptr[r];
         const int64_t row_offset = row_ptr[r];
 
-        const uint64_t request_ppa = encode_row_request_ppa(raw_ppa, row_offset);
+        const uint64_t request_ppa = encode_row_request_ppa(rows_per_page, raw_ppa, row_offset);
 
         const int64_t dst_byte_offset = r * row_bytes;
 
@@ -499,7 +499,7 @@ void gather_partitions_direct_raw(
         const uint64_t raw_ppa = ppa_ptr[r];
         const int64_t row_offset = row_ptr[r];
 
-        const uint64_t request_ppa = encode_row_request_ppa(raw_ppa, row_offset);
+        const uint64_t request_ppa = encode_row_request_ppa(rows_per_page, raw_ppa, row_offset);
         const int64_t dst_byte_offset = curr_dst_row * row_bytes;
 
         CUfileIOParams_t& param = io_params[param_idx];
