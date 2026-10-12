@@ -69,3 +69,10 @@ void gather_partitions_direct_raw(
   int rows_per_page,
   int64_t row_bytes
 );
+
+void gpu_write(
+  int64_t fd,
+  torch::Tensor src,
+  torch::Tensor ppa_list,
+  int sector_size
+);

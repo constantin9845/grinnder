@@ -856,6 +856,46 @@ class FTL:
             self.ssd_data[-1],
         )
 
+    def gpu_write(
+        self,
+        meta,
+        tensor,
+        file_id,
+    ):
+
+        assert tensor.is_contiguous(), (
+            "device write requires contiguous tensor"
+        )
+
+        # Use metadata's file_id when possible so that
+        # the mapping can be refreshed after GC.
+        if file_id in self.tensor_table:
+
+            ppa_array = (
+                self._get_tensor_current_ppas(
+                    file_id
+                )
+            )
+
+        else:
+            ppa_array = (
+                meta["ppa_uint64_list"]
+            )
+
+        ppa_tensor = (
+            self._convert_ppas_to_tensor(
+                ppa_array
+            )
+        )
+
+        self._ops.gpu_write(
+            self.cuFD,
+            tensor,
+            ppa_tensor,
+            self.ssd_data[-1],
+        )
+
+
     def verify_write(
         self,
         meta,

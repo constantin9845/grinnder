@@ -75,19 +75,31 @@ class StorageBackend:
         file_id: str,
         stream: Optional[torch.cuda.Stream] = None,
     ) -> None:
+        import ctypes
         """Write GPU tensor directly to NVMe via GDS.
+
+        int64_t fd,
+        torch::Tensor src,
+        torch::Tensor ppa_list,
+        int sector_size
 
         Detaches from autograd graph — bypass writes data only.
         """
-        path = self._path(file_id)
-        assert tensor.is_cuda, "gpu_write requires a CUDA tensor"
 
-        # Detach and ensure contiguous for GDS __cuda_array_interface__
-        t = tensor.detach().contiguous()
+        assert tensor.is_cuda, "host_write requires a CPU tensor"
+        assert tensor.is_contiguous(), "host_write requires contiguous tensor"
 
-        f = self._kvikio.CuFile(path, "w")
-        f.write(t, file_offset=0)
-        f.close()
+        ptr = tensor.data_ptr()
+        nbytes = tensor.numel() * tensor.element_size()
+        buffer = (ctypes.c_char * nbytes).from_address(ptr)
+
+        meta = self.host_ftl.map_tensor(file_id, tensor)
+        self.host_ftl.gpu_write(meta, tensor, file_id)
+
+        #verify = self.host_ftl.verify_write(meta, tensor, file_id)
+        #assert verify, f"Data verification failed for file_id={file_id}! DRAM contents corrupted."
+        return 0
+        
 
     def gpu_read(
         self,

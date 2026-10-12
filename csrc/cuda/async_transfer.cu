@@ -655,16 +655,43 @@ void device_write(
 }
 
 void gpu_write(
-  int pid,
-  int64_t dev_handle_ptr,
+  int64_t fd,
   torch::Tensor src,
-  std::vector<torch::Tensor> boundaries,
-  std::vector<torch::Tensor> boundary_ppas,
-  std::vector<torch::Tensor> boundary_page_offs,
-  int64_t row_bytes
+  torch::Tensor ppa_list,
+  int sector_size
 ){
-  AT_ASSERTM(src.is_cuda(), "Source must be a CUDA tensor");
-  AT_ASSERTM(src.is_contiguous(), "Source must be contiguous");
+  TORCH_CHECK(src.is_cuda(), "Source tensor must be on GPU");
+  TORCH_CHECK(src.is_contiguous(), "Source tensor must be contiguous");
+  TORCH_CHECK(ppa_list.is_contiguous(), "PPA tensor must be contiguous");
+
+
+  const int64_t* ppa_ptr = ppa_list.to(at::kCPU).contiguous().data_ptr<int64_t>();
+  int64_t total_bytes = src.numel() * src.element_size();
+  int64_t num_pages = ppa_list.numel();
+  int64_t page_bytes = static_cast<int64_t>(sector_size) * 32;
+
+  CUfileHandle_t handle = reinterpret_cast<CUfileHandle_t>(fd);
+  const void* src_raw = src.data_ptr();
+
+  for (int64_t i = 0; i < num_pages; ++i){
+    uint64_t raw_ppa = static_cast<uint64_t>(ppa_ptr[i]);
+    int64_t dev_offset = i * page_bytes;
+    int64_t write_bytes = std::min<int64_t>(page_bytes, total_bytes - dev_offset);
+    if (write_bytes <= 0) break;
+
+    TORCH_CHECK(write_bytes % sector_size == 0, "Write size must be sector-aligned");
+
+    ssize_t ret = cuFileWrite(
+        handle,
+        static_cast<const char*>(src_raw) + dev_offset,
+        write_bytes,
+        static_cast<int64_t>(raw_ppa),
+        dev_offset
+    );
+
+    TORCH_CHECK(ret == write_bytes, "cuFileWrite failed at page ", i, " (PPA: ", raw_ppa, "), returned ", ret, ", expected ", write_bytes);
+  }
+
 }
 
 bool device_read_and_verify(
