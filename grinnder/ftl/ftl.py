@@ -597,7 +597,8 @@ class FTL:
         )
 
         if self.next_free_lba % sectors_per_page != 0:
-
+            
+            # move LBA to start of next free page
             self.next_free_lba += (
                 sectors_per_page
                 - (
@@ -635,10 +636,7 @@ class FTL:
 
             lpn = int(lba) // sectors_per_page
 
-            # Allocate physical page and establish:
-            #
-            #     L2P[lpn] = physical PPA
-            #
+            # alloc page + map
             ppa = self.write_lpn(lpn)
 
             mapped_ppas[i] = (
@@ -719,8 +717,10 @@ class FTL:
 
         meta = self.tensor_table[file_id]
         row_byte_offset = row_idx * self.row_size
-        page_idx = row_byte_offset // self.page_size
-        offset = (row_byte_offset % self.page_size) // self.row_size
+        page_idx = row_byte_offset // self.page_size  # flash page of row tensor
+
+        # offset inside page converted to logical index : (0 = 0, 1 = 4096/row_size, 2 = 8192,...)
+        offset = (row_byte_offset % self.page_size) // self.row_size  
 
         start_lpn = meta["start_lba"] // self.nsec
         lpn = start_lpn + page_idx
