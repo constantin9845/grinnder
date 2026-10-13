@@ -23,7 +23,7 @@
 #include <cerrno>
 #include <sys/ioctl.h>
 #include <linux/nvme_ioctl.h>
-
+#include <cstdio>
 
 static std::unordered_map<int, CUfileHandle_t> g_cufile_handles;
 static std::mutex g_cufile_handles_mutex;
@@ -671,6 +671,8 @@ void device_write(
     }
 }
 
+
+
 void gpu_write(
   int64_t fd,
   torch::Tensor src,
@@ -706,7 +708,19 @@ void gpu_write(
         dev_offset
     );
 
-    TORCH_CHECK(ret == write_bytes, "cuFileWrite failed at page ", i, " (PPA: ", raw_ppa, "), returned ", ret, ", expected ", write_bytes);
+    if (ret < 0) {
+    fprintf(stderr,
+        "[GDS WRITE ERROR] page=%lld, ret=%zd, errno=%d (%s)\n"
+        "  handle=%p, src=%p, bytes=%lld\n"
+        "  file_offset=%lld, buffer_offset=%lld\n",
+        (long long)i, ret, errno, strerror(errno),
+        (void*)handle,
+        (const char*)src_raw + dev_offset,
+        (long long)write_bytes,
+        (long long)raw_ppa,
+        (long long)dev_offset);
+    TORCH_CHECK(false, "cuFileWrite failed");
+}
   }
 
 }
