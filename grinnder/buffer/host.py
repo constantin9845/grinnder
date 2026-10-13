@@ -706,6 +706,8 @@ class HostBuffer:
             meta = self._backend.host_ftl.tensor_table[file_id]
             ppa_list = meta["ppa_uint64_list"] 
 
+            feature_type = False if "l0" not in file_id else True
+
             if i == pid:
                 num_target_rows = (
                     boundaries[pid].numel()
@@ -798,6 +800,7 @@ class HostBuffer:
                     bndry_page_offs,
                     bndry_row_offsets,
                     rows_per_page,
+                    feature_type,
                     row_bytes
                 )
 

@@ -335,10 +335,14 @@ void gather_partitions_direct(
 static inline uint64_t encode_row_request_ppa(
     int rows_per_page,
     uint64_t raw_ppa,
-    int64_t row_offset)
+    int64_t row_offset,
+    bool feature_type)
 {
     constexpr uint64_t PL_SHIFT = 40;
     constexpr uint64_t PL_MASK = 0xFULL;
+    constexpr uint64_t TYPE_SHIFT = 62;
+    constexpr uint64_t TYPE_BIT = 1ULL << TYPE_SHIFT;
+
 
     TORCH_CHECK(
         row_offset >= 0 && row_offset < rows_per_page,
@@ -352,7 +356,18 @@ static inline uint64_t encode_row_request_ppa(
         "Expected mapped PPA with plane = 0"
     );
 
-    return (raw_ppa & ~(PL_MASK << PL_SHIFT)) | (static_cast<uint64_t>(row_offset) << PL_SHIFT);
+    uint64_t request = 
+        (raw_ppa & ~(PL_MASK << PL_SHIFT)) |
+        (static_cast<uint64_t>(row_offset) << PL_SHIFT);
+
+    // set or clear the custom type bit
+    if (feature_type) {
+        request |= TYPE_BIT;
+    } else {
+        request &= ~TYPE_BIT;
+    }
+
+    return request;
 }
 
 
@@ -365,6 +380,7 @@ void gather_partitions_direct_raw(
   std::vector<torch::Tensor> boundary_page_offs,  
   std::vector<torch::Tensor> boundary_row_offsets, 
   int rows_per_page,
+  bool feature_type,
   int64_t row_bytes
 ){
 
@@ -435,7 +451,7 @@ void gather_partitions_direct_raw(
         const uint64_t raw_ppa = ppa_ptr[r];
         const int64_t row_offset = row_ptr[r];
 
-        const uint64_t request_ppa = encode_row_request_ppa(rows_per_page, raw_ppa, row_offset);
+        const uint64_t request_ppa = encode_row_request_ppa(rows_per_page, raw_ppa, row_offset, feature_type);
 
         const int64_t dst_byte_offset = r * row_bytes;
 
