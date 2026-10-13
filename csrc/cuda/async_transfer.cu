@@ -709,18 +709,18 @@ void gpu_write(
     );
 
     if (ret < 0) {
-    fprintf(stderr,
-        "[GDS WRITE ERROR] page=%lld, ret=%zd, errno=%d (%s)\n"
-        "  handle=%p, src=%p, bytes=%lld\n"
-        "  file_offset=%lld, buffer_offset=%lld\n",
-        (long long)i, ret, errno, strerror(errno),
-        (void*)handle,
-        (const char*)src_raw + dev_offset,
-        (long long)write_bytes,
-        (long long)raw_ppa,
-        (long long)dev_offset);
-    TORCH_CHECK(false, "cuFileWrite failed");
-}
+        TORCH_CHECK(
+            false,
+            "cuFileWrite failed: page=", i,
+            ", ret=", ret,
+            ", errno=", errno,
+            " (", strerror(errno), ")",
+            ", handle=", (void*)handle,
+            ", bytes=", write_bytes,
+            ", file_offset=", raw_ppa,
+            ", buffer_offset=", dev_offset
+        );
+    }
   }
 
 }
