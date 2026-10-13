@@ -708,6 +708,8 @@ class HostBuffer:
 
             feature_type = False if "l0" not in file_id else True
 
+            print(f"file id = {file_id} | feature_type = {feature_type}")
+
             if i == pid:
                 num_target_rows = (
                     boundaries[pid].numel()
