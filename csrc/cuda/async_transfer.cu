@@ -654,8 +654,7 @@ void gather_partitions_direct_raw(
             boundary_row_offsets[pid].to(at::kCPU).contiguous();
 
 
-        const uint64_t* ppa_ptr =
-            target_ppas.data_ptr<uint64_t>();
+        const int64_t* ppa_ptr = target_ppas.data_ptr<int64_t>();
         const int64_t* row_ptr =
             target_rows.data_ptr<int64_t>();
 
@@ -729,8 +728,7 @@ void gather_partitions_direct_raw(
             const int64_t num_rows = boundaries[i].numel();
 
 
-            const uint64_t* ppa_ptr =
-                ppas.data_ptr<uint64_t>();
+            const int64_t* ppa_ptr = ppas.data_ptr<int64_t>();
             const int64_t* row_ptr =
                 rows.data_ptr<int64_t>();
 
