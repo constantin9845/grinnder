@@ -677,12 +677,13 @@ void gather_partitions_direct_raw(
             const int64_t dst_byte_offset = r * row_bytes;
 
             printf(
-                "[GDS READ BEFORE] row=%ld request_ppa=0x%016lx "
-                "file_offset=%ld bytes=%ld\n",
-                r,
-                static_cast<unsigned long>(request_ppa),
-                row_offset,
-                row_bytes
+                "[GDS READ BEFORE] row=%lld request_ppa=0x%016llx "
+                "file_offset=%lld row_offset=%lld bytes=%lld\n",
+                (long long)r,
+                (unsigned long long)request_ppa,
+                (long long)file_offset,
+                (long long)row_offset,
+                (long long)row_bytes
             );
             fflush(stdout);
 
