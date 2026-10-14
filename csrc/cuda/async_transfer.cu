@@ -677,13 +677,12 @@ void gather_partitions_direct_raw(
             const int64_t dst_byte_offset = r * row_bytes;
 
             printf(
-                "[GDS TARGET] row=%lld ppa=0x%016llx "
-                "row_offset=%lld dst_offset=%lld bytes=%lld\n",
-                (long long)r,
-                (unsigned long long)request_ppa,
-                (long long)row_offset,
-                (long long)dst_byte_offset,
-                (long long)row_bytes
+                "[GDS READ BEFORE] row=%ld request_ppa=0x%016lx "
+                "file_offset=%ld bytes=%ld\n",
+                r,
+                static_cast<unsigned long>(request_ppa),
+                file_offset,
+                row_bytes
             );
             fflush(stdout);
 
@@ -694,6 +693,12 @@ void gather_partitions_direct_raw(
                 static_cast<int64_t>(request_ppa),
                 0
             );
+
+            printf(
+                "[GDS READ AFTER] row=%ld returned=%ld errno=%d\n",
+                r, static_cast<long>(ret), errno
+            );
+            fflush(stdout);
 
             TORCH_CHECK(
                 ret == row_bytes,
