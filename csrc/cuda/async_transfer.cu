@@ -681,7 +681,7 @@ void gather_partitions_direct_raw(
                 "file_offset=%ld bytes=%ld\n",
                 r,
                 static_cast<unsigned long>(request_ppa),
-                file_offset,
+                row_offset,
                 row_bytes
             );
             fflush(stdout);
