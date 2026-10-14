@@ -403,6 +403,8 @@ void gather_partitions_direct_raw(
   (void)boundary_page_offs;
   CUfileHandle_t dev_handle = reinterpret_cast<CUfileHandle_t>(static_cast<uintptr_t>(dev_handle_ptr));
 
+  AT_ASSERTM(false, "async gather raw fd = ", (void*)dev_handle);
+
   auto stream = at::cuda::getCurrentCUDAStream(dst.get_device());
 
   getH2DPool().run([=] {
