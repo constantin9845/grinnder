@@ -544,6 +544,9 @@ void gather_partitions_direct_raw(
       }
     }
 
+    std::fprintf(stderr, "gpu_write: handle=%p \n", (void*)handle);
+    std::fflush(stderr);
+
     TORCH_CHECK(param_idx == boundary_reads, "Internal boundary read count mismatch");
 
     CUfileBatchHandle_t batch_handle;
@@ -715,6 +718,9 @@ void gpu_write(
     if (write_bytes <= 0) break;
 
     TORCH_CHECK(write_bytes % sector_size == 0, "Write size must be sector-aligned");
+
+    std::fprintf(stderr, "gpu_write: handle=%p \n", (void*)handle);
+    std::fflush(stderr);
 
     ssize_t ret = cuFileWrite(
         handle,
