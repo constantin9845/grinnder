@@ -544,7 +544,7 @@ void gather_partitions_direct_raw(
       }
     }
 
-    std::fprintf(stderr, "gpu_write: handle=%p \n", (void*)handle);
+    std::fprintf(stderr, "gpu_write: handle=%p \n", (void*)dev_handle);
     std::fflush(stderr);
 
     TORCH_CHECK(param_idx == boundary_reads, "Internal boundary read count mismatch");
