@@ -697,7 +697,8 @@ void gpu_write(
   TORCH_CHECK(ppa_list.is_contiguous(), "PPA tensor must be contiguous");
 
 
-  const int64_t* ppa_ptr = ppa_list.to(at::kCPU).contiguous().data_ptr<int64_t>();
+  auto ppa_cpu = ppa_list.to(at::kCPU).contiguous();
+  const int64_t* ppa_ptr = ppa_cpu.data_ptr<int64_t>();
   int64_t total_bytes = src.numel() * src.element_size();
   int64_t num_pages = ppa_list.numel();
   int64_t page_bytes = static_cast<int64_t>(sector_size) * 32;
@@ -739,6 +740,8 @@ void gpu_write(
   }
 
 }
+
+
 
 bool device_read_and_verify(
     int64_t fd,
