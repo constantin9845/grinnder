@@ -702,7 +702,7 @@ void gpu_write(
   int64_t num_pages = ppa_list.numel();
   int64_t page_bytes = static_cast<int64_t>(sector_size) * 32;
 
-  CUfileHandle_t handle = reinterpret_cast<CUfileHandle_t>(fd);
+  CUfileHandle_t handle = reinterpret_cast<CUfileHandle_t>(static_cast<uintptr_t>(fd));
   const void* src_raw = src.data_ptr();
 
   for (int64_t i = 0; i < num_pages; ++i){
