@@ -58,6 +58,8 @@ bool device_read_and_verify(
 
 int64_t register_fd(int raw_fd);
 
+static inline uint64_t encode_host_ftl_bit(uint64_t raw_ppa);
+
 void gather_partitions_direct_raw(
   int pid,
   int64_t dev_handle_ptr,                                   

@@ -340,6 +340,7 @@ static inline uint64_t encode_row_request_ppa(
 {
     constexpr uint64_t PL_SHIFT = 40;
     constexpr uint64_t PL_MASK = 0xFULL;
+
     constexpr uint64_t TYPE_SHIFT = 62;
     constexpr uint64_t TYPE_BIT = 1ULL << TYPE_SHIFT;
 
@@ -356,9 +357,8 @@ static inline uint64_t encode_row_request_ppa(
         "Expected mapped PPA with plane = 0"
     );
 
-    uint64_t request = 
-        (raw_ppa & ~(PL_MASK << PL_SHIFT)) |
-        (static_cast<uint64_t>(row_offset) << PL_SHIFT);
+    uint64_t request = (raw_ppa & ~(PL_MASK << PL_SHIFT)) | (static_cast<uint64_t>(row_offset) << PL_SHIFT);
+    
 
     // set or clear the custom type bit
     if (feature_type) {
@@ -368,6 +368,12 @@ static inline uint64_t encode_row_request_ppa(
     }
 
     return request;
+}
+
+static inline uint64_t encode_host_ftl_bit(uint64_t raw_ppa)
+{
+    constexpr uint64_t HOST_FTL_BIT = 1ULL << 61;
+    return raw_ppa |= HOST_FTL_BIT;
 }
 
 
@@ -449,6 +455,8 @@ void gather_partitions_direct_raw(
 
       for (int64_t r = 0; r<target_nodes; ++r){
         const uint64_t raw_ppa = ppa_ptr[r];
+        // encode host ftl bit
+        raw_ppa = encode_host_ftl_bit(raw_ppa);
         const int64_t row_offset = row_ptr[r];
 
         printf("Type bit = %d\n", feature_type);
@@ -514,6 +522,8 @@ void gather_partitions_direct_raw(
 
       for (int64_t r = 0; r < num_rows; ++r){
         const uint64_t raw_ppa = ppa_ptr[r];
+        // encode host ftl bit
+        raw_ppa = encode_host_ftl_bit(raw_ppa);
         const int64_t row_offset = row_ptr[r];
 
         const uint64_t request_ppa = encode_row_request_ppa(rows_per_page, raw_ppa, row_offset, feature_type);
@@ -641,6 +651,9 @@ void device_write(
     for (int64_t i = 0; i < num_pages; ++i) {
         uint64_t raw_ppa = static_cast<uint64_t>(ppa_ptr[i]);
 
+        // encode host ftl bit
+        raw_ppa = encode_host_ftl_bit(raw_ppa);
+
         int64_t dev_offset = i * (sector_size*32);
         int64_t write_bytes = std::min<int64_t>((sector_size*32), total_bytes - dev_offset);
 
@@ -694,6 +707,8 @@ void gpu_write(
 
   for (int64_t i = 0; i < num_pages; ++i){
     uint64_t raw_ppa = static_cast<uint64_t>(ppa_ptr[i]);
+    // encode host ftl bit
+    raw_ppa = encode_host_ftl_bit(raw_ppa);
     int64_t dev_offset = i * page_bytes;
     int64_t write_bytes = std::min<int64_t>(page_bytes, total_bytes - dev_offset);
     if (write_bytes <= 0) break;
@@ -752,6 +767,8 @@ bool device_read_and_verify(
     /* 2. Read sectors via NVMe IOCTL opcode 0x02 (nvme_cmd_read) */
     for (int64_t i = 0; i < num_pages; ++i) {
         uint64_t raw_ppa = static_cast<uint64_t>(ppa_ptr[i]);
+        // encode host ftl bit
+        raw_ppa = encode_host_ftl_bit(raw_ppa);
 
         int64_t dev_offset = i * (sector_size*32);
         int64_t read_bytes = std::min<int64_t>((sector_size*32), total_bytes - dev_offset);
