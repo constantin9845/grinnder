@@ -497,10 +497,7 @@ void gather_partitions_direct_raw(
 
     for (size_t i = 0; i < num_parts; ++i){
 
-      std::fprintf(stderr, "gpu_read: handle=%p \n", (void*)dev_handle);
-      std::fflush(stderr);
-
-      TORCH_CHECK(1==1, "test point");
+      TORCH_CHECK(false, "GPU read file handle = ", (void*)dev_handle);
 
 
       if (static_cast<int>(i) == pid ||
@@ -723,8 +720,7 @@ void gpu_write(
 
     TORCH_CHECK(write_bytes % sector_size == 0, "Write size must be sector-aligned");
 
-    std::fprintf(stderr, "gpu_write: handle=%p \n", (void*)handle);
-    std::fflush(stderr);
+    TORCH_CHECK(false, "GPU write file handle = ", (void*)handle);
 
     ssize_t ret = cuFileWrite(
         handle,
