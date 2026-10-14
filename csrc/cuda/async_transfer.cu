@@ -496,6 +496,13 @@ void gather_partitions_direct_raw(
     int64_t curr_dst_row = target_nodes;
 
     for (size_t i = 0; i < num_parts; ++i){
+
+      std::fprintf(stderr, "gpu_read: handle=%p \n", (void*)dev_handle);
+      std::fflush(stderr);
+
+      TORCH_CHECK(1==1, "test point");
+
+
       if (static_cast<int>(i) == pid ||
         !boundaries[i].defined() ||
         boundaries[i].numel() == 0){
@@ -521,8 +528,6 @@ void gather_partitions_direct_raw(
       const int64_t* row_ptr = rows.data_ptr<int64_t>();
 
       for (int64_t r = 0; r < num_rows; ++r){
-        std::fprintf(stderr, "gpu_read: handle=%p \n", (void*)dev_handle);
-        std::fflush(stderr);
         uint64_t raw_ppa = ppa_ptr[r];
         // encode host ftl bit
         raw_ppa = encode_host_ftl_bit(raw_ppa);
