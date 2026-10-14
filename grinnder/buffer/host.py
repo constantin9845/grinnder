@@ -805,6 +805,8 @@ class HostBuffer:
                     feature_type,
                     row_bytes
                 )
+            else:
+                print("Not calling async gather raw")
 
         bt = gpu_target.numel() * gpu_target.element_size()
         gb = round(bt / (1024**3), 3)
