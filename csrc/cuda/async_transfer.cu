@@ -454,7 +454,7 @@ void gather_partitions_direct_raw(
       const int64_t* row_ptr = target_rows.data_ptr<int64_t>();
 
       for (int64_t r = 0; r<target_nodes; ++r){
-        const uint64_t raw_ppa = ppa_ptr[r];
+        uint64_t raw_ppa = ppa_ptr[r];
         // encode host ftl bit
         raw_ppa = encode_host_ftl_bit(raw_ppa);
         const int64_t row_offset = row_ptr[r];
@@ -521,7 +521,7 @@ void gather_partitions_direct_raw(
       const int64_t* row_ptr = rows.data_ptr<int64_t>();
 
       for (int64_t r = 0; r < num_rows; ++r){
-        const uint64_t raw_ppa = ppa_ptr[r];
+        uint64_t raw_ppa = ppa_ptr[r];
         // encode host ftl bit
         raw_ppa = encode_host_ftl_bit(raw_ppa);
         const int64_t row_offset = row_ptr[r];
