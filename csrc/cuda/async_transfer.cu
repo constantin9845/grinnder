@@ -1145,3 +1145,10 @@ void scatter_partitions(int pid, torch::Tensor src,
 
 
 // python3 setup.py build_ext --inplace
+
+// compiler errors for build : 
+// export CC=/usr/bin/gcc
+// export CXX=/usr/bin/g++
+// GRINNDER_USE_UGDS=1 python -m pip install -e . --no-build-isolation
+
+#include <ugds.h>
