@@ -6,43 +6,6 @@
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // Async GPU <-> Host transfers
-  m.def("h2d_copy_async", &h2d_copy_async, "Async CPU-host to GPU copy");
-  m.def("d2h_copy_async", &d2h_copy_async, "Async GPU to CPU-host copy");
-  m.def("h2d_synchronize", &h2d_synchronize, "Wait for H2D thread pool");
-  m.def("d2h_synchronize", &d2h_synchronize, "Wait for D2H thread pool");
-
-  // Partition gather/scatter
-  m.def("gather_partitions", &gather_partitions,
-        "Gather features from host partitions to GPU tensor");
-  m.def("gather_partitions_direct", &gather_partitions_direct,
-        "Gather features from storage files to GPU tensor");
-  m.def("gather_activations_direct", &gather_activations_direct,
-        "Gather activations from storage files to GPU tensor (full files)");
-  m.def("scatter_partitions", &scatter_partitions,
-        "Scatter GPU gradient to host partitions with accumulation");
-
-  // Subgraph extraction
-  m.def("build_subgraph", &build_subgraph,
-        "Extract 1-hop subgraph with contiguous relabeling");
-
-  // io_uring engine for host <-> storage
-  py::class_<IoUringEngine>(m, "IoUringEngine")
-      .def(py::init<int>(), py::arg("queue_depth") = 64)
-      .def("submit_read", &IoUringEngine::submit_read)
-      .def("submit_write", &IoUringEngine::submit_write)
-      .def("wait", &IoUringEngine::wait)
-      .def("wait_all", &IoUringEngine::wait_all)
-      .def("poll", &IoUringEngine::poll)
-      .def("pending", &IoUringEngine::pending)
-      .def("has_io_uring", &IoUringEngine::has_io_uring);
-
-  m.def("open_files", &open_files, "Open and register GDS partition files (CUDA)");
-  m.def("close_files", &close_files, "Deregister GDS handles and close file descriptors (CUDA)");
-  m.def("device_write", &device_write, "Write CPU tensors to storage");
-  m.def("gpu_write", &gpu_write, "Write GPU tensors directly to storage");
-  m.def("device_read_and_verify", &device_read_and_verify, "Write CPU tensors to storage and verify no corruption");
-  m.def("register_fd", &register_fd, "register fd with CUfile");
-  m.def("gather_partitions_direct_raw", &gather_partitions_direct_raw, "Gather features from raw block device to GPU tensor");
-
+  
   m.def("test_ugds_link", &test_ugds_link);
 }
