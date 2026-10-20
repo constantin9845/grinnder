@@ -2,6 +2,7 @@
 
 #include <torch/extension.h>
 #include <cufile.h>
+#include <ugds.h>
 
 // D2H: GPU -> CPU host tensor (on current CUDA stream, via D2H thread pool)
 void d2h_copy_async(torch::Tensor src, torch::Tensor dst);
