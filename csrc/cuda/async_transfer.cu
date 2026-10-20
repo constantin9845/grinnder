@@ -1153,6 +1153,6 @@ void scatter_partitions(int pid, torch::Tensor src,
 
 #include <ugds.h>
 
-extern "C" uGDSError_t test_ugds_link() {
+uGDSError_t test_ugds_link() {
     return uGDSDriverOpen();
 }
