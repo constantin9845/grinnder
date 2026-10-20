@@ -80,4 +80,4 @@ void gpu_write(
   int sector_size
 );
 
-extern "C" int test_ugds_link();
+extern "C" uGDSError_t test_ugds_link();
