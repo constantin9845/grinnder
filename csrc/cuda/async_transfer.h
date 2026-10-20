@@ -79,3 +79,5 @@ void gpu_write(
   torch::Tensor ppa_list,
   int sector_size
 );
+
+extern "C" int test_ugds_link();

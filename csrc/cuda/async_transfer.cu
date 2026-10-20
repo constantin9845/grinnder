@@ -1152,3 +1152,7 @@ void scatter_partitions(int pid, torch::Tensor src,
 // GRINNDER_USE_UGDS=1 python -m pip install -e . --no-build-isolation
 
 #include <ugds.h>
+
+extern "C" int test_ugds_link() {
+    return static_cast<int>(uGDSDriverOpen());
+}
