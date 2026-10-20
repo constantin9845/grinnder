@@ -6,6 +6,9 @@ from pathlib import Path
 
 from setuptools import setup, find_packages
 
+UGDS_DIR = os.path.expanduser("~/uGDS")
+USE_UGDS = os.getenv("GRINNDER_USE_UGDS", "0") == "1"
+
 # Check for liburing
 def has_liburing():
     """Check if liburing is available for io_uring support."""
@@ -75,17 +78,39 @@ def get_extensions():
         os.environ["TORCH_CUDA_ARCH_LIST"] = "8.0"
         print("TORCH_CUDA_ARCH_LIST not set; defaulting to 8.0")
 
-    ext = CUDAExtension(
-        name="grinnder._C",
-        sources=sources,
-        define_macros=define_macros,
-        libraries=["cufile"],
-        extra_compile_args={
-            "cxx": extra_cxx_flags,
-            "nvcc": extra_nvcc_flags,
-        },
-        extra_link_args=extra_link_flags,
-    )
+    if USE_UGDS:
+        print(f"Building with uGDS from {UGDS_DIR}")
+
+        ext = CUDAExtension(
+            name="grinnder._C",
+            sources=sources,
+            include_dirs=[
+                os.path.join(UGDS_DIR, "include"),
+            ],
+            define_macros=[
+                ("USE_UGDS", "1"),
+            ],
+            libraries=["ugds"],
+            library_dirs=[os.path.join(UGDS_DIR, "build")],
+            runtime_library_dirs=[os.path.join(UGDS_DIR, "build")],
+            extra_compile_args={
+                "cxx": extra_cxx_flags,
+                "nvcc": extra_nvcc_flags,
+            },
+            extra_link_args=extra_link_flags,
+        )
+    else:
+        ext = CUDAExtension(
+            name="grinnder._C",
+            sources=sources,
+            define_macros=define_macros,
+            libraries=["cufile"],
+            extra_compile_args={
+                "cxx": extra_cxx_flags,
+                "nvcc": extra_nvcc_flags,
+            },
+            extra_link_args=extra_link_flags,
+        )
 
     return [ext], {"build_ext": BuildExtension.with_options(no_python_abi_tag=True)}
 
