@@ -97,7 +97,7 @@ def get_extensions():
                 "cxx": extra_cxx_flags,
                 "nvcc": extra_nvcc_flags,
             },
-            extra_link_args=extra_link_flags,
+            extra_link_args=["-Wl,--no-as-needed", *extra_link_flags],
         )
     else:
         ext = CUDAExtension(
