@@ -987,10 +987,10 @@ class FTL:
             ),
         }
 
-    def open_device(self, device="/dev/nvme0n1"):
+    def open_device(self, device="/dev/ugds_drv0"):
 
         return os.open(
-            "/dev/nvme0n1",
+            "/dev/ugds_drv0",
             os.O_RDWR,
         )
 
