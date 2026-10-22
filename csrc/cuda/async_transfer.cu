@@ -632,7 +632,7 @@ void gather_activations_direct(
 
 #include <sys/ioctl.h>
 #include <linux/nvme_ioctl.h>
-
+/*
 void device_write(
     int64_t fd,
     torch::Tensor src,
@@ -685,7 +685,7 @@ void device_write(
         }
     }
 }
-
+*/
 
 
 void gpu_write(
@@ -1170,5 +1170,103 @@ void gather_partitions_direct_raw(
     C10_CUDA_CHECK(cudaGetLastError());
 
   }
+
+
+void device_write(
+    int64_t fd,
+    torch::Tensor src,
+    torch::Tensor ppa_list,
+    int sector_size
+){
+  TORCH_CHECK(!src.is_cuda(), "Source tensor must be on CPU");
+  TORCH_CHECK(src.is_contiguous(), "Source tensor must be contiguous");
+  TORCH_CHECK(!ppa_list.is_cuda(), "PPA tensor must be on CPU");
+  TORCH_CHECK(ppa_list.scalar_type() == torch::kInt64, "PPA tensor must have dtype int64");
+  TORCH_CHECK(ppa_list.is_contiguous(),"PPA tensor must be contiguous");
+  TORCH_CHECK(sector_size > 0, "sector_size must be positive");
+
+  uGDSHandle_t handle = reinterpret_cast<uGDSHandle_t>(static_cast<uintptr_t>(fd));
+
+  const uint8_t* src_raw = reinterpret_cast<const uint8_t*>(src.data_ptr());
+  const int64_t* ppa_ptr = ppa_list.data_ptr<int64_t>();
+
+  const int64_t total_bytes = static_cast<int64_t>(src.numel()) * src.element_size();
+  const int64_t num_pages = ppa_list.numel();
+
+  const int64_t chunk_bytes = static_cast<int64_t>(sector_size) * 32;
+
+  TORCH_CHECK(total_bytes % sector_size == 0, "Source size must be sector-aligned");
+
+  if (total_bytes == 0) {
+      return;
+  }
+
+  TORCH_CHECK(num_pages > 0, "PPA list is empty");
+
+  // alloc stage buffer in VRAM
+  auto gpu_buffer = torch::empty({chunk_bytes}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+
+  uint8_t* gpu_ptr = gpu_buffer.data_ptr<uint8_t>();
+
+  auto reg_ret = uGDSBufRegister(
+      static_cast<const void*>(gpu_ptr),
+      static_cast<size_t>(chunk_bytes),
+      0
+  );
+
+  TORCH_CHECK(reg_ret == 0,"uGDSBufRegister failed, error: ",static_cast<int>(reg_ret));
+
+  try{
+    for(int64_t i = 0; i < num_pages; ++i){
+      const int64_t dev_offset = i * chunk_bytes;
+
+      if(dev_offset >= total_bytes){
+          break;
+      }
+
+      const int64_t write_bytes = std::min<int64_t>(chunk_bytes, total_bytes-dev_offset);
+
+      uint64_t raw_ppa = static_cast<uint64_t>(ppa_ptr[i]);
+      raw_ppa = encode_host_ftl_bit(raw_ppa);
+
+      TORCH_CHECK(write_bytes % sector_size == 0,"Chunk size is not sector-aligned: ", write_bytes);
+
+      cudaError_t cuda_ret = cudaMemcpy(
+          gpu_ptr,
+          src_raw + dev_offset,
+          static_cast<size_t>(write_bytes),
+          cudaMemcpyHostToDevice
+      );
+
+      TORCH_CHECK(
+          cuda_ret == cudaSuccess,
+          "CPU-to-GPU staging copy failed: ",
+          cudaGetErrorString(cuda_ret)
+      );
+
+      const ssize_t ret = uGDSWrite(
+          handle,
+          gpu_ptr,
+          static_cast<size_t>(write_bytes),
+          static_cast<off_t>(raw_ppa),
+          0
+      );
+
+      TORCH_CHECK(
+          ret == write_bytes,
+          "uGDSWrite failed at chunk ", i,
+          " (PPA: ", raw_ppa,
+          ", bytes: ", write_bytes,
+          ", returned: ", ret, ")"
+      );
+    }
+  } catch(...){
+    uGDSBufUnregister(static_cast<const void*>(gpu_ptr));
+    throw;
+  }
+
+  uGDSBufUnregister(static_cast<const void*>(gpu_ptr));
+
+}
 
 

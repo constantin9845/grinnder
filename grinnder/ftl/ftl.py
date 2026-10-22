@@ -850,7 +850,7 @@ class FTL:
         )
 
         self._ops.device_write(
-            self.device_fd,
+            self.cuFD,
             tensor,
             ppa_tensor,
             self.ssd_data[-1],
