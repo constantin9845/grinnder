@@ -933,6 +933,10 @@ void scatter_partitions(int pid, torch::Tensor src,
 
 #include <ugds.h>
 
+void open_ugds_register(){
+  uGDSDriverOpen();
+}
+
 uGDSError_t test_ugds_link() {
     return uGDSDriverOpen();
 }
@@ -1227,7 +1231,7 @@ void device_write(
       ", CUDA error=", reg_ret.cu_err, ")"
   );
 
-  
+
   try{
     for(int64_t i = 0; i < num_pages; ++i){
       const int64_t dev_offset = i * chunk_bytes;

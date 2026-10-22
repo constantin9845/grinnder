@@ -267,6 +267,7 @@ class FTL:
 
         self._ops = _load_ops()
         self.device_fd = self.open_device(device)
+
         self.cuFD = self._ops.register_fd(self.device_fd) if self._ops is not None else None
 
     def get_flash_layout(self, device):
@@ -988,6 +989,8 @@ class FTL:
         }
 
     def open_device(self, device="/dev/ugds_drv0"):
+
+        self._ops.open_ugds_register()
 
         return os.open(
             "/dev/ugds_drv0",
