@@ -13,6 +13,14 @@ from torch import Tensor
 
 from grinnder.buffer.host import HostBuffer
 
+def _load_ops():
+    """Lazy-load C++ extension ops."""
+    try:
+        import grinnder._C as _C
+        return _C
+    except ImportError:
+        return None
+
 
 class DeviceBuffer:
     """Partition-wise tensor storage on GPU.
@@ -52,6 +60,8 @@ class DeviceBuffer:
             t.untyped_storage().resize_(0)  # Free memory, keep tensor object
             self._tensors.append(t)
 
+        self._ops = _load_ops()
+
     def __getitem__(self, pid: int) -> Tensor:
         """Get GPU tensor for partition pid. Must be allocated first."""
         return self._tensors[pid]
@@ -68,11 +78,17 @@ class DeviceBuffer:
         nbytes = t.numel() * t.element_size()
         if t.untyped_storage().size() < nbytes:
             t.untyped_storage().resize_(nbytes)
+
+        self._ops.register_tensor_ugds(t)
+
         return t
 
     def release(self, pid: int) -> None:
         """Free GPU memory for partition pid (resize storage to 0)."""
         tensor = self._tensors[pid]
+
+        self._ops.deregister_tensor_ugds(tensor)
+
         tensor.untyped_storage().resize_(0)
         tensor.grad = None
 

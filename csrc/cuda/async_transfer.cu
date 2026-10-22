@@ -216,7 +216,7 @@ void gather_partitions(int pid, std::vector<torch::Tensor> srcs,
 }
 
 
-#define MAX_BATCH_SIZE 256
+#define MAX_BATCH_SIZE 128
 
 // Read tensors directly from partitions
 void gather_partitions_direct(
@@ -1171,3 +1171,227 @@ int64_t register_fd(int raw_fd) {
 
   return static_cast<int64_t>(reinterpret_cast<uintptr_t>(fh));
 }
+
+
+void register_tensor_ugds(torch::Tensor tensor) {
+    void* gpu_buf = tensor.data_ptr();
+    const size_t bytes = tensor.numel() * tensor.element_size();
+    uGDSError_t status = uGDSBufRegister(gpu_buf, bytes, 0);
+
+    TORCH_CHECK(
+        status.err == UGDS_SUCCESS,
+        "uGDSBufRegister failed: ",
+        uGDS_status_error(status.err)
+    );
+}
+
+void deregister_tensor_ugds(torch::Tensor tensor) {
+    void* gpu_buf = tensor.data_ptr();
+    uGDSError_t status = uGDSBufDeregister(gpu_buf);
+
+    TORCH_CHECK(
+        status.err == UGDS_SUCCESS,
+        "uGDSBufDeregister failed: ",
+        uGDS_status_error(status.err)
+    );
+}
+
+
+
+void gather_partitions_direct_raw(
+    int pid,
+    int64_t dev_handle_ptr,
+    torch::Tensor dst,
+    std::vector<torch::Tensor> boundaries,
+    std::vector<torch::Tensor> boundary_ppas,
+    std::vector<torch::Tensor> boundary_page_offs,
+    std::vector<torch::Tensor> boundary_row_offsets,
+    int rows_per_page,
+    bool feature_type,
+    int64_t row_bytes
+  ){
+    TORCH_CHECK(dst.is_cuda(), "Destination must be a CUDA tensor");
+    TORCH_CHECK(dst.is_contiguous(), "Destination must be contiguous");
+    TORCH_CHECK(row_bytes > 0, "row_bytes must be positive");
+
+    const size_t num_parts = boundary_ppas.size();
+
+    TORCH_CHECK(pid >= 0 && static_cast<size_t>(pid) < num_parts,"Invalid partition ID");
+    TORCH_CHECK(boundaries.size() == num_parts,"boundaries and boundary_ppas size mismatch");
+    TORCH_CHECK(boundary_row_offsets.size() == num_parts,"boundary_row_offsets and boundary_ppas size mismatch");
+  
+    (void)boundary_page_offs;
+
+    TORCH_CHECK(rows_per_page > 0, "rows_per_page must be positive");
+
+    uGDSHandle_t dev_handle = reinterpret_cast<uGDSHandle_t>(static_cast<uintptr_t>(dev_handle_ptr));
+  
+    TORCH_CHECK(dev_handle != nullptr, "Invalid uGDS handle");
+
+    c10::cuda::CUDAGuard device_guard(dst.device());
+
+    getH2DPool().run([=] {
+
+    uint8_t* dst_raw = reinterpret_cast<uint8_t*>(dst.data_ptr());
+
+    size_t boundary_reads = 0;
+    for (size_t i = 0; i < num_parts; ++i) {
+        if (static_cast<int>(i) != pid &&
+            boundaries[i].defined() &&
+            boundaries[i].numel() > 0
+          ) {
+              boundary_reads += static_cast<size_t>(boundaries[i].numel());
+            }
+    }
+
+    TORCH_CHECK(boundaries[pid].defined(),"Target partition boundaries are undefined");
+    const int64_t target_nodes = boundaries[pid].numel();
+
+    TORCH_CHECK(target_nodes >= 0, "Invalid target row count");
+    TORCH_CHECK(static_cast<uint64_t>(target_nodes) + boundary_reads <= static_cast<uint64_t>(dst.size(0)),"Requested rows exceed destination tensor size");
+
+    TORCH_CHECK(static_cast<uint64_t>(dst.size(0)) * static_cast<uint64_t>(row_bytes) <= dst_bytes,"Destination tensor is too small for row_bytes");
+  
+    // read full target partition
+    if(target_nodes > 0){
+
+      TORCH_CHECK(boundary_ppas[pid].defined(),"Target PPAs are undefined");
+      TORCH_CHECK(boundary_row_offsets[pid].defined(),"Target row offsets are undefined");
+
+      auto target_ppas = boundary_ppas[pid].to(at::kCPU).contiguous();
+      auto target_rows = boundary_row_offsets[pid].to(at::kCPU).contiguous();
+
+      TORCH_CHECK(target_ppas.scalar_type() == at::kLong || target_ppas.scalar_type() == at::kUInt64,"Target PPAs must contain 64-bit integers");
+      TORCH_CHECK(target_rows.scalar_type() == at::kLong,"Target row offsets must be int64");
+      TORCH_CHECK(target_ppas.numel() >= target_nodes, "Not enough target PPAs");
+      TORCH_CHECK(target_rows.numel() >= target_nodes, "Not enough target row offsets");
+
+      const uint64_t* ppa_ptr = target_ppas.data_ptr<uint64_t>();
+      const int64_t* row_ptr = target_rows.data_ptr<int64_t>();
+
+      for (int64_t r = 0; r < target_nodes; ++r){
+        uint64_t raw_ppa = ppa_ptr[r];
+        raw_ppa = encode_host_ftl_bit(raw_ppa);
+
+        const int64_t row_offset = row_ptr[r];
+
+        const uint64_t request_ppa = encode_row_request_ppa(rows_per_page,raw_ppa,row_offset,feature_type);
+
+        const int64_t dst_byte_offset = r * row_bytes;
+
+        const ssize_t ret = uGDSRead(
+                dev_handle,
+                dst_raw,
+                static_cast<size_t>(row_bytes),
+                static_cast<off_t>(request_ppa),
+                static_cast<off_t>(dst_byte_offset));
+
+        TORCH_CHECK(ret == row_bytes,"uGDS target row read failed: row=", r,", returned=", ret,", expected=", row_bytes);
+      }
+    }
+
+    // partial boundary partition reads
+    if(boundary_reads == 0) {
+        return;
+    }
+
+    std::vector<uGDSIOParams_t> io_params;
+    io_params.reserve(boundary_reads);
+
+    int64_t curr_dst_row = target_nodes;
+
+    for(size_t i = 0; i < num_parts; ++i){
+      if(static_cast<int>(i) == pid || !boundaries[i].defined() || boundaries[i].numel() == 0){
+        continue;
+      }
+
+      TORCH_CHECK(boundary_ppas[i].defined(),"Boundary PPAs are undefined for partition ", i);
+      TORCH_CHECK(boundary_row_offsets[i].defined(),"Boundary row offsets are undefined for partition ", i);
+
+      auto ppas = boundary_ppas[i].to(at::kCPU).contiguous();
+      auto rows = boundary_row_offsets[i].to(at::kCPU).contiguous();
+
+      const int64_t num_rows = boundaries[i].numel();
+
+      TORCH_CHECK(ppas.scalar_type() == at::kLong || ppas.scalar_type() == at::kUInt64,"Boundary PPAs must contain 64-bit integers");
+      TORCH_CHECK(rows.scalar_type() == at::kLong,"Boundary row offsets must be int64");
+      TORCH_CHECK(ppas.numel() >= num_rows,"Not enough boundary PPAs for partition ", i);
+      TORCH_CHECK(rows.numel() >= num_rows,"Not enough boundary row offsets for partition ", i);
+
+      const uint64_t* ppa_ptr = ppas.data_ptr<uint64_t>();
+      const int64_t* row_ptr = rows.data_ptr<int64_t>();
+
+      for(int64_t r = 0; r < num_rows; ++r){
+        uint64_t raw_ppa = ppa_ptr[r];
+        raw_ppa = encode_host_ftl_bit(raw_ppa);
+
+        const uint64_t request_ppa = encode_row_request_ppa(rows_per_page,raw_ppa,row_ptr[r],feature_type);
+
+        uGDSIOParams_t param{};
+
+        param.devPtr_base = dst_raw;
+        param.devPtr_offset = static_cast<off_t>(curr_dst_row * row_bytes);
+        param.file_offset = static_cast<off_t>(request_ppa);
+        param.size = static_cast<size_t>(row_bytes);
+        param.opcode = UGDS_READ;
+        param.cookie = nullptr;
+
+        io_params.push_back(param);
+        ++curr_dst_row;
+      }
+    }
+
+    TORCH_CHECK(io_params.size() == boundary_reads,"Internal boundary read count mismatch");
+
+    // submit batched reads for boundary partitions
+    const size_t batch_capacity = MAX_BATCH_SIZE;
+
+    uGDSBatchHandle_t batch_handle = nullptr;
+    uGDSError_t status = uGDSBatchIOSetUp(&batch_handle,dev_handle,static_cast<unsigned>(batch_capacity));
+    
+    TORCH_CHECK(status.err == UGDS_SUCCESS,"uGDSBatchIOSetUp failed: ",uGDS_status_error(status.err));
+
+    struct BatchCleanup {
+        uGDSBatchHandle_t handle;
+        ~BatchCleanup() {
+            if (handle != nullptr) {
+                uGDSBatchIODestroy(handle);
+            }
+        }
+    } batch_cleanup{batch_handle};
+
+    std::vector<uGDSIOEvents_t> events(batch_capacity);
+
+    for (size_t offset = 0; offset < io_params.size(); offset += batch_capacity){
+      const unsigned current_batch_size = static_cast<unsigned>(std::min(batch_capacity, io_params.size() - offset));
+
+      status = uGDSBatchIOSubmit(batch_handle, current_batch_size, io_params.data() + offset, 0);
+
+      TORCH_CHECK(status.err == UGDS_SUCCESS,"uGDSBatchIOSubmit failed: ", uGDS_status_error(status.err));
+
+      unsigned completed = 0;
+
+      status = uGDSBatchIOGetStatus(
+            batch_handle,
+            current_batch_size,
+            &completed,
+            events.data(),
+            nullptr);
+
+      TORCH_CHECK(status.err == UGDS_SUCCESS,"uGDSBatchIOGetStatus failed: ",uGDS_status_error(status.err));
+      TORCH_CHECK(completed == current_batch_size,"Not all boundary reads completed: ",completed, "/", current_batch_size);
+
+      for(unsigned j = 0; j < completed; ++j){
+        TORCH_CHECK(events[j].status == UGDS_BATCH_COMPLETE,"Boundary read failed: batch index=", j, ", status=", static_cast<int>(events[j].status));
+        TORCH_CHECK(events[j].ret ==static_cast<ssize_t>(io_params[offset + j].size),"Boundary read returned an unexpected byte count: ",events[j].ret,", expected=", io_params[offset + j].size);
+      }
+    }
+    
+    });
+
+  
+    C10_CUDA_CHECK(cudaGetLastError());
+
+  }
+
+

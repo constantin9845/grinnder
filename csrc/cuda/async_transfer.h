@@ -82,3 +82,7 @@ void gpu_write(
 );
 
 uGDSError_t test_ugds_link();
+
+void register_tensor_ugds(torch::Tensor tensor);
+void deregister_tensor_ugds(torch::Tensor tensor);
+

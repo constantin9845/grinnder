@@ -45,4 +45,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("gather_partitions_direct_raw", &gather_partitions_direct_raw, "Gather features from raw block device to GPU tensor");
 
   m.def("test_ugds_link", &test_ugds_link);
+  m.def("register_tensor_ugds", &register_tensor_ugds);
+  m.def("deregister_tensor_ugds", &deregister_tensor_ugds);
 }
