@@ -1214,7 +1214,9 @@ void device_write(
       0
   );
 
-  TORCH_CHECK(reg_ret == 0,"uGDSBufRegister failed, error: ",reg_ret);
+  if(reg_ret != 0){
+    TORCH_CHECK(false,"uGDSBufRegister failed, error: ",reg_ret);
+  }
 
   try{
     for(int64_t i = 0; i < num_pages; ++i){
