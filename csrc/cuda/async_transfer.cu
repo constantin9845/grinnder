@@ -1028,7 +1028,6 @@ void gather_partitions_direct_raw(
     TORCH_CHECK(target_nodes >= 0, "Invalid target row count");
     TORCH_CHECK(static_cast<uint64_t>(target_nodes) + boundary_reads <= static_cast<uint64_t>(dst.size(0)),"Requested rows exceed destination tensor size");
 
-    TORCH_CHECK(static_cast<uint64_t>(dst.size(0)) * static_cast<uint64_t>(row_bytes) <= dst_bytes,"Destination tensor is too small for row_bytes");
   
     // read full target partition
     if(target_nodes > 0){
