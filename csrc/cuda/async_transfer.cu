@@ -1261,11 +1261,11 @@ void device_write(
       );
     }
   } catch(...){
-    uGDSBufUnregister(static_cast<const void*>(gpu_ptr));
+    uGDSBufDeregister(static_cast<const void*>(gpu_ptr));
     throw;
   }
 
-  uGDSBufUnregister(static_cast<const void*>(gpu_ptr));
+  uGDSBufDeregister(static_cast<const void*>(gpu_ptr));
 
 }
 
