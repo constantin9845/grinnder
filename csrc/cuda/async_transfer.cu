@@ -929,6 +929,7 @@ void scatter_partitions(int pid, torch::Tensor src,
 // export CC=/usr/bin/gcc
 // export CXX=/usr/bin/g++
 // GRINNDER_USE_UGDS=1 python -m pip install -e . --no-build-isolation
+// CUDA_LAUNCH_BLOCKING=1 conda run --no-capture-output -n grinnder python examples/train_igb_metis.py --hidden 256 --num_parts 16 --epochs 1 --sparse 1 --igb_size medium
 
 #include <ugds.h>
 
@@ -1208,16 +1209,25 @@ void device_write(
 
   uint8_t* gpu_ptr = gpu_buffer.data_ptr<uint8_t>();
 
-  auto reg_ret = uGDSBufRegister(
-      static_cast<const void*>(gpu_ptr),
+  uGDSBufConfig_t config{};
+  config.backend = UGDS_BACKEND_CUDA;
+  config.enable_export = false;
+
+  uGDSError_t reg_ret = uGDSBufRegisterEx(
+      gpu_ptr,
       static_cast<size_t>(chunk_bytes),
-      0
+      &config
   );
 
-  if(reg_ret.err != 0){
-    TORCH_CHECK(false,"uGDSBufRegister failed, error: ",reg_ret.err);
-  }
+  TORCH_CHECK(
+      reg_ret.err == UGDS_SUCCESS,
+      "uGDSBufRegisterEx failed: ",
+      uGDS_status_error(reg_ret.err),
+      " (error=", reg_ret.err,
+      ", CUDA error=", reg_ret.cu_err, ")"
+  );
 
+  
   try{
     for(int64_t i = 0; i < num_pages; ++i){
       const int64_t dev_offset = i * chunk_bytes;
