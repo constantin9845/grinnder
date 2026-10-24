@@ -61,7 +61,7 @@ class DeviceBuffer:
             self._tensors.append(t)
 
         self._ops = _load_ops()
-        self.uGDS_registered = False
+        #self.uGDS_registered = False
 
     def __getitem__(self, pid: int) -> Tensor:
         """Get GPU tensor for partition pid. Must be allocated first."""
@@ -80,8 +80,8 @@ class DeviceBuffer:
         if t.untyped_storage().size() < nbytes:
             t.untyped_storage().resize_(nbytes)
 
-        self._ops.register_tensor_ugds(t)
-        self.uGDS_registered = True
+        #self._ops.register_tensor_ugds(t)
+        #self.uGDS_registered = True
 
         return t
 
@@ -89,8 +89,8 @@ class DeviceBuffer:
         """Free GPU memory for partition pid (resize storage to 0)."""
         tensor = self._tensors[pid]
 
-        if self.uGDS_registered == True:
-            self._ops.deregister_tensor_ugds(tensor)
+        #if self.uGDS_registered == True:
+        #    self._ops.deregister_tensor_ugds(tensor)
 
         tensor.untyped_storage().resize_(0)
         tensor.grad = None
