@@ -2,6 +2,7 @@ import os
 import ctypes
 import numpy as np
 import torch
+import subprocess
 
 def _load_ops():
     """Lazy-load C++ extension ops."""
@@ -266,9 +267,10 @@ class FTL:
         self.next_free_lba = 0
 
         self._ops = _load_ops()
-        self.device_fd = self.open_device(device)
+        self.drive_mode_nvme = True
+        self.device_fd = self.open_device()
 
-        self.cuFD = self._ops.register_fd(self.device_fd) if self._ops is not None else None
+        self.cuFD = None
 
     def get_flash_layout(self, device):
         return {
@@ -988,14 +990,28 @@ class FTL:
             ),
         }
 
-    def open_device(self, device="/dev/ugds_drv0"):
+    def open_device(self):
 
-        self._ops.open_ugds_register()
+        if self.drive_mode_nvme:
+            return os.open(
+                "/dev/nvme0n1",
+                os.O_RDWR,
+            )
 
-        return os.open(
-            "/dev/ugds_drv0",
-            os.O_RDWR,
+        else:
+            return os.open(
+                "/dev/ugds_drv0",
+                os.O_RDWR,
+            )
+        
+    def register_ugds_drive(self):
+        subprocess.run(
+            ['sudo', '../scripts/switch_to_ugds.sh'],
+            check=True,
         )
+        self.drive_mode_nvme = False
+        self.device_fd = self.open_device()
+        self.cuFD = self._ops.register_fd(self.device_fd)
 
     def close_device(self):
 

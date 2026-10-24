@@ -232,3 +232,10 @@ class StorageBackend:
     def file_size(self, file_id: str) -> int:
         path = self._path(file_id)
         return os.path.getsize(path) if os.path.exists(path) else 0
+    
+
+    def switch_drive(self):
+        self.host_ftl.register_ugds_drive()
+        print("Backend : switched drives")
+
+

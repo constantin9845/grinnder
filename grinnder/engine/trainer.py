@@ -215,6 +215,9 @@ class Trainer:
                     f"time_s={time.perf_counter() - start:.3f}",
                     flush=True,
                 )
+
+        self.backend.switch_drives()
+
         if log_progress:
             print("    prefill input features done", flush=True)
 
