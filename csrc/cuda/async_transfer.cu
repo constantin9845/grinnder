@@ -687,7 +687,7 @@ void device_write(
 }
 
 
-
+/*
 void gpu_write(
   int64_t fd,
   torch::Tensor src,
@@ -742,7 +742,7 @@ void gpu_write(
   }
 
 }
-
+*/
 
 
 bool device_read_and_verify(
@@ -1568,4 +1568,158 @@ void gather_partitions_direct_raw(
     C10_CUDA_CHECK(cudaGetLastError());
 }
 
+void gpu_write(
+    int64_t fd,
+    torch::Tensor src,
+    torch::Tensor ppa_list,
+    int sector_size
+) {
+    TORCH_CHECK(src.is_cuda(), "Source tensor must be on GPU");
+    TORCH_CHECK(src.is_contiguous(), "Source tensor must be contiguous");
+    TORCH_CHECK(ppa_list.is_contiguous(), "PPA tensor must be contiguous");
+    TORCH_CHECK(sector_size > 0, "sector_size must be positive");
+
+    constexpr size_t GPU_PAGE_SIZE = 64 * 1024;
+
+    TORCH_CHECK(
+        ppa_list.scalar_type() == at::kLong,
+        "PPA tensor must contain int64 values"
+    );
+
+    auto ppa_cpu = ppa_list.to(at::kCPU).contiguous();
+    const int64_t* ppa_ptr = ppa_cpu.data_ptr<int64_t>();
+
+    const size_t total_bytes =
+        static_cast<size_t>(src.numel()) * src.element_size();
+
+    const int64_t num_pages = ppa_list.numel();
+
+    TORCH_CHECK(
+        static_cast<int64_t>(sector_size) <= INT64_MAX / 32,
+        "page_bytes overflow"
+    );
+
+    const int64_t page_bytes =
+        static_cast<int64_t>(sector_size) * 32;
+
+    uGDSHandle_t handle =
+        reinterpret_cast<uGDSHandle_t>(
+            static_cast<uintptr_t>(fd)
+        );
+
+    TORCH_CHECK(handle != nullptr, "Invalid uGDS handle");
+
+    const uint8_t* src_raw =
+        reinterpret_cast<const uint8_t*>(src.data_ptr());
+
+    for (int64_t i = 0; i < num_pages; ++i) {
+        const uint64_t raw_ppa = encode_host_ftl_bit(
+            static_cast<uint64_t>(ppa_ptr[i])
+        );
+
+        TORCH_CHECK(
+            static_cast<uint64_t>(i) <=
+                SIZE_MAX / static_cast<size_t>(page_bytes),
+            "Source offset overflow at page ",
+            i
+        );
+
+        const size_t dev_offset =
+            static_cast<size_t>(i) *
+            static_cast<size_t>(page_bytes);
+
+        if (dev_offset >= total_bytes) {
+            break;
+        }
+
+        const size_t write_bytes = std::min(
+            static_cast<size_t>(page_bytes),
+            total_bytes - dev_offset
+        );
+
+        TORCH_CHECK(
+            write_bytes % static_cast<size_t>(sector_size) == 0,
+            "Write size must be sector-aligned: page=",
+            i,
+            ", write_bytes=",
+            write_bytes,
+            ", sector_size=",
+            sector_size
+        );
+
+        const uintptr_t write_addr =
+            reinterpret_cast<uintptr_t>(src_raw + dev_offset);
+
+        TORCH_CHECK(
+            write_addr <= UINTPTR_MAX - write_bytes,
+            "GPU source address overflow at page ",
+            i
+        );
+
+        // Align the registration range to the driver's 64 KiB GPU pages.
+        const uintptr_t reg_addr =
+            write_addr &
+            ~(static_cast<uintptr_t>(GPU_PAGE_SIZE) - 1);
+
+        const uintptr_t write_end = write_addr + write_bytes;
+
+        TORCH_CHECK(
+            write_end <= UINTPTR_MAX - (GPU_PAGE_SIZE - 1),
+            "GPU registration end-address overflow at page ",
+            i
+        );
+
+        const uintptr_t reg_end =
+            (write_end + GPU_PAGE_SIZE - 1) &
+            ~(static_cast<uintptr_t>(GPU_PAGE_SIZE) - 1);
+
+        const size_t reg_size =
+            static_cast<size_t>(reg_end - reg_addr);
+
+        auto* reg_ptr =
+            reinterpret_cast<uint8_t*>(reg_addr);
+
+        const size_t offset_in_registration =
+            static_cast<size_t>(write_addr - reg_addr);
+
+        /*
+         * Register the GPU memory range before writing.
+         * Verify that the rounded registration range is within the
+         * underlying CUDA allocation, especially for the final page.
+         */
+        uGDSBufRegister(reg_ptr, reg_size, 0);
+
+        ssize_t ret = -1;
+
+        try {
+            ret = uGDSWrite(
+                handle,
+                reg_ptr,
+                write_bytes,
+                static_cast<off_t>(raw_ppa),
+                static_cast<off_t>(offset_in_registration)
+            );
+        } catch (...) {
+            uGDSBufDeregister(reg_ptr);
+            throw;
+        }
+
+        // The write must have completed before deregistration.
+        uGDSBufDeregister(reg_ptr);
+
+        TORCH_CHECK(
+            ret == static_cast<ssize_t>(write_bytes),
+            "uGDSWrite failed: page=",
+            i,
+            ", ret=",
+            ret,
+            ", expected=",
+            write_bytes,
+            ", file_offset=",
+            raw_ppa,
+            ", buffer_offset=",
+            offset_in_registration
+        );
+    }
+}
 
