@@ -1006,7 +1006,7 @@ class FTL:
         
     def register_ugds_drive(self):
         subprocess.run(
-            ['sudo', '../scripts/switch_to_ugds.sh'],
+            ['sudo', 'switch_to_ugds.sh'],
             check=True,
         )
         self.drive_mode_nvme = False
