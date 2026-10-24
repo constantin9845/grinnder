@@ -216,7 +216,7 @@ class Trainer:
                     flush=True,
                 )
 
-        self.backend.switch_drives()
+        self.backend.switch_drive()
 
         if log_progress:
             print("    prefill input features done", flush=True)
