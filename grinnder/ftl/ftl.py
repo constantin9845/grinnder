@@ -1010,8 +1010,10 @@ class FTL:
             check=True
         )
         self.drive_mode_nvme = False
+        self._ops.open_ugds_register()
         self.device_fd = self.open_device()
         self.cuFD = self._ops.register_fd(self.device_fd)
+        
 
     def close_device(self):
 
