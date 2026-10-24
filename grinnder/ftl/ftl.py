@@ -1006,8 +1006,8 @@ class FTL:
         
     def register_ugds_drive(self):
         subprocess.run(
-            ['sudo', 'bash', 'switch_to_ugds.sh'],
-            check=True,
+            ['bash', '/home/femu/grinnder/GriNNder/grinnder/ftl/switch_to_ugds.sh'],
+            check=True
         )
         self.drive_mode_nvme = False
         self.device_fd = self.open_device()
