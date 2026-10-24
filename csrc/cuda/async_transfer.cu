@@ -1221,8 +1221,7 @@ void gather_partitions_direct_raw(
 
     c10::cuda::CUDAGuard device_guard(dst.device());
 
-    getH2DPool().run([=]() {
-        uint8_t* dst_raw =
+    uint8_t* dst_raw =
             reinterpret_cast<uint8_t*>(dst.data_ptr());
 
         constexpr size_t GPU_PAGE_SIZE = 64 * 1024;
@@ -1563,7 +1562,6 @@ void gather_partitions_direct_raw(
                 static_cast<size_t>(target_nodes) + boundary_reads,
             "Internal boundary read count mismatch"
         );
-    });
 
     C10_CUDA_CHECK(cudaGetLastError());
 }
