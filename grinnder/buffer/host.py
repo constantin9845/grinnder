@@ -793,6 +793,9 @@ class HostBuffer:
 
         with torch.cuda.stream(stream):
             if self._ops is not None:
+                self._ops.test_reads(self._backend.host_ftl.cuFD, gpu_target)
+
+                '''
                 self._ops.gather_partitions_direct_raw(
                     pid, 
                     self._backend.host_ftl.cuFD, 
@@ -805,6 +808,7 @@ class HostBuffer:
                     feature_type,
                     row_bytes
                 )
+                '''
             else:
                 print("Not calling async gather raw")
 

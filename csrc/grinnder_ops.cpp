@@ -50,4 +50,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("register_tensor_ugds", &register_tensor_ugds);
   m.def("deregister_tensor_ugds", &deregister_tensor_ugds);
   m.def("open_ugds_register", &open_ugds_register);
+  m.def("test_reads", &test_reads);
 }

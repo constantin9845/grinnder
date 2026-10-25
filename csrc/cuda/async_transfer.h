@@ -86,4 +86,5 @@ uGDSError_t test_ugds_link();
 void register_tensor_ugds(torch::Tensor tensor);
 void deregister_tensor_ugds(torch::Tensor tensor);
 void open_ugds_register();
+void test_reads(int64_t dev_handle_ptr, torch::Tensor dst);
 

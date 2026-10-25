@@ -1231,10 +1231,6 @@ void gather_partitions_direct_raw(
          * Register the GPU pages covering one read, issue the read,
          * then deregister after the synchronous read returns.
          *
-         * Assumptions to verify against your uGDS implementation:
-         *  - uGDSBufRegister(ptr, size, flags) registers the requested range.
-         *  - uGDSRead() completes the transfer before returning.
-         *  - uGDSBufDeregister(ptr) deregisters that registration.
          */
         auto registered_read =
             [&](uint64_t request_ppa,
@@ -1304,6 +1300,23 @@ void gather_partitions_direct_raw(
             uGDSBufRegister(reg_ptr, reg_size, 0);
 
             ssize_t ret = -1;
+
+            fprintf(stderr,
+              "uGDS target read: row=%ld, "
+              "raw_ppa=0x%016llx, "
+              "request_ppa=0x%016llx, "
+              "row_offset=%ld, "
+              "dst_byte_offset=%ld, "
+              "row_bytes=%ld, "
+              "dst=%p\n",
+              static_cast<long>(r),
+              static_cast<unsigned long long>(raw_ppa),
+              static_cast<unsigned long long>(request_ppa),
+              static_cast<long>(row_offset),
+              static_cast<long>(dst_byte_offset),
+              static_cast<long>(row_bytes),
+              static_cast<void*>(dst_raw)
+            );
 
             try {
                 ret = uGDSRead(
@@ -1716,4 +1729,61 @@ void gpu_write(
         );
     }
 }
+
+
+void test_reads(int64_t dev_handle_ptr, torch::Tensor dst){
+
+  uGDSHandle_t dev_handle =
+  reinterpret_cast<uGDSHandle_t>(
+      static_cast<uintptr_t>(dev_handle_ptr)
+  );
+
+  uint8_t* dst_raw = reinterpret_cast<uint8_t*>(dst.data_ptr());
+
+  uGDSBufRegister(dst_raw, 4096*8, 0);
+
+
+  constexpr size_t SIZE = 4096;
+
+  alignas(4096) unsigned char buffer[SIZE];
+  memset(buffer, 0, sizeof(buffer));
+
+  // Raw PPA from your previous diagnostic output.
+  const uint64_t raw_ppa = 0x6000000000000000ULL;
+
+  // Pass the raw PPA directly as file_offset.
+  const off_t file_offset = static_cast<off_t>(raw_ppa);
+
+  printf("Attempting uGDSRead:\n");
+  printf("  raw PPA     = 0x%016llx\n",
+          (unsigned long long)raw_ppa);
+  printf("  file_offset = 0x%016llx\n",
+          (unsigned long long)file_offset);
+  printf("  size        = %zu\n", SIZE);
+  fflush(stdout);
+
+  ssize_t ret = uGDSRead(
+      handle,
+      dst_raw,
+      SIZE,
+      file_offset,
+      0
+  );
+
+  printf("uGDSRead returned: %zd\n", ret);
+
+  if (ret == static_cast<ssize_t>(SIZE)) {
+      printf("Read completed successfully.\n");
+      printf("First 16 bytes:");
+      for (int i = 0; i < 16; ++i)
+          printf(" %02x", buffer[i]);
+      printf("\n");
+  } else {
+      fprintf(stderr, "Read failed or was incomplete.\n");
+  }
+
+
+  uGDSBufDeregister(dst_raw);
+}
+
 
