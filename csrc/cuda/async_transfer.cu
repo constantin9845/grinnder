@@ -1737,7 +1737,7 @@ void test_reads(int64_t dev_handle_ptr, torch::Tensor dst){
   uGDSBufRegister(dst_raw, 4096*8, 0);
 
 
-  constexpr size_t SIZE = 4096;
+  constexpr size_t SIZE = 4096*8;
 
   alignas(4096) unsigned char buffer[SIZE];
   memset(buffer, 0, sizeof(buffer));
@@ -1757,7 +1757,7 @@ void test_reads(int64_t dev_handle_ptr, torch::Tensor dst){
   fflush(stdout);
 
   ssize_t ret = uGDSRead(
-      handle,
+      dev_handle,
       dst_raw,
       SIZE,
       file_offset,
