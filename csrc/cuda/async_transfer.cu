@@ -1723,10 +1723,10 @@ void test_reads(int64_t dev_handle_ptr, torch::Tensor dst){
 
   uint8_t* dst_raw = reinterpret_cast<uint8_t*>(dst.data_ptr());
 
-  uGDSBufRegister(dst_raw, 4096*8, 0);
+  uGDSBufRegister(dst_raw, 4096, 0);
 
 
-  constexpr size_t SIZE = 4096*8;
+  constexpr size_t SIZE = 4096;
 
   alignas(4096) unsigned char buffer[SIZE];
   memset(buffer, 0, sizeof(buffer));
