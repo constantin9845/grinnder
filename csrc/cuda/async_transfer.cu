@@ -1304,15 +1304,11 @@ void gather_partitions_direct_raw(
             fprintf(stderr,
               "raw_ppa=0x%016llx, "
               "request_ppa=0x%016llx, "
-              "row_offset=%ld, "
               "dst_byte_offset=%ld, "
-              "row_bytes=%ld, "
               "dst=%p\n",
               static_cast<unsigned long long>(raw_ppa),
               static_cast<unsigned long long>(request_ppa),
-              static_cast<long>(row_offset),
               static_cast<long>(dst_byte_offset),
-              static_cast<long>(row_bytes),
               static_cast<void*>(dst_raw)
             );
 
