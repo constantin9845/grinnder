@@ -1221,13 +1221,11 @@ void gather_partitions_direct_raw(
 
     c10::cuda::CUDAGuard device_guard(dst.device());
 
-    uint8_t* dst_raw =
-            reinterpret_cast<uint8_t*>(dst.data_ptr());
+    uint8_t* dst_raw = reinterpret_cast<uint8_t*>(dst.data_ptr());
 
         constexpr size_t GPU_PAGE_SIZE = 64 * 1024;
 
-        const size_t dst_bytes =
-            static_cast<size_t>(dst.numel()) * dst.element_size();
+        const size_t dst_bytes = static_cast<size_t>(dst.numel()) * dst.element_size();
 
         /*
          * Register the GPU pages covering one read, issue the read,
