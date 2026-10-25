@@ -1389,13 +1389,12 @@ void gather_partitions_direct_raw(
             );
 
             auto target_ppas =
-                boundary_ppas[pid].to(at::kCPU).contiguous();
+                boundary_ppas[pid].to(at::kCPU).to(at::kUInt64).contiguous();
 
             auto target_rows =
                 boundary_row_offsets[pid].to(at::kCPU).contiguous();
 
             TORCH_CHECK(
-                target_ppas.scalar_type() == at::kLong ||
                 target_ppas.scalar_type() == at::kUInt64,
                 "Target PPAs must contain 64-bit integers"
             );
@@ -1485,14 +1484,13 @@ void gather_partitions_direct_raw(
                 i
             );
 
-            auto ppas = boundary_ppas[i].to(at::kCPU).contiguous();
+            auto ppas = boundary_ppas[i].to(at::kCPU).to(at::kUInt64).contiguous();
             auto rows =
                 boundary_row_offsets[i].to(at::kCPU).contiguous();
 
             const int64_t num_rows = boundaries[i].numel();
 
             TORCH_CHECK(
-                ppas.scalar_type() == at::kLong ||
                 ppas.scalar_type() == at::kUInt64,
                 "Boundary PPAs must contain 64-bit integers"
             );
