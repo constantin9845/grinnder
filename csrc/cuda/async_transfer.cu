@@ -1308,7 +1308,7 @@ void gather_partitions_direct_raw(
                     dev_handle,
                     reg_ptr,
                     bytes,
-                    static_cast<off_t>(request_ppa),
+                    request_ppa,
                     static_cast<off_t>(offset_in_registration)
                 );
             } catch (...) {
@@ -1688,7 +1688,7 @@ void gpu_write(
                 handle,
                 reg_ptr,
                 write_bytes,
-                static_cast<off_t>(raw_ppa),
+                raw_ppa,
                 static_cast<off_t>(offset_in_registration)
             );
         } catch (...) {
@@ -1882,7 +1882,7 @@ void device_write(
                 handle,
                 reg_ptr,
                 write_bytes,
-                static_cast<off_t>(raw_ppa),
+                raw_ppa,
                 static_cast<off_t>(offset_in_registration)
             );
         } catch (...) {
