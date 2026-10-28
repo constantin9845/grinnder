@@ -632,7 +632,7 @@ void gather_activations_direct(
 
 #include <sys/ioctl.h>
 #include <linux/nvme_ioctl.h>
-
+/*
 void device_write(
     int64_t fd,
     torch::Tensor src,
@@ -686,6 +686,8 @@ void device_write(
     }
 }
 
+
+*/
 
 /*
 void gpu_write(
@@ -1769,4 +1771,126 @@ void test_reads(int64_t dev_handle_ptr, torch::Tensor dst){
   uGDSBufDeregister(dst_raw);
 }
 
+void device_write(
+    int64_t fd,
+    torch::Tensor src,
+    torch::Tensor ppa_list,
+    int sector_size
+) {
+    TORCH_CHECK(!src.is_cuda(), "Source tensor must be on CPU for POSIX writes");
+    TORCH_CHECK(src.is_contiguous(), "Source tensor must be contiguous");
+    TORCH_CHECK(ppa_list.is_contiguous(), "PPA tensor must be contiguous");
+
+    const uint8_t* src_raw = reinterpret_cast<const uint8_t*>(src.data_ptr());
+    const int64_t* ppa_ptr = ppa_list.data_ptr<int64_t>();
+
+    int64_t total_bytes = src.numel() * src.element_size();
+    int64_t num_pages = ppa_list.numel();
+
+    constexpr size_t GPU_PAGE_SIZE = 64 * 1024;
+    const int64_t page_bytes = static_cast<int64_t>(sector_size) * 32;
+
+    uGDSHandle_t handle =
+        reinterpret_cast<uGDSHandle_t>(
+            static_cast<uintptr_t>(fd)
+        );
+
+    const size_t allocation_bytes =
+        static_cast<size_t>(total_bytes) +
+        2 * GPU_PAGE_SIZE;
+
+    auto gpu_storage = torch::empty(
+        {static_cast<int64_t>(allocation_bytes)},
+        torch::TensorOptions()
+            .dtype(torch::kUInt8)
+            .device(torch::kCUDA)
+    );
+
+    const uintptr_t allocation_start =
+        reinterpret_cast<uintptr_t>(
+            gpu_storage.data_ptr<uint8_t>()
+        );
+
+    const size_t alignment_offset =
+        (GPU_PAGE_SIZE -
+         (allocation_start % GPU_PAGE_SIZE)) %
+        GPU_PAGE_SIZE;
+
+    uint8_t* gpu_src =
+        gpu_storage.data_ptr<uint8_t>() +
+        alignment_offset;
+
+    if (total_bytes > 0) {
+        cudaError_t err = cudaMemcpy(
+            gpu_src,
+            src.data_ptr(),
+            static_cast<size_t>(total_bytes),
+            cudaMemcpyHostToDevice
+        );
+
+        TORCH_CHECK(
+            err == cudaSuccess,
+            "CPU-to-GPU copy failed: ",
+            cudaGetErrorString(err)
+        );
+    }
+    
+    
+
+    for (int64_t i = 0; i < num_pages; ++i) {
+        uint64_t raw_ppa = static_cast<uint64_t>(ppa_ptr[i]);
+
+        // encode host ftl bit
+        raw_ppa = encode_host_ftl_bit(raw_ppa);
+
+        const size_t dev_offset =
+            static_cast<size_t>(i) *
+            static_cast<size_t>(page_bytes);
+        int64_t write_bytes = std::min<int64_t>((sector_size*32), total_bytes - dev_offset);
+
+        const uintptr_t write_addr =
+            reinterpret_cast<uintptr_t>(
+                gpu_src + dev_offset
+            );
+
+        const uintptr_t reg_addr =
+            write_addr &
+            ~(static_cast<uintptr_t>(GPU_PAGE_SIZE) - 1);
+
+        const uintptr_t write_end =
+            write_addr + write_bytes;
+
+        const uintptr_t reg_end =
+            (write_end + GPU_PAGE_SIZE - 1) &
+            ~(static_cast<uintptr_t>(GPU_PAGE_SIZE) - 1);
+
+        const size_t reg_size =
+            static_cast<size_t>(reg_end - reg_addr);
+
+        auto* reg_ptr =
+            reinterpret_cast<uint8_t*>(reg_addr);
+
+        const size_t offset_in_registration =
+            static_cast<size_t>(write_addr - reg_addr);
+
+        uGDSBufRegister(reg_ptr, reg_size, 0);
+
+        ssize_t ret = -1;
+
+        try {
+            ret = uGDSWrite(
+                handle,
+                reg_ptr,
+                write_bytes,
+                static_cast<off_t>(raw_ppa),
+                static_cast<off_t>(offset_in_registration)
+            );
+        } catch (...) {
+            uGDSBufDeregister(reg_ptr);
+            throw;
+        }
+
+        uGDSBufDeregister(reg_ptr);
+    }
+}
 
