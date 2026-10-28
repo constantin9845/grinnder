@@ -42,5 +42,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("gpu_write", &gpu_write, "Write GPU tensors directly to storage");
   m.def("device_read_and_verify", &device_read_and_verify, "Write CPU tensors to storage and verify no corruption");
   m.def("register_fd", &register_fd, "register fd with CUfile");
+  m.def("nvme_write", &nvme_write, "dubmit prefill writes");
   m.def("gather_partitions_direct_raw", &gather_partitions_direct_raw, "Gather features from raw block device to GPU tensor");
 }

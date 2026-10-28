@@ -41,13 +41,6 @@ void close_files(const std::vector<int>& fds);
 void h2d_synchronize();
 void d2h_synchronize();
 
-void device_write(
-    int64_t fd,
-    torch::Tensor src,
-    torch::Tensor ppa_list,
-    int sector_size
-);
-
 bool device_read_and_verify(
     int64_t fd,
     torch::Tensor expected_src,  /* Ground truth tensor (on CUDA) */
@@ -79,3 +72,8 @@ void gpu_write(
   torch::Tensor ppa_list,
   int sector_size
 );
+
+void device_write(int64_t fd, torch::Tensor src, torch::Tensor runs,
+                  int64_t sector_size, int64_t page_size);
+
+static void nvme_write(int64_t fd, const void* buf, uint64_t slba, int64_t bytes, int64_t sector_size);
