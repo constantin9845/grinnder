@@ -268,7 +268,7 @@ class FTL:
 
         self._ops = _load_ops()
         self.drive_mode_nvme = True
-        self.device_fd = self.open_device()
+        #self.device_fd = self.open_device()
 
         self.register_ugds_drive()
 
