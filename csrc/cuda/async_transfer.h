@@ -75,5 +75,3 @@ void gpu_write(
 
 void device_write(int64_t fd, torch::Tensor src, torch::Tensor runs,
                   int64_t sector_size, int64_t page_size);
-
-void nvme_write(int64_t fd, const void* buf, uint64_t slba, int64_t bytes, int64_t sector_size);

@@ -954,7 +954,7 @@ void gpu_write(
 
 }
 
-void nvme_write(int64_t fd, const void* buf, uint64_t slba, int64_t bytes, int64_t sector_size){
+static void nvme_write(int64_t fd, const void* buf, uint64_t slba, int64_t bytes, int64_t sector_size){
     TORCH_CHECK(bytes > 0 && bytes % sector_size == 0,
                 "nvme_write: size ", bytes, " is not a multiple of ", sector_size);
 
