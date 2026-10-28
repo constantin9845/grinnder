@@ -150,6 +150,28 @@ void h2d_copy_async(torch::Tensor src, torch::Tensor dst) {
   });
 }
 
+static void nvme_write(int64_t fd, const void* buf, uint64_t slba, int64_t bytes, int64_t sector_size){
+    TORCH_CHECK(bytes > 0 && bytes % sector_size == 0,
+                "nvme_write: size ", bytes, " is not a multiple of ", sector_size);
+
+    const int64_t nsec = bytes / sector_size;
+    TORCH_CHECK(nsec <= 65536, "nvme_write: ", nsec, " sectors exceeds the 16-bit nblocks limit");
+
+    struct nvme_user_io io;
+    std::memset(&io, 0, sizeof(io));
+    io.opcode  = 0x01;                                  // nvme_cmd_write
+    io.addr    = reinterpret_cast<uint64_t>(buf);
+    io.slba    = slba;
+    io.nblocks = static_cast<uint16_t>(nsec - 1);       // 0-based
+
+    const int ret = ioctl(static_cast<int>(fd), NVME_IOCTL_SUBMIT_IO, &io);
+    TORCH_CHECK(ret == 0,
+                "NVMe write failed: slba=", slba, " bytes=", bytes,
+                (ret < 0 ? " errno=" : " nvme_status=0x"),
+                (ret < 0 ? std::to_string(errno) + " (" + strerror(errno) + ")"
+                         : [&]{ char s[8]; snprintf(s, sizeof(s), "%x", ret); return std::string(s); }()));
+}
+
 
 // Default grinnder
 void gather_partitions(int pid, std::vector<torch::Tensor> srcs,
@@ -851,9 +873,6 @@ void gather_activations_direct(
 }
 
 
-#include <sys/ioctl.h>
-#include <linux/nvme_ioctl.h>
-
 void device_write(
     int64_t fd,
     torch::Tensor src,
@@ -953,29 +972,6 @@ void gpu_write(
   }
 
 }
-
-static void nvme_write(int64_t fd, const void* buf, uint64_t slba, int64_t bytes, int64_t sector_size){
-    TORCH_CHECK(bytes > 0 && bytes % sector_size == 0,
-                "nvme_write: size ", bytes, " is not a multiple of ", sector_size);
-
-    const int64_t nsec = bytes / sector_size;
-    TORCH_CHECK(nsec <= 65536, "nvme_write: ", nsec, " sectors exceeds the 16-bit nblocks limit");
-
-    struct nvme_user_io io;
-    std::memset(&io, 0, sizeof(io));
-    io.opcode  = 0x01;                                  // nvme_cmd_write
-    io.addr    = reinterpret_cast<uint64_t>(buf);
-    io.slba    = slba;
-    io.nblocks = static_cast<uint16_t>(nsec - 1);       // 0-based
-
-    const int ret = ioctl(static_cast<int>(fd), NVME_IOCTL_SUBMIT_IO, &io);
-    TORCH_CHECK(ret == 0,
-                "NVMe write failed: slba=", slba, " bytes=", bytes,
-                (ret < 0 ? " errno=" : " nvme_status=0x"),
-                (ret < 0 ? std::to_string(errno) + " (" + strerror(errno) + ")"
-                         : [&]{ char s[8]; snprintf(s, sizeof(s), "%x", ret); return std::string(s); }()));
-}
-
 
 
 bool device_read_and_verify(
