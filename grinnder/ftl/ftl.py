@@ -1015,6 +1015,7 @@ class FTL:
         self._ops.open_ugds_register()
         self.device_fd = self.open_device()
         self.cuFD = self._ops.register_fd(self.device_fd)
+        print(f"Registered cuFD = {self.cuFD}")
         
 
     def close_device(self):
