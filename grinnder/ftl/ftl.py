@@ -267,8 +267,10 @@ class FTL:
         self.next_free_lba = 0
 
         self._ops = _load_ops()
-        self.drive_mode_nvme = True
+        self.drive_mode_nvme = False
         self.device_fd = self.open_device()
+
+        self.register_ugds_drive()
 
         self.cuFD = None
 
