@@ -272,7 +272,7 @@ class FTL:
 
         self.register_ugds_drive()
 
-        self.cuFD = None
+        #self.cuFD = None
 
     def get_flash_layout(self, device):
         return {
