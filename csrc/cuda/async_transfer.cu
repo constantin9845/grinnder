@@ -857,54 +857,44 @@ void gather_activations_direct(
 void device_write(
     int64_t fd,
     torch::Tensor src,
-    torch::Tensor ppa_list,
-    int sector_size
+    torch::Tensor runs,
+    int64_t sector_size,
+    int64_t page_size
 ) {
-    TORCH_CHECK(!src.is_cuda(), "Source tensor must be on CPU for POSIX writes");
-    TORCH_CHECK(src.is_contiguous(), "Source tensor must be contiguous");
-    TORCH_CHECK(ppa_list.is_contiguous(), "PPA tensor must be contiguous");
+    TORCH_CHECK(!src.is_cuda() && src.is_contiguous(), "src must be contiguous CPU");
+    TORCH_CHECK(runs.dim() == 2 && runs.size(1) == 3 && runs.scalar_type() == at::kLong);
 
-    const uint8_t* src_raw = reinterpret_cast<const uint8_t*>(src.data_ptr());
-    const int64_t* ppa_ptr = ppa_list.data_ptr<int64_t>();
+    auto r = runs.contiguous();
+    const int64_t* rp = r.data_ptr<int64_t>();
+    const uint8_t* src_raw = static_cast<const uint8_t*>(src.data_ptr());
+    const int64_t total_bytes = src.numel() * src.element_size();
+    const int64_t MAX_IO = 128 * 1024;    
+    std::vector<uint8_t> tail(page_size); 
 
-    int64_t total_bytes = src.numel() * src.element_size();
-    int64_t num_pages = ppa_list.numel();
-    int raw_fd = static_cast<int>(fd);
+    for(int64_t k = 0; k < r.size(0); ++k){
+        const int64_t file_off = rp[3*k], buf_off = rp[3*k+1], size = rp[3*k+2];
 
-    for (int64_t i = 0; i < num_pages; ++i) {
-        uint64_t raw_ppa = static_cast<uint64_t>(ppa_ptr[i]);
+        for(int64_t done = 0; done < size; done += MAX_IO){
+            const int64_t chunk = std::min(MAX_IO, size - done);
+            const int64_t b = buf_off + done;
+            const uint8_t* data = src_raw + b;
+            int64_t n = chunk;
 
-        // encode host ftl bit
-        raw_ppa = encode_host_ftl_bit(raw_ppa);
+            if(b + chunk > total_bytes){
+                const int64_t full = (total_bytes - b) / page_size * page_size;
+                if (full > 0) {                      // write the full pages first
+                    nvme_write(fd, data, (file_off + done) / sector_size, full, sector_size);
+                }
 
-        int64_t dev_offset = i * (sector_size*32);
-        int64_t write_bytes = std::min<int64_t>((sector_size*32), total_bytes - dev_offset);
-
-        if (write_bytes <= 0) break;
-
-        int64_t sectors = (write_bytes + sector_size - 1) / sector_size;
-
-        struct nvme_user_io io {};
-        std::memset(&io, 0, sizeof(io));
-        io.opcode = 0x01; 
-        io.addr = reinterpret_cast<uint64_t>(src_raw + dev_offset);
-        io.slba = raw_ppa;
-        io.nblocks = sectors-1;
-
-        int ret = ioctl(raw_fd, NVME_IOCTL_SUBMIT_IO, &io);
-
-        if (ret < 0) {
-            TORCH_CHECK(
-                false,
-                "NVME_IOCTL_SUBMIT_IO write failed at sector ", i,
-                " (PPA: ", raw_ppa, "). Error: ", strerror(errno),
-                " (errno ", errno, ")"
-            );
+                std::fill(tail.begin(), tail.end(), 0);
+                std::memcpy(tail.data(), data + full, total_bytes - b - full);
+                nvme_write(fd, tail.data(), (file_off + done + full) / sector_size,
+                           page_size, sector_size);
+                continue;
+            }
+            nvme_write(fd, data, (file_off + done) / sector_size, n, sector_size);
         }
-        else if(ret > 0){
-          printf("ret = %d\n", ret);
-        }
-    }
+    } 
 }
 
 

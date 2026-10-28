@@ -142,40 +142,23 @@ class PPA:
         )
 
 
-    def get_index(self):
-
-        index = (
-            (self.ch * self.sec_per_ch)
-            + (self.lun * self.sec_per_lun)
-            + (self.pl * self.sec_per_pl)
-            + (self.blk * self.sec_per_blk)
-            + (self.pg * self.sec_per_pg)
-            + self.sec
-        )
-
-        if index >= self.total_sectors:
-            raise ValueError(
-                f"Invalid physical sector index: {index}"
-            )
-
-        return index
-
     def get_page_index(self):
 
-        index = (
-            (self.ch * self.pages_per_channel)
-            + (self.lun * self.pages_per_lun)
-            + (self.pl * self.pages_per_plane)
-            + (self.blk * self.npg)
-            + self.pg
-        )
+        x = self.blk
+        x = x * self.npg  + self.pg
+        x = x * self.npl  + self.pl
+        x = x * self.nlun + self.lun
+        x = x * self.nch  + self.ch
 
-        if index >= self.total_pages:
-            raise ValueError(
-                f"Invalid physical page index: {index}"
-            )
+        if not (0 <= self.ch < self.nch and 0 <= self.lun < self.nlun and 0 <= self.pl < self.npl
+                and 0 <= self.blk < self.nblk and 0 <= self.pg < self.npg and 0 <= self.sec < self.nsec):
+            raise ValueError(f"PPA field out of range: {self}")
+        
+        return x
 
-        return index
+
+    def get_index(self):
+        return self.get_page_index() * self.nsec + self.sec
 
     def same_page(self, other):
         return (
@@ -329,46 +312,14 @@ class FTL:
                 f"Invalid physical page index {page_index}"
             )
 
-        ch = (
-            page_index // self.pages_per_channel
-        )
+        x = page_index
+        ch  = x % self.nch;  x //= self.nch
+        lun = x % self.nlun; x //= self.nlun
+        pl  = x % self.npl;  x //= self.npl
+        pg  = x % self.npg;  x //= self.npg
+        blk = x
 
-        rem = (
-            page_index % self.pages_per_channel
-        )
-
-        lun = (
-            rem // self.pages_per_lun
-        )
-
-        rem %= self.pages_per_lun
-
-        pl = (
-            rem // self.pages_per_plane
-        )
-
-        rem %= self.pages_per_plane
-
-        blk = (
-            rem // self.npg
-        )
-
-        pg = (
-            rem % self.npg
-        )
-
-        return PPA(
-            [
-                ch,
-                lun,
-                pl,
-                blk,
-                pg,
-                0,
-                0,
-            ],
-            self.ssd_data,
-        )
+        return PPA([ch, lun, pl, blk, pg, 0, 0], self.ssd_data)
 
     def allocate_page(self):
         if self.next_page >= self.total_pages:
@@ -627,21 +578,14 @@ class FTL:
             dtype=np.uint64,
         )
 
-        mapped_ppas = np.empty(
-            pages_needed,
-            dtype=np.uint64
-        )
+        dev_lbas = np.empty(pages_needed, dtype=np.uint64)
+        mapped_ppas = np.empty(pages_needed, dtype=np.uint64) 
 
         for i, lba in enumerate(page_start_lbas):
-
             lpn = int(lba) // sectors_per_page
-
-            # alloc page + map
-            ppa = self.write_lpn(lpn)
-
-            mapped_ppas[i] = (
-                ppa.to_uint64()
-            )
+            ppa = self.write_lpn(lpn)              
+            dev_lbas[i] = ppa.get_index()          
+            mapped_ppas[i] = ppa.to_uint64()
 
         self.tensor_table[file_id] = {
             "file_id": file_id,
@@ -651,17 +595,18 @@ class FTL:
             "element_size": element_size,
             "total_bytes": total_bytes,
             "physical_bytes": pages_needed * bytes_per_page,
-            "sector_size": bytes_per_page,
-            "start_lba": start_lba,
+            "page_bytes": bytes_per_page,          
+            "num_pages": pages_needed,             
+            "num_sectors": sectors_needed,         
+            "start_lba": start_lba,                
             "end_lba": end_lba,
-            "num_sectors": pages_needed,
-            "lba_list": page_start_lbas,
-            "ppa_uint64_list": mapped_ppas,
+            "lba_list": page_start_lbas,           
+            "dev_lba_list": dev_lbas,              
+            "io_runs": self._build_io_runs(dev_lbas),
+            "ppa_uint64_list": mapped_ppas,        
         }
 
-        self.next_free_lba = (
-            end_lba + 1
-        )
+        self.next_free_lba = end_lba + 1
 
         print(
             f"[FTL] Registered '{file_id}': "
@@ -671,6 +616,9 @@ class FTL:
         )
 
         return self.tensor_table[file_id]
+
+
+
 
     def _get_tensor_current_ppas(
         self,
@@ -824,37 +772,14 @@ class FTL:
         file_id,
     ):
 
-        assert tensor.is_contiguous(), (
-            "device write requires contiguous tensor"
-        )
+        assert tensor.is_contiguous(), ("device write requires contiguous tensor")
 
-        # Use metadata's file_id when possible so that
-        # the mapping can be refreshed after GC.
-        if file_id in self.tensor_table:
+        assert not tensor.is_cuda and tensor.is_contiguous()
+        runs = self.get_tensor_io_runs(file_id)           
+        runs_t = torch.tensor(runs, dtype=torch.int64)      
+        self._ops.device_write(self.device_fd, tensor, runs_t, self.sector_size, self.page_size)
 
-            ppa_array = (
-                self._get_tensor_current_ppas(
-                    file_id
-                )
-            )
-
-        else:
-            ppa_array = (
-                meta["ppa_uint64_list"]
-            )
-
-        ppa_tensor = (
-            self._convert_ppas_to_tensor(
-                ppa_array
-            )
-        )
-
-        self._ops.device_write(
-            self.cuFD,
-            tensor,
-            ppa_tensor,
-            self.ssd_data[-1],
-        )
+        
 
     def gpu_write(
         self,
@@ -986,13 +911,60 @@ class FTL:
                 self.tensor_table
             ),
         }
+    
+    def _build_io_runs(self, dev_lbas: np.ndarray):
+        # merge contiguous pages
+        n = len(dev_lbas)
+        if n == 0:
+            return []
+        
+        breaks = np.flatnonzero(np.diff(dev_lbas.astype(np.int64)) != self.nsec) + 1
+        run_starts = np.concatenate(([0], breaks))
+        run_lens = np.diff(np.concatenate((run_starts, [n])))
+
+        return [
+            (int(dev_lbas[s]) * self.sector_size,  
+            int(s) * self.page_size,              
+            int(k) * self.page_size)              
+            for s, k in zip(run_starts, run_lens)
+        ]
+    
+
+    def get_row_file_offsets(self, file_id, rows, row_bytes):
+        """Device byte offsets (cuFile file_offset) for the given row indices"""
+        if self.page_size % row_bytes != 0:
+            raise ValueError(f"row_bytes={row_bytes} must divide page size {self.page_size}")
+        if row_bytes % self.sector_size != 0:
+            raise ValueError(f"row_bytes={row_bytes} must be a multiple of {self.sector_size}")
+
+        rows = np.asarray(rows, dtype=np.int64)
+        start = rows * row_bytes
+        page_idx = start // self.page_size
+        in_page = start % self.page_size
+
+        dev_lbas = self.get_tensor_dev_lbas(file_id).astype(np.int64)
+        return dev_lbas[page_idx] * self.sector_size + in_page
+
+    
+
+    def get_tensor_dev_lbas(self, file_id):
+        meta = self.tensor_table[file_id]
+        out = np.empty(len(meta["lba_list"]), dtype=np.uint64)
+        for i, lba in enumerate(meta["lba_list"]):
+            lpn = int(lba) // self.nsec
+            ppa = self.get_ppa(lpn)
+            if ppa is None:
+                raise RuntimeError(f"LPN {lpn} of '{file_id}' has no physical mapping")
+            out[i] = ppa.get_index()
+        return out
+
+    def get_tensor_io_runs(self, file_id):
+        return self._build_io_runs(self.get_tensor_dev_lbas(file_id))
+
+    
 
     def open_device(self, device="/dev/nvme0n1"):
-
-        return os.open(
-            "/dev/nvme0n1",
-            os.O_RDWR,
-        )
+        return os.open(device, os.O_RDWR | os.O_DIRECT)
 
     def close_device(self):
 
