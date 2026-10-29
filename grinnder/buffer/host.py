@@ -694,6 +694,9 @@ class HostBuffer:
         ftl = self._backend.host_ftl
         row_bytes = gpu_target.size(1) * gpu_target.element_size()
 
+        # Activations of this layer may still be in flight to the SSD.
+        self.wait_storage_writes()
+
         # Rows to read from each partition, in GPU layout order:
         # [intra(pid) | boundary_from_p0 | ... | boundary_from_pN]
         num_boundary_rows = sum(
@@ -747,9 +750,14 @@ class HostBuffer:
             f"boundary_rows={num_boundary_rows} runs={len(runs)}"
         )
 
+        # The reads start in the background once `stream` reaches this point,
+        # i.e. after everything already queued on the current stream (so memory
+        # reused from a freed tensor is no longer in use).
+        job = None
+        stream.wait_stream(torch.cuda.current_stream(gpu_target.device))
         with torch.cuda.stream(stream):
             if self._ops is not None:
-                self._ops.gather_partitions_direct_raw(
+                job = self._ops.gather_partitions_direct_raw_async(
                     ftl.cuFD,
                     gpu_target,
                     runs_t,
@@ -765,6 +773,8 @@ class HostBuffer:
             f"\tPartition {pid} loads "
             f"{gb} GB from other partitions"
         )
+        # Job id: gpu_target holds the data only after self._ops.gather_wait(job).
+        return job
 
     # ------------------------------------------------------------------
     # Scatter: one GPU tensor -> multiple host partitions (with accumulation)
@@ -839,9 +849,20 @@ class HostBuffer:
         """
         assert self._backend is not None, "StorageBackend required for bypass"
         file_id = f"{self._file_prefix}_p{pid}"
+        # The write starts in the background once `stream` reaches this point,
+        # i.e. after the kernels that produced gpu_data. Call
+        # wait_storage_writes(pid) before freeing or overwriting gpu_data.
         stream.wait_stream(torch.cuda.current_stream(gpu_data.device))
-        stream.synchronize()
-        self._backend.gpu_write(gpu_data, file_id, stream)
+        self._backend.gpu_write(gpu_data, file_id, stream, async_=True)
+
+    def wait_storage_writes(self, pid: Optional[int] = None) -> None:
+        """Wait for async GPU->SSD writes of one partition (or all of this buffer)."""
+        if self._backend is None:
+            return
+        if pid is None:
+            self._backend.wait_gpu_writes(prefix=f"{self._file_prefix}_p")
+        else:
+            self._backend.wait_gpu_writes([f"{self._file_prefix}_p{pid}"])
 
     def async_bypass_to_storage_raw(
             self, pid: int, gpu_data: Tensor, stream: torch.cuda.Stream

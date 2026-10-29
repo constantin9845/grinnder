@@ -57,16 +57,38 @@ static inline uint64_t encode_host_ftl_bit(uint64_t raw_ppa);
 void gather_partitions_direct_raw(
   int64_t dev_handle_ptr,
   torch::Tensor dst,
-  torch::Tensor runs,
+  torch::Tensor runs,       /* [N, 3] int64: (dev_off, dst_off, size) in bytes */
   int64_t sector_size
 );
 
-void gpu_write(
-  int64_t fd,
-  torch::Tensor src,
-  torch::Tensor ppa_list,
-  int sector_size
+/* Same as gather_partitions_direct_raw, but returns a job id at once; cuFile batch
+   reads run on a worker thread. dst holds the data only after gather_wait(id). */
+int64_t gather_partitions_direct_raw_async(
+  int64_t dev_handle_ptr,
+  torch::Tensor dst,
+  torch::Tensor runs,
+  int64_t sector_size
 );
+void gather_wait(int64_t id);
+
+void gpu_write(
+  int64_t dev_handle_ptr,
+  torch::Tensor src,
+  torch::Tensor runs,       /* [N, 3] int64: (dev_off, buf_off, size) in bytes */
+  int64_t sector_size,
+  int64_t page_size
+);
+
+/* Same as gpu_write, but returns a job id at once; cuFile batch writes run on a worker thread. */
+int64_t gpu_write_async(
+  int64_t dev_handle_ptr,
+  torch::Tensor src,
+  torch::Tensor runs,
+  int64_t sector_size,
+  int64_t page_size
+);
+void gpu_write_wait(int64_t id);
+void gpu_write_wait_all();
 
 void device_write(int64_t fd, torch::Tensor src, torch::Tensor runs,
                   int64_t sector_size, int64_t page_size);

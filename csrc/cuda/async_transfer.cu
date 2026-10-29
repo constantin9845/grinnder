@@ -24,6 +24,7 @@
 #include <sys/ioctl.h>
 #include <linux/nvme_ioctl.h>
 #include <cstdio>
+#include <ctime>
 
 static std::unordered_map<int, CUfileHandle_t> g_cufile_handles;
 static std::mutex g_cufile_handles_mutex;
@@ -420,60 +421,8 @@ static inline uint64_t encode_host_ftl_bit(uint64_t raw_ppa)
     return raw_ppa |= HOST_FTL_BIT;
 }
 
-void gather_partitions_direct_raw(
-    int64_t dev_handle_ptr,
-    torch::Tensor dst,
-    torch::Tensor runs,          /* [N, 3] int64: (dev_off, dst_off, size), same layout as device_write */
-    int64_t sector_size
-) {
-    AT_ASSERTM(dst.is_cuda(), "Destination must be a CUDA tensor");
-    AT_ASSERTM(dst.is_contiguous(), "Destination must be contiguous");
-    TORCH_CHECK(runs.dim() == 2 && runs.size(1) == 3 && runs.scalar_type() == at::kLong,
-                "runs must be an [N, 3] int64 tensor");
-
-    CUfileHandle_t dev_handle =
-        reinterpret_cast<CUfileHandle_t>(static_cast<uintptr_t>(dev_handle_ptr));
-
-    auto r = runs.to(at::kCPU).contiguous();
-    const int64_t* rp = r.data_ptr<int64_t>();
-    void* dst_raw = dst.data_ptr();
-    const int64_t dst_bytes = dst.numel() * dst.element_size();
-    const int64_t MAX_IO = 128 * 1024;
-
-    for (int64_t k = 0; k < r.size(0); ++k) {
-        const int64_t dev_off = rp[3*k], buf_off = rp[3*k+1], size = rp[3*k+2];
-
-        TORCH_CHECK(dev_off % sector_size == 0 && size % sector_size == 0,
-                    "gather run ", k, " not sector-aligned: dev_off=", dev_off, " size=", size);
-        TORCH_CHECK(buf_off >= 0 && buf_off + size <= dst_bytes,
-                    "gather run ", k, " exceeds dst: buf_off=", buf_off,
-                    " size=", size, " dst_bytes=", dst_bytes);
-
-        for (int64_t done = 0; done < size; done += MAX_IO) {
-            const int64_t chunk = std::min(MAX_IO, size - done);
-
-            const ssize_t ret = cuFileRead(
-                dev_handle,
-                dst_raw,              // devPtr_base
-                chunk,
-                dev_off + done,       // device byte offset (LBA * sector_size)
-                buf_off + done        // devPtr_offset into dst
-            );
-
-            TORCH_CHECK(ret == chunk,
-                        "cuFileRead failed: run=", k,
-                        ", dev_off=", dev_off + done,
-                        ", lba=", (dev_off + done) / sector_size,
-                        ", dst_off=", buf_off + done,
-                        ", bytes=", chunk,
-                        ", returned=", ret,
-                        ", errno=", errno, " (", strerror(errno), ")");
-        }
-    }
-
-    // Make sure the data is in GPU memory before returning.
-    C10_CUDA_CHECK(cudaDeviceSynchronize());
-}
+// gather_partitions_direct_raw / gather_partitions_direct_raw_async are
+// defined below gpu_write: they share its cuFile batch runner.
 
 
 void gather_activations_direct(
@@ -569,59 +518,300 @@ void device_write(
 
 
 
-void gpu_write(
-  int64_t fd,
-  torch::Tensor src,
-  torch::Tensor ppa_list,
-  int sector_size
-){
-  TORCH_CHECK(src.is_cuda(), "Source tensor must be on GPU");
-  TORCH_CHECK(src.is_contiguous(), "Source tensor must be contiguous");
-  TORCH_CHECK(ppa_list.is_contiguous(), "PPA tensor must be contiguous");
+// ---------------------------------------------------------------------------
+// GPU -> SSD writes with the cuFile batch API, run asynchronously.
+//
+// gpu_write_async() returns immediately with a job id. A worker thread waits
+// for the kernels that produced `src` (a CUDA event recorded on the caller's
+// current stream), then submits the writes in batches of up to
+// GPU_WRITE_BATCH entries and waits for each batch to complete.
+// gpu_write_wait(id) / gpu_write_wait_all() block until done and rethrow errors.
+//
+// The job holds a reference to `src`, but the caller must still not free
+// (resize_(0)) or overwrite it before waiting.
+// ---------------------------------------------------------------------------
 
+// Must not exceed "io_batchsize" in cufile.json (default 128).
+static constexpr unsigned GPU_WRITE_BATCH = 128;
+static constexpr int64_t GPU_WRITE_MAX_IO = 128 * 1024;
 
-  auto ppa_cpu = ppa_list.to(at::kCPU).contiguous();
-  const int64_t* ppa_ptr = ppa_cpu.data_ptr<int64_t>();
-  int64_t total_bytes = src.numel() * src.element_size();
-  int64_t num_pages = ppa_list.numel();
-  int64_t page_bytes = static_cast<int64_t>(sector_size) * 32;
+struct GpuWriteIo {
+    void* base;        // devPtr_base
+    int64_t buf_off;   // devPtr_offset
+    int64_t dev_off;   // file_offset (dev_lba * sector_size)
+    int64_t size;
+};
 
-  CUfileHandle_t handle = reinterpret_cast<CUfileHandle_t>(static_cast<uintptr_t>(fd));
-  const void* src_raw = src.data_ptr();
+static std::mutex g_gpu_write_mutex;
+static std::unordered_map<int64_t, std::future<void>> g_gpu_write_jobs;
+static int64_t g_gpu_write_next_id = 0;
 
-  for (int64_t i = 0; i < num_pages; ++i){
-    uint64_t raw_ppa = static_cast<uint64_t>(ppa_ptr[i]);
-    // encode host ftl bit
-    raw_ppa = encode_host_ftl_bit(raw_ppa);
-    int64_t dev_offset = i * page_bytes;
-    int64_t write_bytes = std::min<int64_t>(page_bytes, total_bytes - dev_offset);
-    if (write_bytes <= 0) break;
+// Runs every I/O in `ios` (CUFILE_READ or CUFILE_WRITE) through the cuFile
+// batch API, GPU_WRITE_BATCH entries at a time. Shared by GPU writes and gathers.
+static void gpu_write_run_batches(CUfileHandle_t handle, const std::vector<GpuWriteIo>& ios,
+                                  CUfileOpcode_t opcode) {
+    if (ios.empty()) return;
+    const char* what = opcode == CUFILE_READ ? "read" : "write";
 
-    TORCH_CHECK(write_bytes % sector_size == 0, "Write size must be sector-aligned");
+    CUfileBatchHandle_t batch;
+    CUfileError_t st = cuFileBatchIOSetUp(&batch, GPU_WRITE_BATCH);
+    TORCH_CHECK(st.err == CU_FILE_SUCCESS, "cuFileBatchIOSetUp failed: err=", static_cast<int>(st.err));
 
-    ssize_t ret = cuFileWrite(
-        handle,
-        static_cast<const char*>(src_raw) + dev_offset,
-        write_bytes,
-        static_cast<int64_t>(raw_ppa),
-        dev_offset
-    );
+    std::vector<CUfileIOParams_t> params(GPU_WRITE_BATCH);
+    std::vector<CUfileIOEvents_t> events(GPU_WRITE_BATCH);
+    std::string error;
 
-    if (ret < 0) {
-        TORCH_CHECK(
-            false,
-            "cuFileWrite failed: page=", i,
-            ", ret=", ret,
-            ", errno=", errno,
-            " (", strerror(errno), ")",
-            ", handle=", (void*)handle,
-            ", bytes=", write_bytes,
-            ", file_offset=", raw_ppa,
-            ", buffer_offset=", dev_offset
-        );
+    for (size_t first = 0; first < ios.size() && error.empty(); first += GPU_WRITE_BATCH) {
+        const unsigned n = static_cast<unsigned>(std::min<size_t>(GPU_WRITE_BATCH, ios.size() - first));
+
+        for (unsigned i = 0; i < n; ++i) {
+            const GpuWriteIo& io = ios[first + i];
+            std::memset(&params[i], 0, sizeof(CUfileIOParams_t));
+            params[i].mode = CUFILE_BATCH;
+            params[i].fh = handle;
+            params[i].opcode = opcode;
+            params[i].cookie = reinterpret_cast<void*>(static_cast<uintptr_t>(first + i));
+            params[i].u.batch.devPtr_base = io.base;
+            params[i].u.batch.devPtr_offset = io.buf_off;
+            params[i].u.batch.file_offset = io.dev_off;
+            params[i].u.batch.size = static_cast<size_t>(io.size);
+        }
+
+        st = cuFileBatchIOSubmit(batch, n, params.data(), 0);
+        if (st.err != CU_FILE_SUCCESS) {
+            error = "cuFileBatchIOSubmit failed: err=" + std::to_string(static_cast<int>(st.err));
+            break;
+        }
+
+        // Wait for every entry of this batch before reusing the batch handle.
+        unsigned completed = 0;
+        while (completed < n) {
+            unsigned nr = n - completed;
+            struct timespec timeout = {1, 0};
+            st = cuFileBatchIOGetStatus(batch, 1, &nr, events.data(), &timeout);
+            if (st.err != CU_FILE_SUCCESS) {
+                error = "cuFileBatchIOGetStatus failed: err=" + std::to_string(static_cast<int>(st.err));
+                break;
+            }
+            for (unsigned i = 0; i < nr; ++i) {
+                const size_t idx = reinterpret_cast<uintptr_t>(events[i].cookie);
+                const GpuWriteIo& io = ios[idx];
+                if ((events[i].status != CUFILE_COMPLETE ||
+                     events[i].ret != static_cast<size_t>(io.size)) && error.empty()) {
+                    error = std::string("cuFile batch ") + what + " failed: dev_off=" + std::to_string(io.dev_off) +
+                            " lba=" + std::to_string(io.dev_off / 512) +
+                            " buf_off=" + std::to_string(io.buf_off) +
+                            " bytes=" + std::to_string(io.size) +
+                            " status=" + std::to_string(static_cast<int>(events[i].status)) +
+                            " ret=" + std::to_string(events[i].ret);
+                }
+            }
+            completed += nr;
+        }
     }
-  }
 
+    cuFileBatchIODestroy(batch);
+    TORCH_CHECK(error.empty(), error);
+}
+
+int64_t gpu_write_async(
+    int64_t dev_handle_ptr,      /* cuFile handle from register_fd */
+    torch::Tensor src,           /* contiguous CUDA tensor */
+    torch::Tensor runs,          /* [N, 3] int64: (dev_off, buf_off, size), same as device_write */
+    int64_t sector_size,
+    int64_t page_size
+) {
+    TORCH_CHECK(src.is_cuda() && src.is_contiguous(), "src must be a contiguous CUDA tensor");
+    TORCH_CHECK(runs.dim() == 2 && runs.size(1) == 3 && runs.scalar_type() == at::kLong,
+                "runs must be an [N, 3] int64 tensor");
+    TORCH_CHECK(page_size > 0 && page_size % sector_size == 0,
+                "page_size must be a multiple of sector_size");
+
+    CUfileHandle_t handle =
+        reinterpret_cast<CUfileHandle_t>(static_cast<uintptr_t>(dev_handle_ptr));
+    const int device = src.get_device();
+
+    // Mark the point on the caller's stream where src is fully produced.
+    cudaEvent_t ready;
+    C10_CUDA_CHECK(cudaEventCreateWithFlags(&ready, cudaEventDisableTiming));
+    C10_CUDA_CHECK(cudaEventRecord(ready, at::cuda::getCurrentCUDAStream(device)));
+
+    auto r = runs.to(at::kCPU).contiguous();
+
+    auto job = [handle, device, ready, src, r, sector_size, page_size]() {
+        c10::cuda::CUDAGuard guard(device);
+        C10_CUDA_CHECK(cudaEventSynchronize(ready));
+        C10_CUDA_CHECK(cudaEventDestroy(ready));
+
+        const int64_t* rp = r.data_ptr<int64_t>();
+        void* src_raw = src.data_ptr();
+        const int64_t total_bytes = src.numel() * src.element_size();
+        torch::Tensor tail;          // page-sized GPU scratch for the last partial page
+        std::vector<GpuWriteIo> ios;
+
+        // Same run/chunk/tail layout as device_write, so reads of this
+        // tensor (gather, device_read_and_verify) line up exactly.
+        for (int64_t k = 0; k < r.size(0); ++k) {
+            const int64_t file_off = rp[3*k], buf_off = rp[3*k+1], size = rp[3*k+2];
+
+            for (int64_t done = 0; done < size; done += GPU_WRITE_MAX_IO) {
+                const int64_t chunk = std::min(GPU_WRITE_MAX_IO, size - done);
+                const int64_t b = buf_off + done;
+                if (b >= total_bytes) break;
+
+                if (b + chunk > total_bytes) {
+                    const int64_t full = (total_bytes - b) / page_size * page_size;
+                    if (full > 0) {
+                        ios.push_back({src_raw, b, file_off + done, full});
+                    }
+                    // Last partial page: copy into a zeroed page buffer, write the whole page
+                    // zero-fill and copy on the same stream so they stay ordered
+                    auto stream = c10::cuda::getStreamFromPool(false, device);
+                    c10::cuda::CUDAStreamGuard stream_guard(stream);
+                    tail = torch::zeros({page_size}, src.options().dtype(at::kByte));
+                    C10_CUDA_CHECK(cudaMemcpyAsync(
+                        tail.data_ptr(),
+                        static_cast<const uint8_t*>(src_raw) + b + full,
+                        total_bytes - b - full,
+                        cudaMemcpyDeviceToDevice,
+                        stream));
+                    C10_CUDA_CHECK(cudaStreamSynchronize(stream));
+                    ios.push_back({tail.data_ptr(), 0, file_off + done + full, page_size});
+                    continue;
+                }
+                ios.push_back({src_raw, b, file_off + done, chunk});
+            }
+        }
+
+        for (const GpuWriteIo& io : ios) {
+            TORCH_CHECK(io.dev_off % sector_size == 0 && io.size % sector_size == 0,
+                        "gpu_write: unaligned I/O dev_off=", io.dev_off, " size=", io.size);
+        }
+
+        gpu_write_run_batches(handle, ios, CUFILE_WRITE);   // `tail` stays alive until this returns
+    };
+
+    std::lock_guard<std::mutex> lock(g_gpu_write_mutex);
+    const int64_t id = g_gpu_write_next_id++;
+    g_gpu_write_jobs.emplace(id, std::async(std::launch::async, std::move(job)));
+    return id;
+}
+
+void gpu_write_wait(int64_t id) {
+    std::future<void> fut;
+    {
+        std::lock_guard<std::mutex> lock(g_gpu_write_mutex);
+        auto it = g_gpu_write_jobs.find(id);
+        if (it == g_gpu_write_jobs.end()) return;   // already waited
+        fut = std::move(it->second);
+        g_gpu_write_jobs.erase(it);
+    }
+    fut.get();   // rethrows the worker's error, if any
+}
+
+void gpu_write_wait_all() {
+    std::vector<int64_t> ids;
+    {
+        std::lock_guard<std::mutex> lock(g_gpu_write_mutex);
+        for (auto& kv : g_gpu_write_jobs) ids.push_back(kv.first);
+    }
+    std::sort(ids.begin(), ids.end());
+    std::string first_error;
+    for (int64_t id : ids) {
+        try {
+            gpu_write_wait(id);
+        } catch (const std::exception& e) {
+            if (first_error.empty()) first_error = e.what();
+        }
+    }
+    TORCH_CHECK(first_error.empty(), first_error);
+}
+
+// Blocking version: submit and wait.
+void gpu_write(
+    int64_t dev_handle_ptr,
+    torch::Tensor src,
+    torch::Tensor runs,
+    int64_t sector_size,
+    int64_t page_size
+) {
+    gpu_write_wait(gpu_write_async(dev_handle_ptr, src, runs, sector_size, page_size));
+}
+
+
+// ---------------------------------------------------------------------------
+// SSD -> GPU gather with the cuFile batch API, run asynchronously.
+//
+// gather_partitions_direct_raw_async() returns a job id at once. A worker
+// thread waits until `dst` is free to overwrite (a CUDA event recorded on the
+// caller's current stream), then reads every run into `dst` in batched
+// chunks. The data is in `dst` only after gather_wait(id) returns; no CUDA
+// stream knows about these reads, so wait before any kernel uses `dst`.
+// ---------------------------------------------------------------------------
+
+int64_t gather_partitions_direct_raw_async(
+    int64_t dev_handle_ptr,
+    torch::Tensor dst,
+    torch::Tensor runs,          /* [N, 3] int64: (dev_off, dst_off, size) in bytes */
+    int64_t sector_size
+) {
+    TORCH_CHECK(dst.is_cuda() && dst.is_contiguous(), "dst must be a contiguous CUDA tensor");
+    TORCH_CHECK(runs.dim() == 2 && runs.size(1) == 3 && runs.scalar_type() == at::kLong,
+                "runs must be an [N, 3] int64 tensor");
+
+    CUfileHandle_t handle =
+        reinterpret_cast<CUfileHandle_t>(static_cast<uintptr_t>(dev_handle_ptr));
+    const int device = dst.get_device();
+    const int64_t dst_bytes = dst.numel() * dst.element_size();
+
+    // Build the chunk list now, so bad runs fail in the caller.
+    auto r = runs.to(at::kCPU).contiguous();
+    const int64_t* rp = r.data_ptr<int64_t>();
+    void* dst_raw = dst.data_ptr();
+    std::vector<GpuWriteIo> ios;
+    for (int64_t k = 0; k < r.size(0); ++k) {
+        const int64_t dev_off = rp[3*k], buf_off = rp[3*k+1], size = rp[3*k+2];
+        TORCH_CHECK(dev_off % sector_size == 0 && size % sector_size == 0,
+                    "gather run ", k, " not sector-aligned: dev_off=", dev_off, " size=", size);
+        TORCH_CHECK(buf_off >= 0 && buf_off + size <= dst_bytes,
+                    "gather run ", k, " exceeds dst: buf_off=", buf_off,
+                    " size=", size, " dst_bytes=", dst_bytes);
+        for (int64_t done = 0; done < size; done += GPU_WRITE_MAX_IO) {
+            ios.push_back({dst_raw, buf_off + done, dev_off + done,
+                           std::min(GPU_WRITE_MAX_IO, size - done)});
+        }
+    }
+
+    // Kernels still using this memory (e.g. a freed tensor it was reused from)
+    // must finish before the reads overwrite it.
+    cudaEvent_t ready;
+    C10_CUDA_CHECK(cudaEventCreateWithFlags(&ready, cudaEventDisableTiming));
+    C10_CUDA_CHECK(cudaEventRecord(ready, at::cuda::getCurrentCUDAStream(device)));
+
+    auto job = [handle, device, ready, dst, ios = std::move(ios)]() {
+        c10::cuda::CUDAGuard guard(device);
+        C10_CUDA_CHECK(cudaEventSynchronize(ready));
+        C10_CUDA_CHECK(cudaEventDestroy(ready));
+        gpu_write_run_batches(handle, ios, CUFILE_READ);   // `dst` held alive until done
+    };
+
+    std::lock_guard<std::mutex> lock(g_gpu_write_mutex);
+    const int64_t id = g_gpu_write_next_id++;
+    g_gpu_write_jobs.emplace(id, std::async(std::launch::async, std::move(job)));
+    return id;
+}
+
+// Gathers and GPU writes share one job table, so either wait works for both.
+void gather_wait(int64_t id) { gpu_write_wait(id); }
+
+// Blocking version: submit and wait.
+void gather_partitions_direct_raw(
+    int64_t dev_handle_ptr,
+    torch::Tensor dst,
+    torch::Tensor runs,
+    int64_t sector_size
+) {
+    gather_wait(gather_partitions_direct_raw_async(dev_handle_ptr, dst, runs, sector_size));
 }
 
 

@@ -6,7 +6,7 @@ After processing, partitions are freed via resize_(0).
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import torch
 from torch import Tensor
@@ -43,6 +43,10 @@ class DeviceBuffer:
         self.embedding_dim = embedding_dim
         self.device = device
 
+        # pid -> job id of an async SSD gather into self._tensors[pid]
+        self._pending_gathers: Dict[int, int] = {}
+        self._gather_ops = None
+
         # Pre-allocate tensor objects with zero storage (lazy allocation)
         self._tensors: List[Tensor] = []
         for i in range(num_parts):
@@ -72,6 +76,7 @@ class DeviceBuffer:
 
     def release(self, pid: int) -> None:
         """Free GPU memory for partition pid (resize storage to 0)."""
+        self.wait_gather(pid)   # never free memory an SSD read is still filling
         tensor = self._tensors[pid]
         tensor.untyped_storage().resize_(0)
         tensor.grad = None
@@ -138,12 +143,28 @@ class DeviceBuffer:
             boundaries: List[Optional[Tensor]],
             stream: torch.cuda.Stream
         ) -> None:
-            """Allocate GPU tensor and gather from host partitions.
-    
-            Combines allocate() + host_buffer.async_gather() for convenience.
+            """Allocate GPU tensor and start an async SSD gather into it.
+
+            Returns at once; h2d_synchronize() or wait_gather(pid) waits for the data.
             """
+            self.wait_gather(pid)
             self.allocate(pid)
-            host_buffer.async_gather_direct_raw(phase, fds, pid, self._tensors[pid], boundaries, stream)
+            job = host_buffer.async_gather_direct_raw(
+                phase, fds, pid, self._tensors[pid], boundaries, stream
+            )
+            if job is not None:
+                self._pending_gathers[pid] = job
+                self._gather_ops = host_buffer._ops
+
+    def wait_gather(self, pid: Optional[int] = None) -> None:
+        """Wait for the async SSD gather of one partition (or all of them)."""
+        if not self._pending_gathers:
+            return
+        pids = list(self._pending_gathers) if pid is None else [pid]
+        for p in pids:
+            job = self._pending_gathers.pop(p, None)
+            if job is not None:
+                self._gather_ops.gather_wait(job)
 
 
     def storage_to_gpu(
@@ -165,7 +186,9 @@ class DeviceBuffer:
         """Wait for H2D operations to complete.
 
         Two-phase sync: C++ thread pool + CUDA stream.
+        Also waits for async SSD gathers, whose reads no CUDA stream tracks.
         """
+        self.wait_gather()
         try:
             from grinnder._C import h2d_synchronize as _h2d_sync
             try:

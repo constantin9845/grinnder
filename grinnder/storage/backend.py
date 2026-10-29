@@ -8,9 +8,10 @@ Both engines are REQUIRED — no POSIX fallbacks.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
-from typing import Optional
+from typing import Dict, Iterable, Optional
 
 import torch
 from torch import Tensor
@@ -62,6 +63,9 @@ class StorageBackend:
         
         self.host_ftl = FTL()
 
+        # file_id -> job id of an async GPU write still in flight
+        self._pending_gpu_writes: Dict[str, int] = {}
+
     def _path(self, file_id: str) -> str:
         return os.path.join(self._storage_dir, f"{file_id}.pt")
 
@@ -74,27 +78,62 @@ class StorageBackend:
         tensor: Tensor,
         file_id: str,
         stream: Optional[torch.cuda.Stream] = None,
+        async_: bool = False,
     ) -> None:
-        import ctypes
-        """Write GPU tensor directly to NVMe via GDS.
-
-        int64_t fd,
-        torch::Tensor src,
-        torch::Tensor ppa_list,
-        int sector_size
+        """Write a GPU tensor directly to NVMe via GDS (host FTL LBA runs).
 
         Detaches from autograd graph — bypass writes data only.
+        Activations are rewritten every epoch: a tensor already mapped with
+        the same size keeps its mapping and is overwritten in place.
+
+        With async_=True the write runs in the background (cuFile batch API).
+        Call wait_gpu_writes() before freeing or overwriting `tensor`;
+        reads of the same file_id wait automatically.
         """
 
-        assert tensor.is_cuda, "host_write requires a CPU tensor"
-        assert tensor.is_contiguous(), "host_write requires contiguous tensor"
+        assert tensor.is_cuda, "gpu_write requires a CUDA tensor"
+        assert tensor.is_contiguous(), "gpu_write requires contiguous tensor"
 
-        ptr = tensor.data_ptr()
+        # A previous write of this file must land before we overwrite it.
+        self.wait_gpu_writes([file_id])
+
+        ftl = self.host_ftl
         nbytes = tensor.numel() * tensor.element_size()
-        buffer = (ctypes.c_char * nbytes).from_address(ptr)
+        meta = ftl.tensor_table.get(file_id)
+        if meta is not None and meta["total_bytes"] != nbytes:
+            ftl.delete_tensor(file_id)
+            meta = None
+        if meta is None:
+            meta = ftl.map_tensor(file_id, tensor)
 
-        meta = self.host_ftl.map_tensor(file_id, tensor)
-        self.host_ftl.gpu_write(meta, tensor, file_id)
+        # The write starts once all work queued so far on `stream`
+        # (or the current stream) has finished.
+        with torch.cuda.stream(stream) if stream is not None else contextlib.nullcontext():
+            job = ftl.gpu_write(meta, tensor, file_id, async_=async_)
+        if async_:
+            self._pending_gpu_writes[file_id] = job
+
+    def wait_gpu_writes(
+        self,
+        file_ids: Optional[Iterable[str]] = None,
+        prefix: Optional[str] = None,
+    ) -> None:
+        """Wait for async GPU writes.
+
+        file_ids: wait for these files; prefix: wait for files starting with it;
+        neither: wait for all pending writes.
+        """
+        if not self._pending_gpu_writes:
+            return
+        if file_ids is None and prefix is None:
+            targets = list(self._pending_gpu_writes)
+        elif file_ids is not None:
+            targets = [f for f in file_ids if f in self._pending_gpu_writes]
+        else:
+            targets = [f for f in self._pending_gpu_writes if f.startswith(prefix)]
+        for f in targets:
+            job = self._pending_gpu_writes.pop(f)
+            self.host_ftl.gpu_write_wait(job)
 
         #verify = self.host_ftl.verify_write(meta, tensor, file_id)
         #assert verify, f"Data verification failed for file_id={file_id}! DRAM contents corrupted."

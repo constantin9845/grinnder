@@ -786,39 +786,29 @@ class FTL:
         meta,
         tensor,
         file_id,
+        async_=False,
     ):
 
-        assert tensor.is_contiguous(), (
-            "device write requires contiguous tensor"
+        assert tensor.is_cuda and tensor.is_contiguous(), (
+            "gpu_write requires a contiguous CUDA tensor"
         )
 
-        # Use metadata's file_id when possible so that
-        # the mapping can be refreshed after GC.
-        if file_id in self.tensor_table:
-
-            ppa_array = (
-                self._get_tensor_current_ppas(
-                    file_id
-                )
+        # Same LBA runs as device_write; read from the current mapping.
+        runs = self.get_tensor_io_runs(file_id)
+        runs_t = torch.tensor(runs, dtype=torch.int64).reshape(-1, 3)
+        if async_:
+            # Returns a job id; finish it with gpu_write_wait(id).
+            return self._ops.gpu_write_async(
+                self.cuFD, tensor, runs_t, self.sector_size, self.page_size
             )
+        self._ops.gpu_write(self.cuFD, tensor, runs_t, self.sector_size, self.page_size)
+        return None
 
-        else:
-            ppa_array = (
-                meta["ppa_uint64_list"]
-            )
+    def gpu_write_wait(self, job_id):
+        self._ops.gpu_write_wait(job_id)
 
-        ppa_tensor = (
-            self._convert_ppas_to_tensor(
-                ppa_array
-            )
-        )
-
-        self._ops.gpu_write(
-            self.cuFD,
-            tensor,
-            ppa_tensor,
-            self.ssd_data[-1],
-        )
+    def gpu_write_wait_all(self):
+        self._ops.gpu_write_wait_all()
 
 
     def verify_write(

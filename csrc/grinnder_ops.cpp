@@ -39,8 +39,20 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("open_files", &open_files, "Open and register GDS partition files (CUDA)");
   m.def("close_files", &close_files, "Deregister GDS handles and close file descriptors (CUDA)");
   m.def("device_write", &device_write, "Write CPU tensors to storage");
-  m.def("gpu_write", &gpu_write, "Write GPU tensors directly to storage");
+  m.def("gpu_write", &gpu_write, "Write GPU tensors directly to storage (blocking)",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("gpu_write_async", &gpu_write_async, "Start a cuFile batch write of a GPU tensor; returns a job id");
+  m.def("gpu_write_wait", &gpu_write_wait, "Wait for one async GPU write",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("gpu_write_wait_all", &gpu_write_wait_all, "Wait for all async GPU writes",
+        py::call_guard<py::gil_scoped_release>());
   m.def("device_read_and_verify", &device_read_and_verify, "Write CPU tensors to storage and verify no corruption");
   m.def("register_fd", &register_fd, "register fd with CUfile");
-  m.def("gather_partitions_direct_raw", &gather_partitions_direct_raw, "Gather features from raw block device to GPU tensor");
+  m.def("gather_partitions_direct_raw", &gather_partitions_direct_raw,
+        "Gather rows from raw block device to GPU tensor (blocking)",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("gather_partitions_direct_raw_async", &gather_partitions_direct_raw_async,
+        "Start a cuFile batch gather into a GPU tensor; returns a job id");
+  m.def("gather_wait", &gather_wait, "Wait for one async gather",
+        py::call_guard<py::gil_scoped_release>());
 }

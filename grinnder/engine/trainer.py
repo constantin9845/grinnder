@@ -650,6 +650,8 @@ class Trainer:
                     self.host_features[layer_id + 1].d2h_synchronize(
                         self.streams.d2h[prev_pool]
                     )
+                    # Async SSD write of this activation must finish before it is freed
+                    self.host_features[layer_id + 1].wait_storage_writes(prev_pid)
                     act_prev = self.activations[layer_id][prev_pid]
                     if act_prev is not None:
                         act_prev.untyped_storage().resize_(0)
@@ -660,6 +662,7 @@ class Trainer:
                 self.host_features[layer_id + 1].d2h_synchronize(
                     self.streams.d2h[0]
                 )
+                self.host_features[layer_id + 1].wait_storage_writes(pid)
                 act_cur = self.activations[layer_id][pid]
                 if act_cur is not None:
                     act_cur.untyped_storage().resize_(0)
@@ -685,6 +688,7 @@ class Trainer:
                 self.streams.d2h[last_pool]
             )
             last_pid = pids[-1]
+            self.host_features[layer_id + 1].wait_storage_writes(last_pid)
             act_last = self.activations[layer_id][last_pid]
             if act_last is not None:
                 act_last.untyped_storage().resize_(0)
