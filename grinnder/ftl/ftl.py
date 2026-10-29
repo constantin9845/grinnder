@@ -827,45 +827,15 @@ class FTL:
         tensor,
         file_id,
     ):
-        assert not tensor.is_cuda, (
-            "device_read_and_verify requires "
-            "a CUDA tensor"
+        assert not tensor.is_cuda and tensor.is_contiguous(), (
+            "device_read_and_verify requires a contiguous CPU tensor"
         )
 
-        assert tensor.is_contiguous(), (
-            "device_read_and_verify requires "
-            "contiguous tensor"
+        runs = self.get_tensor_io_runs(file_id)
+        runs_t = torch.tensor(runs, dtype=torch.int64)
+        return self._ops.device_read_and_verify(
+            self.device_fd, tensor, runs_t, self.sector_size, self.page_size
         )
-
-        if file_id in self.tensor_table:
-
-            ppa_array = (
-                self._get_tensor_current_ppas(
-                    file_id
-                )
-            )
-
-        else:
-            ppa_array = (
-                meta["ppa_uint64_list"]
-            )
-
-        ppa_tensor = (
-            self._convert_ppas_to_tensor(
-                ppa_array
-            )
-        )
-
-        is_correct = (
-            self._ops.device_read_and_verify(
-                self.cuFD,
-                tensor,
-                ppa_tensor,
-                self.ssd_data[-1],
-            )
-        )
-
-        return is_correct
 
     def stats(self):
 

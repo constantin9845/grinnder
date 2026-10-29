@@ -43,9 +43,10 @@ void d2h_synchronize();
 
 bool device_read_and_verify(
     int64_t fd,
-    torch::Tensor expected_src,  /* Ground truth tensor (on CUDA) */
-    torch::Tensor ppa_list,      /* Tensor of uint64 PPAs */
-    int sector_size
+    torch::Tensor expected_src,  /* Ground truth CPU tensor */
+    torch::Tensor runs,          /* [N, 3] int64: (file_off, buf_off, size), same as device_write */
+    int64_t sector_size,
+    int64_t page_size
 );
 
 
