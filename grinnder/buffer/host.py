@@ -691,119 +691,69 @@ class HostBuffer:
         assert gpu_target.is_cuda, "gpu_target must be a CUDA tensor"
         assert gpu_target.is_contiguous(), "gpu_target must be contiguous"
 
-        feature_dim = gpu_target.size(1)
-        bytes_per_elem = gpu_target.element_size()
-        row_bytes = feature_dim * bytes_per_elem
-        bytes_per_page = self._backend.host_ftl.page_size 
+        ftl = self._backend.host_ftl
+        row_bytes = gpu_target.size(1) * gpu_target.element_size()
 
-        bndries = []
-        bndry_ppas = []
-        bndry_page_offs = [] # Byte offsets within each physical page
-        bndry_row_offsets = [] # Row-slot indices within each physical page
+        # Rows to read from each partition, in GPU layout order:
+        # [intra(pid) | boundary_from_p0 | ... | boundary_from_pN]
+        num_boundary_rows = sum(
+            b.numel() for j, b in enumerate(boundaries) if j != pid and b is not None
+        )
+        num_target_rows = (
+            boundaries[pid].numel()
+            if boundaries[pid] is not None
+            else gpu_target.size(0) - num_boundary_rows
+        )
 
+        segments = [(pid, np.arange(num_target_rows, dtype=np.int64))]
         for i in range(self.num_parts):
-            file_id = f"{self._file_prefix}_p{i}"
-            meta = self._backend.host_ftl.tensor_table[file_id]
-            ppa_list = meta["ppa_uint64_list"] 
+            if i != pid and boundaries[i] is not None and boundaries[i].numel() > 0:
+                segments.append((i, boundaries[i].cpu().to(torch.long).numpy()))
 
-            feature_type = False if "l0" not in file_id else True
+        # Row -> device byte offset, using the FTL's current mapping
+        # (same LBA addressing as device_write: dev_lba * sector_size + in_page)
+        dev_offs = [
+            ftl.get_row_file_offsets(f"{self._file_prefix}_p{i}", rows, row_bytes)
+            for i, rows in segments
+            if len(rows) > 0
+        ]
+        dev_offs = (
+            np.concatenate(dev_offs).astype(np.int64)
+            if dev_offs else np.empty(0, dtype=np.int64)
+        )
 
-            print(f"file id = {file_id} | feature_type = {feature_type}")
+        total_rows = len(dev_offs)
+        assert total_rows <= gpu_target.size(0), (
+            f"Gather needs {total_rows} rows but gpu_target has {gpu_target.size(0)}"
+        )
 
-            if i == pid:
-                num_target_rows = (
-                    boundaries[pid].numel()
-                    if boundaries[pid] is not None
-                    else (
-                        gpu_target.size(0) 
-                        - sum(
-                            b.numel() 
-                            for j, b in enumerate(boundaries) 
-                            if j != pid and b is not None
-                            )
-                    )
-                )
+        # Merge rows that are back-to-back on the device into runs of
+        # (dev_off, gpu_off, size) -- same format as device_write's runs.
+        # GPU rows are always back-to-back, so only device offsets can break a run.
+        if total_rows > 0:
+            breaks = np.flatnonzero(np.diff(dev_offs) != row_bytes) + 1
+            run_starts = np.concatenate(([0], breaks))
+            run_lens = np.diff(np.concatenate((run_starts, [total_rows])))
+            runs = np.stack(
+                [dev_offs[run_starts], run_starts * row_bytes, run_lens * row_bytes],
+                axis=1,
+            ).astype(np.int64)
+        else:
+            runs = np.empty((0, 3), dtype=np.int64)
+        runs_t = torch.from_numpy(runs)
 
-                bndries.append(torch.arange(num_target_rows, dtype=torch.long))
-
-                # Vectorized row -> page calculation for target partition
-                row_indices = np.arange(num_target_rows, dtype=np.int64)
-                start_bytes = row_indices * row_bytes
-                start_page_indices = start_bytes // bytes_per_page
-                in_page_byte_offsets = start_bytes % bytes_per_page
-                in_page_row_offsets = in_page_byte_offsets // row_bytes
-
-                rows_per_page = self._backend.host_ftl.page_size // row_bytes
-
-                if isinstance(ppa_list, torch.Tensor):
-                    ppa_np = ppa_list.cpu().numpy()
-                else:
-                    ppa_np = np.asarray(ppa_list)
-
-                target_ppas_np = ppa_np[start_page_indices]
-
-                bndry_ppas.append(
-                    torch.from_numpy(
-                        np.asarray(target_ppas_np, dtype=np.uint64).view(np.int64).copy()
-                    )
-                )
-
-                bndry_page_offs.append(
-                    torch.from_numpy(in_page_byte_offsets.copy())
-                )
-                bndry_row_offsets.append(
-                    torch.from_numpy(in_page_row_offsets.copy())
-                )
-
-            elif boundaries[i] is None or boundaries[i].numel() == 0:
-                bndries.append(torch.empty(0, dtype=torch.long))
-                bndry_ppas.append(torch.empty(0, dtype=torch.int64))
-                bndry_page_offs.append(torch.empty(0, dtype=torch.long))
-                bndry_row_offsets.append(torch.empty(0, dtype=torch.long))
-
-            else:
-                bnd = boundaries[i].cpu().to(torch.long)
-                bndries.append(bnd)
-
-                # Vectorized row -> page calculation for boundary partitions
-                bnd_np = bnd.numpy()
-                start_bytes = bnd_np * row_bytes
-                start_page_indices = start_bytes // bytes_per_page
-                in_page_byte_offsets = start_bytes % bytes_per_page
-                in_page_row_offsets = in_page_byte_offsets // row_bytes
-
-                if isinstance(ppa_list, torch.Tensor):
-                    ppa_np = ppa_list.cpu().numpy()
-                else:
-                    ppa_np = np.asarray(ppa_list)
-
-                row_ppas_np = ppa_np[start_page_indices]
-
-                bndry_ppas.append(
-                    torch.from_numpy(
-                        np.asarray(row_ppas_np, dtype=np.uint64).view(np.int64).copy()
-                    )
-                )
-                bndry_page_offs.append(
-                    torch.from_numpy(in_page_byte_offsets.copy())
-                )
-                bndry_row_offsets.append(
-                    torch.from_numpy(in_page_row_offsets.copy())
-                )
+        print(
+            f"[gather_raw] pid={pid} target_rows={num_target_rows} "
+            f"boundary_rows={num_boundary_rows} runs={len(runs)}"
+        )
 
         with torch.cuda.stream(stream):
             if self._ops is not None:
                 self._ops.gather_partitions_direct_raw(
-                    pid, 
-                    self._backend.host_ftl.cuFD, 
-                    gpu_target, 
-                    bndries,
-                    bndry_ppas,
-                    bndry_page_offs,
-                    bndry_row_offsets,
-                    rows_per_page,
-                    feature_type,
-                    row_bytes
+                    ftl.cuFD,
+                    gpu_target,
+                    runs_t,
+                    ftl.sector_size,
                 )
             else:
                 print("Not calling async gather raw")

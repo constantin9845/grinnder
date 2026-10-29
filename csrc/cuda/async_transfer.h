@@ -55,16 +55,10 @@ int64_t register_fd(int raw_fd);
 static inline uint64_t encode_host_ftl_bit(uint64_t raw_ppa);
 
 void gather_partitions_direct_raw(
-  int pid,
-  int64_t dev_handle_ptr,                                   
+  int64_t dev_handle_ptr,
   torch::Tensor dst,
-  std::vector<torch::Tensor> boundaries,
-  std::vector<torch::Tensor> boundary_ppas,       
-  std::vector<torch::Tensor> boundary_page_offs,  
-  std::vector<torch::Tensor> boundary_row_offsets, 
-  int rows_per_page,
-  bool feature_type,
-  int64_t row_bytes
+  torch::Tensor runs,
+  int64_t sector_size
 );
 
 void gpu_write(
