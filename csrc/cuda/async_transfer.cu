@@ -337,8 +337,11 @@ void gather_partitions_direct(
         io_params[param_idx].mode = CUFILE_BATCH;
         io_params[param_idx].opcode = CUFILE_READ;
         io_params[param_idx].fh = handle;
-        io_params[param_idx].u.batch.devPtr_base = dst_raw;
-        io_params[param_idx].u.batch.devPtr_offset = (start_row_offset + idx) * row_bytes;
+        // Unregistered buffer: GDS needs devPtr_offset + size <= 1 MiB, so
+        // fold the offset into the pointer (see gpu_write_run_batches).
+        io_params[param_idx].u.batch.devPtr_base =
+            dst_raw + (start_row_offset + idx) * row_bytes;
+        io_params[param_idx].u.batch.devPtr_offset = 0;
         io_params[param_idx].u.batch.file_offset = idx_ptr[idx] * row_bytes;
         io_params[param_idx].u.batch.size = row_bytes;
         param_idx++;
@@ -571,8 +574,11 @@ static void gpu_write_run_batches(CUfileHandle_t handle, const std::vector<GpuWr
             params[i].fh = handle;
             params[i].opcode = opcode;
             params[i].cookie = reinterpret_cast<void*>(static_cast<uintptr_t>(first + i));
-            params[i].u.batch.devPtr_base = io.base;
-            params[i].u.batch.devPtr_offset = io.buf_off;
+            // GPU buffers are not cuFileBufRegister'ed. For unregistered memory the
+            // GDS path stages each IO through a 1 MiB internal buffer and rejects
+            // devPtr_offset + size > 1 MiB, so put the offset into the pointer.
+            params[i].u.batch.devPtr_base = static_cast<char*>(io.base) + io.buf_off;
+            params[i].u.batch.devPtr_offset = 0;
             params[i].u.batch.file_offset = io.dev_off;
             params[i].u.batch.size = static_cast<size_t>(io.size);
         }
