@@ -546,6 +546,10 @@ struct GpuWriteIo {
 };
 
 static std::mutex g_gpu_write_mutex;
+// Only one cuFile batch in flight at a time. With real GDS (not compat mode),
+// overlapping batches from the gather and write threads hit an internal
+// libcufile assertion (cufio_batch line 521).
+static std::mutex g_cufile_batch_mutex;
 static std::unordered_map<int64_t, std::future<void>> g_gpu_write_jobs;
 static int64_t g_gpu_write_next_id = 0;
 
@@ -555,6 +559,7 @@ static void gpu_write_run_batches(CUfileHandle_t handle, const std::vector<GpuWr
                                   CUfileOpcode_t opcode) {
     if (ios.empty()) return;
     const char* what = opcode == CUFILE_READ ? "read" : "write";
+    std::lock_guard<std::mutex> batch_lock(g_cufile_batch_mutex);
 
     CUfileBatchHandle_t batch;
     CUfileError_t st = cuFileBatchIOSetUp(&batch, GPU_WRITE_BATCH);
