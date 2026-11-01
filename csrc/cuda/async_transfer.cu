@@ -546,10 +546,15 @@ struct GpuWriteIo {
 };
 
 static std::mutex g_gpu_write_mutex;
-// Only one cuFile batch in flight at a time. With real GDS (not compat mode),
-// overlapping batches from the gather and write threads hit an internal
-// libcufile assertion (cufio_batch line 521).
+// With real GDS (not compat mode), overlapping batches from the gather and
+// write threads hit an internal libcufile assertion (cufio_batch line 521).
+// Set GRINNDER_SERIALIZE_CUFILE=1 to allow only one batch in flight at a time.
+// Compat mode does not need it, so it is off by default.
 static std::mutex g_cufile_batch_mutex;
+static const bool g_serialize_cufile = [] {
+    const char* v = std::getenv("GRINNDER_SERIALIZE_CUFILE");
+    return v && v[0] == '1';
+}();
 static std::unordered_map<int64_t, std::future<void>> g_gpu_write_jobs;
 static int64_t g_gpu_write_next_id = 0;
 
@@ -559,7 +564,8 @@ static void gpu_write_run_batches(CUfileHandle_t handle, const std::vector<GpuWr
                                   CUfileOpcode_t opcode) {
     if (ios.empty()) return;
     const char* what = opcode == CUFILE_READ ? "read" : "write";
-    std::lock_guard<std::mutex> batch_lock(g_cufile_batch_mutex);
+    std::unique_lock<std::mutex> batch_lock(g_cufile_batch_mutex, std::defer_lock);
+    if (g_serialize_cufile) batch_lock.lock();
 
     CUfileBatchHandle_t batch;
     CUfileError_t st = cuFileBatchIOSetUp(&batch, GPU_WRITE_BATCH);
