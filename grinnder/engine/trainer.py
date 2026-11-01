@@ -362,14 +362,8 @@ class Trainer:
             self._progress(f"FORWARD LAYER {layer_id + 1}/{self.model.num_layers} START")
             self.cache.cache_tracker_print()
 
-            #self.fds = self.host_features[layer_id].open_files(self.graph.num_parts)
-
             self._forward_layer(layer_id)
 
-            self.host_features[layer_id].close_files(self.fds)
-            self.fds = None
-
-            
             self._progress(f"FORWARD LAYER {layer_id + 1}/{self.model.num_layers} DONE")
 
         stat.forward_done()
@@ -380,12 +374,8 @@ class Trainer:
         self.cache.cache_tracker_print()
         stat.start_loss()
 
-        self.fds = self.host_features[layer_id].open_files(self.graph.num_parts)
-
         losses, metrics = self._compute_losses(criterion)
 
-        self.host_features[layer_id].close_files(self.fds)
-        self.fds = None
         self._progress("LOSS DONE")
 
         stat.loss_done()
@@ -396,13 +386,7 @@ class Trainer:
         self.cache.cache_tracker_print()
         stat.start_backward()
 
-        self.fds = self.host_features[layer_id].open_files(self.graph.num_parts)
-
         self._backward_last_layer(losses)
-
-        self.host_features[layer_id].close_files(self.fds)
-        self.fds = None
-
 
         self._progress(f"BACKWARD LAYER {self.model.num_layers}/{self.model.num_layers} DONE")
         for layer_id in reversed(range(self.model.num_layers - 1)):
@@ -411,12 +395,7 @@ class Trainer:
             )
             self.cache.cache_tracker_print()
 
-            self.fds = self.host_features[layer_id].open_files(self.graph.num_parts)
-
             self._backward_layer(layer_id)
-
-            self.host_features[layer_id].close_files(self.fds)
-            self.fds = None
 
             self._progress(
                 f"backward layer {layer_id + 1}/{self.model.num_layers} done"
