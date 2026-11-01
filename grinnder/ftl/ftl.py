@@ -257,8 +257,8 @@ class FTL:
             "ch" : 8,
             "lun" : 8,
             "plane" : 1,
-            "block" : 256,
-            "page" : 256,
+            "block" : 512,
+            "page" : 512,
             "sector" : 32,
             "sector_size" : 512
         }
