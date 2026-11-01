@@ -26,6 +26,21 @@
 #include <cstdio>
 #include <ctime>
 
+// Set GRINNDER_GDS_DIRECT=1 when cuFile runs on the real GDS path (nvidia-fs
+// loaded, compat mode off). It turns on two workarounds that only that path needs:
+//  - each batch IO gets its own devPtr_base with devPtr_offset = 0, because for
+//    unregistered buffers GDS rejects devPtr_offset + size > 1 MiB;
+//  - only one cuFile batch runs at a time, because overlapping batches hit an
+//    internal libcufile assertion (cufio_batch line 521).
+// Leave it unset for compat mode, which needs neither and runs faster without them.
+static bool gds_direct_mode() {
+    static const bool on = [] {
+        const char* v = std::getenv("GRINNDER_GDS_DIRECT");
+        return v && v[0] == '1';
+    }();
+    return on;
+}
+
 static std::unordered_map<int, CUfileHandle_t> g_cufile_handles;
 static std::mutex g_cufile_handles_mutex;
 
@@ -337,11 +352,11 @@ void gather_partitions_direct(
         io_params[param_idx].mode = CUFILE_BATCH;
         io_params[param_idx].opcode = CUFILE_READ;
         io_params[param_idx].fh = handle;
-        // Unregistered buffer: GDS needs devPtr_offset + size <= 1 MiB, so
-        // fold the offset into the pointer (see gpu_write_run_batches).
-        io_params[param_idx].u.batch.devPtr_base =
-            dst_raw + (start_row_offset + idx) * row_bytes;
-        io_params[param_idx].u.batch.devPtr_offset = 0;
+        // See gds_direct_mode() for why the direct path folds the offset into the pointer.
+        const int64_t buf_off = (start_row_offset + idx) * row_bytes;
+        const bool fold = gds_direct_mode();
+        io_params[param_idx].u.batch.devPtr_base = fold ? dst_raw + buf_off : dst_raw;
+        io_params[param_idx].u.batch.devPtr_offset = fold ? 0 : buf_off;
         io_params[param_idx].u.batch.file_offset = idx_ptr[idx] * row_bytes;
         io_params[param_idx].u.batch.size = row_bytes;
         param_idx++;
@@ -546,15 +561,8 @@ struct GpuWriteIo {
 };
 
 static std::mutex g_gpu_write_mutex;
-// With real GDS (not compat mode), overlapping batches from the gather and
-// write threads hit an internal libcufile assertion (cufio_batch line 521).
-// Set GRINNDER_SERIALIZE_CUFILE=1 to allow only one batch in flight at a time.
-// Compat mode does not need it, so it is off by default.
+// Serializes cuFile batches when gds_direct_mode() is on.
 static std::mutex g_cufile_batch_mutex;
-static const bool g_serialize_cufile = [] {
-    const char* v = std::getenv("GRINNDER_SERIALIZE_CUFILE");
-    return v && v[0] == '1';
-}();
 static std::unordered_map<int64_t, std::future<void>> g_gpu_write_jobs;
 static int64_t g_gpu_write_next_id = 0;
 
@@ -565,7 +573,7 @@ static void gpu_write_run_batches(CUfileHandle_t handle, const std::vector<GpuWr
     if (ios.empty()) return;
     const char* what = opcode == CUFILE_READ ? "read" : "write";
     std::unique_lock<std::mutex> batch_lock(g_cufile_batch_mutex, std::defer_lock);
-    if (g_serialize_cufile) batch_lock.lock();
+    if (gds_direct_mode()) batch_lock.lock();
 
     CUfileBatchHandle_t batch;
     CUfileError_t st = cuFileBatchIOSetUp(&batch, GPU_WRITE_BATCH);
@@ -585,11 +593,10 @@ static void gpu_write_run_batches(CUfileHandle_t handle, const std::vector<GpuWr
             params[i].fh = handle;
             params[i].opcode = opcode;
             params[i].cookie = reinterpret_cast<void*>(static_cast<uintptr_t>(first + i));
-            // GPU buffers are not cuFileBufRegister'ed. For unregistered memory the
-            // GDS path stages each IO through a 1 MiB internal buffer and rejects
-            // devPtr_offset + size > 1 MiB, so put the offset into the pointer.
-            params[i].u.batch.devPtr_base = static_cast<char*>(io.base) + io.buf_off;
-            params[i].u.batch.devPtr_offset = 0;
+            // See gds_direct_mode() for why the direct path folds the offset into the pointer.
+            const bool fold = gds_direct_mode();
+            params[i].u.batch.devPtr_base = fold ? static_cast<char*>(io.base) + io.buf_off : io.base;
+            params[i].u.batch.devPtr_offset = fold ? 0 : io.buf_off;
             params[i].u.batch.file_offset = io.dev_off;
             params[i].u.batch.size = static_cast<size_t>(io.size);
         }
