@@ -796,12 +796,20 @@ class FTL:
         # Same LBA runs as device_write; read from the current mapping.
         runs = self.get_tensor_io_runs(file_id)
         runs_t = torch.tensor(runs, dtype=torch.int64).reshape(-1, 3)
-        if async_:
-            # Returns a job id; finish it with gpu_write_wait(id).
-            return self._ops.gpu_write_async(
+        if os.environ.get("GRINNDER_GDS_DIRECT") == "1":
+            # cuFile batch writes (real GDS path)
+            job = self._ops.gpu_write_async(
                 self.cuFD, tensor, runs_t, self.sector_size, self.page_size
             )
-        self._ops.gpu_write(self.cuFD, tensor, runs_t, self.sector_size, self.page_size)
+        else:
+            # Copies to pinned host memory + NVMe writes, no cuFile
+            job = self._ops.gpu_write_nvme_async(
+                self.device_fd, tensor, runs_t, self.sector_size, self.page_size
+            )
+        if async_:
+            # Finish it with gpu_write_wait(id).
+            return job
+        self._ops.gpu_write_wait(job)
         return None
 
     def gpu_write_wait(self, job_id):

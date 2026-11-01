@@ -42,6 +42,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("gpu_write", &gpu_write, "Write GPU tensors directly to storage (blocking)",
         py::call_guard<py::gil_scoped_release>());
   m.def("gpu_write_async", &gpu_write_async, "Start a cuFile batch write of a GPU tensor; returns a job id");
+  m.def("gpu_write_nvme_async", &gpu_write_nvme_async,
+        "Start a GPU tensor write using host copies + NVMe writes (no cuFile); returns a job id");
   m.def("gpu_write_wait", &gpu_write_wait, "Wait for one async GPU write",
         py::call_guard<py::gil_scoped_release>());
   m.def("gpu_write_wait_all", &gpu_write_wait_all, "Wait for all async GPU writes",

@@ -99,5 +99,15 @@ int64_t gpu_write_async(
 void gpu_write_wait(int64_t id);
 void gpu_write_wait_all();
 
+/* Same as gpu_write_async, but without cuFile: copies src to pinned host memory,
+   then NVMe passthrough writes on the raw device fd. Wait with gpu_write_wait(id). */
+int64_t gpu_write_nvme_async(
+  int64_t fd,
+  torch::Tensor src,
+  torch::Tensor runs,
+  int64_t sector_size,
+  int64_t page_size
+);
+
 void device_write(int64_t fd, torch::Tensor src, torch::Tensor runs,
                   int64_t sector_size, int64_t page_size);
