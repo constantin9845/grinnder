@@ -7,8 +7,9 @@ bypass-to-storage operations via C++ extensions.
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
+import numpy as np
 import torch
 import time
 import os
@@ -121,6 +122,17 @@ class HostBuffer:
 
         self._ops = _load_ops()
 
+        # pid -> job id of an SSD -> GPU read started by async_read_raw
+        self._pending_reads: Dict[int, int] = {}
+
+        # Gradient buffers (see begin_accumulation): per partition, which rows
+        # already hold data on the SSD this backward pass. Rows not yet written
+        # count as zero, so they are never read.
+        self._accumulate = False
+        self._written_rows: List[Optional[np.ndarray]] = [None] * num_parts
+        # (job id, GPU tensor the write reads from) of in-flight row writes
+        self._pending_accum: List[Tuple[int, Tensor]] = []
+
 
     def __getitem__(self, pid: int) -> Tensor:
         """Get host tensor for partition pid, allocating it if needed."""
@@ -188,7 +200,8 @@ class HostBuffer:
         """Return whether a backing storage copy exists for one partition."""
         if self._backend is None:
             return False
-        return self._backend.exists(f"{self._file_prefix}_p{pid}")
+        # Data lives on the raw device; the FTL mapping is the source of truth.
+        return self._file_id(pid) in self._backend.host_ftl.tensor_table
 
     def ensure_storage_copy(self, pid: int) -> None:
         """Write a resident partition to storage if no backing copy exists."""
@@ -230,7 +243,9 @@ class HostBuffer:
         Two-phase synchronization:
         1. C++ thread pool sync: wait for cudaMemcpyAsync calls to be submitted
         2. CUDA stream sync: wait for all submitted CUDA ops to complete
+        Also waits for gradient row writes started by accumulate_raw.
         """
+        self.wait_accumulations()
         if self._ops is not None:
             try:
                 self._ops.d2h_synchronize()
@@ -272,13 +287,17 @@ class HostBuffer:
 
 
 
-    def h2d_synchronize(self, stream: torch.cuda.Stream) -> None:
+    def h2d_synchronize(
+        self, stream: torch.cuda.Stream, pid: Optional[int] = None
+    ) -> None:
         """Wait for H2D operations to complete.
 
         Two-phase synchronization:
         1. C++ thread pool sync: wait for cudaMemcpyAsync calls to be submitted
         2. CUDA stream sync: wait for all submitted CUDA ops to complete
+        Also waits for async_read_raw reads (of pid only, if given).
         """
+        self.wait_reads(pid)
         if self._ops is not None:
             try:
                 self._ops.h2d_synchronize()
@@ -683,98 +702,33 @@ class HostBuffer:
 
         GPU layout: [intra(pid) | boundary_from_p0 | ... | boundary_from_pN]
         """
-        import time
-        import numpy as np
-
-        t0 = time.perf_counter_ns()
-
         assert gpu_target.is_cuda, "gpu_target must be a CUDA tensor"
         assert gpu_target.is_contiguous(), "gpu_target must be contiguous"
 
-        ftl = self._backend.host_ftl
         row_bytes = gpu_target.size(1) * gpu_target.element_size()
 
         # Activations of this layer may still be in flight to the SSD.
         self.wait_storage_writes()
 
-        # Rows to read from each partition, in GPU layout order:
-        # [intra(pid) | boundary_from_p0 | ... | boundary_from_pN]
-        num_boundary_rows = sum(
-            b.numel() for j, b in enumerate(boundaries) if j != pid and b is not None
-        )
-        num_target_rows = (
-            boundaries[pid].numel()
-            if boundaries[pid] is not None
-            else gpu_target.size(0) - num_boundary_rows
-        )
-
-        segments = [(pid, np.arange(num_target_rows, dtype=np.int64))]
-        for i in range(self.num_parts):
-            if i != pid and boundaries[i] is not None and boundaries[i].numel() > 0:
-                segments.append((i, boundaries[i].cpu().to(torch.long).numpy()))
-
-        # Row -> device byte offset, using the FTL's current mapping
-        # (same LBA addressing as device_write: dev_lba * sector_size + in_page)
-        dev_offs = [
-            ftl.get_row_file_offsets(f"{self._file_prefix}_p{i}", rows, row_bytes)
-            for i, rows in segments
-            if len(rows) > 0
-        ]
-        dev_offs = (
-            np.concatenate(dev_offs).astype(np.int64)
-            if dev_offs else np.empty(0, dtype=np.int64)
-        )
-
+        segments = self._gather_segments(pid, boundaries, gpu_target.size(0))
+        dev_offs = self._segment_dev_offsets(segments, row_bytes)
         total_rows = len(dev_offs)
         assert total_rows <= gpu_target.size(0), (
             f"Gather needs {total_rows} rows but gpu_target has {gpu_target.size(0)}"
         )
-
-        # Merge rows that are back-to-back on the device into runs of
-        # (dev_off, gpu_off, size) -- same format as device_write's runs.
-        # GPU rows are always back-to-back, so only device offsets can break a run.
-        if total_rows > 0:
-            breaks = np.flatnonzero(np.diff(dev_offs) != row_bytes) + 1
-            run_starts = np.concatenate(([0], breaks))
-            run_lens = np.diff(np.concatenate((run_starts, [total_rows])))
-            runs = np.stack(
-                [dev_offs[run_starts], run_starts * row_bytes, run_lens * row_bytes],
-                axis=1,
-            ).astype(np.int64)
-        else:
-            runs = np.empty((0, 3), dtype=np.int64)
-        runs_t = torch.from_numpy(runs)
+        runs_t = self._merge_runs(dev_offs, np.arange(total_rows, dtype=np.int64), row_bytes)
 
         print(
-            f"[gather_raw] pid={pid} target_rows={num_target_rows} "
-            f"boundary_rows={num_boundary_rows} runs={len(runs)}"
+            f"[gather_raw] pid={pid} target_rows={len(segments[0][1])} "
+            f"boundary_rows={total_rows - len(segments[0][1])} runs={runs_t.size(0)}"
         )
 
         # The reads start in the background once `stream` reaches this point,
         # i.e. after everything already queued on the current stream (so memory
         # reused from a freed tensor is no longer in use).
-        job = None
         stream.wait_stream(torch.cuda.current_stream(gpu_target.device))
         with torch.cuda.stream(stream):
-            if self._ops is not None:
-                if os.environ.get("GRINNDER_GDS_DIRECT") == "1":
-                    # cuFile batch reads (real GDS path)
-                    job = self._ops.gather_partitions_direct_raw_async(
-                        ftl.cuFD,
-                        gpu_target,
-                        runs_t,
-                        ftl.sector_size,
-                    )
-                else:
-                    # NVMe reads into pinned host memory + copies to the GPU, no cuFile
-                    job = self._ops.gather_partitions_nvme_async(
-                        ftl.device_fd,
-                        gpu_target,
-                        runs_t,
-                        ftl.sector_size,
-                    )
-            else:
-                print("Not calling async gather raw")
+            job = self._submit_read(gpu_target, runs_t)
 
         bt = gpu_target.numel() * gpu_target.element_size()
         gb = round(bt / (1024**3), 3)
@@ -785,6 +739,249 @@ class HostBuffer:
         )
         # Job id: gpu_target holds the data only after self._ops.gather_wait(job).
         return job
+
+    # ------------------------------------------------------------------
+    # SSD <-> GPU helpers (host FTL addressing, host memory only as staging)
+    # ------------------------------------------------------------------
+
+    def _file_id(self, pid: int) -> str:
+        return f"{self._file_prefix}_p{pid}"
+
+    def _gather_segments(
+        self, pid: int, boundaries: List[Optional[Tensor]], gpu_rows: int
+    ) -> List[Tuple[int, np.ndarray]]:
+        """Rows of each partition, in GPU layout order:
+        [intra(pid) | boundary_from_p0 | ... | boundary_from_pN]."""
+        num_boundary_rows = sum(
+            b.numel() for j, b in enumerate(boundaries) if j != pid and b is not None
+        )
+        num_target_rows = (
+            boundaries[pid].numel()
+            if boundaries[pid] is not None
+            else gpu_rows - num_boundary_rows
+        )
+        segments = [(pid, np.arange(num_target_rows, dtype=np.int64))]
+        for i in range(self.num_parts):
+            if i != pid and boundaries[i] is not None and boundaries[i].numel() > 0:
+                segments.append((i, boundaries[i].cpu().to(torch.long).numpy()))
+        return segments
+
+    def _segment_dev_offsets(
+        self, segments: List[Tuple[int, np.ndarray]], row_bytes: int
+    ) -> np.ndarray:
+        """Row -> device byte offset, using the FTL's current mapping
+        (dev_lba * sector_size + offset in page)."""
+        ftl = self._backend.host_ftl
+        dev_offs = [
+            ftl.get_row_file_offsets(self._file_id(i), rows, row_bytes)
+            for i, rows in segments
+            if len(rows) > 0
+        ]
+        if not dev_offs:
+            return np.empty(0, dtype=np.int64)
+        return np.concatenate(dev_offs).astype(np.int64)
+
+    @staticmethod
+    def _merge_runs(dev_offs: np.ndarray, gpu_rows: np.ndarray, row_bytes: int) -> Tensor:
+        """Merge rows that are back to back both on the device and in the GPU
+        tensor into runs of (dev_off, gpu_off, size), in bytes."""
+        n = len(dev_offs)
+        if n == 0:
+            return torch.empty((0, 3), dtype=torch.int64)
+        breaks = np.flatnonzero(
+            (np.diff(dev_offs) != row_bytes) | (np.diff(gpu_rows) != 1)
+        ) + 1
+        starts = np.concatenate(([0], breaks))
+        lens = np.diff(np.concatenate((starts, [n])))
+        runs = np.stack(
+            [dev_offs[starts], gpu_rows[starts] * row_bytes, lens * row_bytes], axis=1
+        ).astype(np.int64)
+        return torch.from_numpy(runs)
+
+    def _submit_read(self, gpu_target: Tensor, runs_t: Tensor) -> Optional[int]:
+        """Start SSD -> GPU reads of runs into gpu_target (current stream orders
+        the start). Returns a job id for gather_wait, or None if nothing to read."""
+        if runs_t.size(0) == 0:
+            return None
+        ftl = self._backend.host_ftl
+        if os.environ.get("GRINNDER_GDS_DIRECT") == "1":
+            # cuFile batch reads (real GDS path)
+            return self._ops.gather_partitions_direct_raw_async(
+                ftl.cuFD, gpu_target, runs_t, ftl.sector_size
+            )
+        # NVMe reads into pinned host memory + copies to the GPU, no cuFile
+        return self._ops.gather_partitions_nvme_async(
+            ftl.device_fd, gpu_target, runs_t, ftl.sector_size
+        )
+
+    def _submit_write(self, gpu_src: Tensor, runs_t: Tensor) -> Optional[int]:
+        """Start GPU -> SSD writes of runs from gpu_src (current stream orders
+        the start). Returns a job id for gpu_write_wait, or None."""
+        if runs_t.size(0) == 0:
+            return None
+        ftl = self._backend.host_ftl
+        if os.environ.get("GRINNDER_GDS_DIRECT") == "1":
+            return self._ops.gpu_write_async(
+                ftl.cuFD, gpu_src, runs_t, ftl.sector_size, ftl.page_size
+            )
+        return self._ops.gpu_write_nvme_async(
+            ftl.device_fd, gpu_src, runs_t, ftl.sector_size, ftl.page_size
+        )
+
+    def _ensure_mapped(self, pid: int) -> None:
+        """Give a partition an FTL mapping before anything was written to it."""
+        ftl = self._backend.host_ftl
+        if self._file_id(pid) not in ftl.tensor_table:
+            ftl.map_tensor(
+                self._file_id(pid),
+                torch.empty(
+                    (self.part_sizes[pid], self.embedding_dim),
+                    dtype=torch.float32,
+                    device="meta",
+                ),
+            )
+
+    # ------------------------------------------------------------------
+    # Whole partition: SSD -> GPU
+    # ------------------------------------------------------------------
+
+    def async_read_raw(
+        self, pid: int, gpu_target: Tensor, stream: torch.cuda.Stream, track: bool = True
+    ) -> Optional[int]:
+        """Read partition pid from the SSD into gpu_target [part_sizes[pid], dim].
+
+        Same path as the forward gather (FTL row offsets, NVMe reads, host
+        staging only). For gradient buffers only rows written this backward
+        pass are read; the rest are zero.
+
+        track=True: wait with h2d_synchronize / wait_reads(pid).
+        track=False: the caller waits on the returned job id.
+        """
+        assert gpu_target.is_cuda and gpu_target.is_contiguous()
+        assert gpu_target.size(0) == self.part_sizes[pid]
+        row_bytes = gpu_target.size(1) * gpu_target.element_size()
+
+        self.wait_reads(pid)
+        self.wait_storage_writes(pid)
+        self.wait_accumulations()
+
+        if self._accumulate:
+            written = self._written_rows[pid]
+            rows = (
+                np.flatnonzero(written).astype(np.int64)
+                if written is not None
+                else np.empty(0, dtype=np.int64)
+            )
+            need_zero = len(rows) < self.part_sizes[pid]
+        else:
+            rows = np.arange(self.part_sizes[pid], dtype=np.int64)
+            need_zero = False
+
+        dev_offs = self._segment_dev_offsets([(pid, rows)], row_bytes)
+        runs_t = self._merge_runs(dev_offs, rows, row_bytes)
+
+        t0 = time.perf_counter_ns()
+        stream.wait_stream(torch.cuda.current_stream(gpu_target.device))
+        with torch.cuda.stream(stream):
+            if need_zero:
+                with torch.no_grad():
+                    gpu_target.zero_()
+            job = self._submit_read(gpu_target, runs_t)
+        tn = time.perf_counter_ns()
+        stat.load_GPU_timestamp("gradient", "copy", t0, tn)
+
+        print(
+            f"[read_raw] {self._file_id(pid)} rows={len(rows)}/{self.part_sizes[pid]} "
+            f"runs={runs_t.size(0)}"
+        )
+        if track and job is not None:
+            self._pending_reads[pid] = job
+        return job
+
+    def wait_reads(self, pid: Optional[int] = None) -> None:
+        """Wait for async_read_raw reads of one partition (or all)."""
+        if not self._pending_reads:
+            return
+        pids = list(self._pending_reads) if pid is None else [pid]
+        for p in pids:
+            job = self._pending_reads.pop(p, None)
+            if job is not None:
+                self._ops.gather_wait(job)
+
+    # ------------------------------------------------------------------
+    # Gradient accumulation on the SSD (GPU add, host only as staging)
+    # ------------------------------------------------------------------
+
+    def begin_accumulation(self) -> None:
+        """Start a backward pass for this gradient buffer: every row counts
+        as zero until accumulate_raw first writes it. Mappings are kept."""
+        self.wait_accumulations()
+        self._accumulate = True
+        self._written_rows = [
+            np.zeros(self.part_sizes[pid], dtype=bool) for pid in range(self.num_parts)
+        ]
+
+    def accumulate_raw(
+        self,
+        pid: int,
+        gpu_grad: Tensor,
+        boundaries: List[Optional[Tensor]],
+        stream: torch.cuda.Stream,
+    ) -> None:
+        """grad[rows] += gpu_grad on the SSD, for the gathered layout of pid
+        ([intra(pid) | boundary_from_p0 | ...], same rows as the gather).
+
+        Reads only rows that already hold data, adds on the GPU, then writes
+        the rows back to their FTL addresses. The write runs in the
+        background; wait_accumulations() / d2h_synchronize() waits for it.
+        """
+        assert self._backend is not None and self._accumulate, (
+            "call begin_accumulation() before accumulate_raw()"
+        )
+        assert gpu_grad.is_cuda and gpu_grad.is_contiguous()
+        row_bytes = gpu_grad.size(1) * gpu_grad.element_size()
+
+        # Earlier accumulations may cover the same rows.
+        self.wait_accumulations()
+
+        segments = self._gather_segments(pid, boundaries, gpu_grad.size(0))
+        for i, _ in segments:
+            self._ensure_mapped(i)
+        dev_offs = self._segment_dev_offsets(segments, row_bytes)
+        total_rows = len(dev_offs)
+        assert total_rows == gpu_grad.size(0), (
+            f"Gradient has {gpu_grad.size(0)} rows, layout needs {total_rows}"
+        )
+        written = np.concatenate([self._written_rows[i][rows] for i, rows in segments])
+        gpu_rows = np.arange(total_rows, dtype=np.int64)
+
+        stream.wait_stream(torch.cuda.current_stream(gpu_grad.device))
+        gpu_grad.record_stream(stream)
+        with torch.cuda.stream(stream), torch.no_grad():
+            if written.any():
+                # Old values of rows already written; the others stay zero.
+                acc = torch.zeros_like(gpu_grad)
+                read_rows = gpu_rows[written]
+                job = self._submit_read(
+                    acc, self._merge_runs(dev_offs[written], read_rows, row_bytes)
+                )
+                if job is not None:
+                    self._ops.gather_wait(job)
+                acc.add_(gpu_grad)
+            else:
+                acc = gpu_grad
+            job = self._submit_write(acc, self._merge_runs(dev_offs, gpu_rows, row_bytes))
+
+        if job is not None:
+            self._pending_accum.append((job, acc))
+        for i, rows in segments:
+            self._written_rows[i][rows] = True
+
+    def wait_accumulations(self) -> None:
+        """Wait for all in-flight accumulate_raw writes of this buffer."""
+        while self._pending_accum:
+            job, _ = self._pending_accum.pop(0)
+            self._ops.gpu_write_wait(job)
 
     # ------------------------------------------------------------------
     # Scatter: one GPU tensor -> multiple host partitions (with accumulation)
@@ -931,23 +1128,10 @@ class HostBuffer:
         gpu_target: Tensor,
         stream: torch.cuda.Stream) -> None:
 
-        
+        """Read partition pid from the SSD into gpu_target (FTL, same path as
+        the forward gather). Wait with h2d_synchronize(stream, pid)."""
         assert self._backend is not None
-        assert gpu_target.is_cuda
-        stream.wait_stream(torch.cuda.current_stream(gpu_target.device))
-        
-        t0 = time.perf_counter_ns()
-        with torch.cuda.stream(stream):
-            if self._ops is not None:
-                fd = f"/mnt/nvme/feat_l3_p{pid}.pt"
-                self._ops.gather_activations_direct(fd, gpu_target)
-            else:
-                print("OPS not defined at storage to gpu")
-                exit(1)
-
-        tn = time.perf_counter_ns()
-
-        stat.load_GPU_timestamp("gradient", "copy", t0, tn) 
+        self.async_read_raw(pid, gpu_target, stream)
 
 
     def cpu_to_storage(self, pid: Optional[int] = None) -> None:

@@ -77,7 +77,10 @@ class ScatteredCheckpoint(saved_tensors_hooks):
 
         def unpack(packed):
             device, dbuf, stream = packed
-            dbuf.h2d_synchronize(stream)
+            # Wait for this partition's re-gather only, so the prefetch of
+            # the next partition keeps running.
+            dbuf.wait_gather(pid)
+            torch.cuda.current_stream(device).wait_stream(stream)
             return dbuf[pid]
 
         super().__init__(pack, unpack)

@@ -156,6 +156,21 @@ class DeviceBuffer:
                 self._pending_gathers[pid] = job
                 self._gather_ops = host_buffer._ops
 
+    def async_read_raw(
+        self, pid: int, host_buffer: HostBuffer, stream: torch.cuda.Stream
+    ) -> None:
+        """Allocate the GPU tensor and start an async SSD read of partition pid
+        of host_buffer into it (FTL, same path as the forward gather).
+
+        Wait with wait_gather(pid) or h2d_synchronize().
+        """
+        self.wait_gather(pid)
+        self.allocate(pid)
+        job = host_buffer.async_read_raw(pid, self._tensors[pid], stream, track=False)
+        if job is not None:
+            self._pending_gathers[pid] = job
+            self._gather_ops = host_buffer._ops
+
     def wait_gather(self, pid: Optional[int] = None) -> None:
         """Wait for the async SSD gather of one partition (or all of them)."""
         if not self._pending_gathers:

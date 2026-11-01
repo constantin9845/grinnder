@@ -267,6 +267,17 @@ class Trainer:
     def _uses_partition_lru(self) -> bool:
         return self.cache is not None and self.cache.mode == "partition_lru"
 
+    def _prefetch_gradient(
+        self, grad_layer: int, pid: int, stream: torch.cuda.Stream
+    ) -> None:
+        """Start the SSD -> GPU read (FTL) of gradient partition pid into
+        device_gradients[grad_layer]. Wait with device_gradients[...].wait_gather(pid)."""
+        grad_host = self.host_gradients[grad_layer]
+        grad_buf = self.device_gradients[grad_layer]
+        if grad_host is None or grad_buf is None:
+            return
+        grad_buf.async_read_raw(pid, grad_host, stream)
+
     def _ensure_gradient_partition_resident(self, layer_id: int, pid: int) -> None:
         """Load a gradient partition from storage, or materialize zero if absent."""
         grad = self.host_gradients[layer_id]
@@ -726,9 +737,8 @@ class Trainer:
         if not pids:
             return losses, {"loss": 0.0, "val_acc": 0.0, "test_acc": 0.0}
 
-        if self.cache is not None and self.cache.mode == "lru_layer":
-            self.cache.ensure_in_host(self.model.num_layers)
-
+        # Final activations are read SSD -> GPU (FTL) per partition; host is
+        # only used as staging, so no host cache load here.
         use_bypass = self.cache is not None and self.cache.mode == "partition_lru"
 
         # Prologue: upload first assigned partition's activation
@@ -753,7 +763,7 @@ class Trainer:
         for i, pid in enumerate(pids):
             pool_idx = i % pool_size
 
-            self.host_features[-1].h2d_synchronize(self.streams.h2d[pool_idx])
+            self.host_features[-1].h2d_synchronize(self.streams.h2d[pool_idx], pid)
             torch.cuda.current_stream().wait_stream(self.streams.h2d[pool_idx])
 
             # Prefetch next partition
@@ -861,15 +871,14 @@ class Trainer:
         cache_layer_id = layer_id
         #self._prepare_cache_layer(cache_layer_id)
 
+        # Gradients of this layer are accumulated on the SSD (FTL rows)
         if layer_id > 0 and self.host_gradients[layer_id] is not None:
-            self.host_gradients[layer_id].initialize_zeros(
-                lazy=self._uses_partition_lru()
-            )
+            self.host_gradients[layer_id].begin_accumulation()
 
         # Prologue: re-gather features for first partition's checkpoint recompute
         if self.config.mode == "grinnder" and layer_id > 0:
             #self._prepare_cache_partition(cache_layer_id, pids[0], "backward")
-            self.device_features[layer_id].async_gather_direct(
+            self.device_features[layer_id].async_gather_direct_raw(
                 "backward",
                 fds=self.fds,
                 pid=pids[0],
@@ -899,7 +908,7 @@ class Trainer:
                 next_pid = pids[i + 1]
                 next_pool = (i + 1) % pool_size
                 #self._prepare_cache_partition(cache_layer_id, next_pid, "backward")
-                self.device_features[layer_id].async_gather_direct(
+                self.device_features[layer_id].async_gather_direct_raw(
                     "backward",
                     fds=self.fds,
                     pid=next_pid,
@@ -961,7 +970,7 @@ class Trainer:
                 ):
                     next_pid = pids[i + 1]
                     #self._prepare_cache_partition(cache_layer_id, next_pid, "backward")
-                    self.device_features[layer_id].async_gather_direct(
+                    self.device_features[layer_id].async_gather_direct_raw(
                         "backward",
                         fds=self.fds,
                         pid=next_pid,
@@ -970,10 +979,9 @@ class Trainer:
                         stream=self.streams.act_h2d[0],
                     )
 
-        # GradOffload scatters ∇A^{L-1} into the host write-back buffer during
-        # the checkpoint recompute. The next backward phase uploads that buffer,
-        # so all scatters from this phase must be visible first.
-        print("Flush all gradients to write back buffer (GPU --> CPU)")
+        # GradOffload accumulates ∇A^{L-1} into the SSD copy during the
+        # checkpoint recompute. The next backward phase reads it back, so all
+        # row writes from this phase must have landed first.
         if layer_id > 0 and self.host_gradients[layer_id] is not None:
             t0 = time.perf_counter_ns()
             for i, _ in enumerate(pids):
@@ -981,25 +989,13 @@ class Trainer:
                 self.host_gradients[layer_id].d2h_synchronize(
                     self.streams.d2h[pool_idx]
                 )
-
-                self.cache.add_gradient_relay(layer_id, pid)
-
             tn = time.perf_counter_ns()
-            stat.write_timestamp("backward", "CPU", t0, tn)
-                
+            stat.write_timestamp("backward", "SSD", t0, tn)
 
         if pool_size > 1:
             last_pid = pids[-1]
             if self.device_features[layer_id].is_allocated(last_pid):
                 self.device_features[layer_id].release(last_pid)
-
-
-        t0 = time.perf_counter_ns()
-        if self._uses_partition_lru() and self.cache is not None:
-            self.cache.on_backward_layer_complete(layer_id)
-
-        tn = time.perf_counter_ns()
-        stat.write_timestamp("backward", "SSD", t0, tn)
 
 
     def _backward_layer(self, layer_id: int) -> None:
@@ -1023,20 +1019,18 @@ class Trainer:
         if not pids:
             return
 
-        self._prepare_cache_layer(layer_id)
+        #self._prepare_cache_layer(layer_id)
 
-        # Initialize gradient write-back buffer for THIS layer
+        # Gradients of THIS layer are accumulated on the SSD (FTL rows)
         if self.host_gradients[layer_id] is not None:
-            self.host_gradients[layer_id].initialize_zeros(
-                lazy=self._uses_partition_lru()
-            )
+            self.host_gradients[layer_id].begin_accumulation()
 
         first_pid = pids[0]
 
         # Prologue: prefetch features for regathering + upload gradient for first pid
         if self.config.mode == "grinnder":
             #self._prepare_cache_partition(layer_id, first_pid, "backward")
-            self.device_features[layer_id].async_gather_direct(
+            self.device_features[layer_id].async_gather_direct_raw(
                 "backward",
                 fds=self.fds,
                 pid=first_pid,
@@ -1045,23 +1039,8 @@ class Trainer:
                 stream=self.streams.act_h2d[0],
             )
 
-        # Upload gradient from next layer for first partition
-        if self.host_gradients[next_grad_layer] is not None:
-            grad_buf = self.device_gradients[next_grad_layer]
-            if grad_buf is not None:
-                if (
-                    self._uses_partition_lru()
-                    and not self.host_gradients[next_grad_layer].is_allocated(
-                        first_pid
-                    )
-                ):
-                    self._ensure_gradient_partition_resident(
-                        next_grad_layer, first_pid
-                    )
-                grad_buf.allocate(first_pid)
-                self.host_gradients[next_grad_layer].async_upload(
-                    "gradient", first_pid, grad_buf[first_pid], self.streams.h2d[0]
-                )
+        # Read gradient from next layer for first partition (SSD -> GPU)
+        self._prefetch_gradient(next_grad_layer, first_pid, self.streams.h2d[0])
 
         for i, pid in enumerate(pids):
             pool_idx = i % pool_size
@@ -1082,7 +1061,7 @@ class Trainer:
 
                     if self.config.mode == "grinnder" and prefetch_next_feature:
                         #self._prepare_cache_partition(layer_id, next_pid, "backward")
-                        self.device_features[layer_id].async_gather_direct(
+                        self.device_features[layer_id].async_gather_direct_raw(
                             "backward",
                             fds=self.fds,
                             pid=next_pid,
@@ -1091,27 +1070,10 @@ class Trainer:
                             stream=self.streams.act_h2d[next_pool],
                         )
 
-                    if (
-                        prefetch_next_gradient
-                        and self.host_gradients[next_grad_layer] is not None
-                    ):
-                        grad_buf = self.device_gradients[next_grad_layer]
-                        if grad_buf is not None:
-                            if (
-                                self._uses_partition_lru()
-                                and not self.host_gradients[
-                                    next_grad_layer
-                                ].is_allocated(next_pid)
-                            ):
-                                self._ensure_gradient_partition_resident(
-                                    next_grad_layer, next_pid
-                                )
-                            grad_buf.allocate(next_pid)
-                            self.host_gradients[next_grad_layer].async_upload(
-                                "gradient", 
-                                next_pid, grad_buf[next_pid],
-                                self.streams.h2d[next_pool],
-                            )
+                    if prefetch_next_gradient:
+                        self._prefetch_gradient(
+                            next_grad_layer, next_pid, self.streams.h2d[next_pool]
+                        )
 
                 # Wait for previous gradient scatter to complete
                 if i > 0:
@@ -1129,13 +1091,10 @@ class Trainer:
                     if self.device_gradients[next_grad_layer] is not None:
                         self.device_gradients[next_grad_layer].release(prev_pid)
 
-                # Synchronize gradient upload
-                if self.host_gradients[next_grad_layer] is not None:
-                    self.host_gradients[next_grad_layer].h2d_synchronize(
-                        self.streams.h2d[pool_idx]
-                    )
-                    if self._uses_partition_lru():
-                        self.host_gradients[next_grad_layer].release(pid)
+                # Wait for this partition's gradient read (not the prefetch)
+                if self.device_gradients[next_grad_layer] is not None:
+                    self.device_gradients[next_grad_layer].wait_gather(pid)
+                    self.streams.compute.wait_stream(self.streams.h2d[pool_idx])
 
                 # Backward: activation.backward(gradient_from_next_layer)
                 act = self.activations[layer_id][pid]
@@ -1173,7 +1132,7 @@ class Trainer:
                         next_pid = pids[i + 1]
                         next_pool = (i + 1) % pool_size
                         #self._prepare_cache_partition(layer_id, next_pid, "backward")
-                        self.device_features[layer_id].async_gather_direct(
+                        self.device_features[layer_id].async_gather_direct_raw(
                             "backward",
                             fds=self.fds,
                             pid=next_pid,
@@ -1186,28 +1145,12 @@ class Trainer:
                         not prefetch_next_gradient
                         and pool_size > 1
                         and i < len(pids) - 1
-                        and self.host_gradients[next_grad_layer] is not None
                     ):
                         next_pid = pids[i + 1]
                         next_pool = (i + 1) % pool_size
-                        grad_buf = self.device_gradients[next_grad_layer]
-                        if grad_buf is not None:
-                            if (
-                                self._uses_partition_lru()
-                                and not self.host_gradients[
-                                    next_grad_layer
-                                ].is_allocated(next_pid)
-                            ):
-                                self._ensure_gradient_partition_resident(
-                                    next_grad_layer, next_pid
-                                )
-                            grad_buf.allocate(next_pid)
-                            self.host_gradients[next_grad_layer].async_upload(
-                                "gradient", 
-                                next_pid,
-                                grad_buf[next_pid],
-                                self.streams.h2d[next_pool],
-                            )
+                        self._prefetch_gradient(
+                            next_grad_layer, next_pid, self.streams.h2d[next_pool]
+                        )
 
             if pool_size == 1:
                 if self.host_gradients[layer_id] is not None:
@@ -1231,7 +1174,7 @@ class Trainer:
 
                     if self.config.mode == "grinnder":
                         #self._prepare_cache_partition(layer_id, next_pid, "backward")
-                        self.device_features[layer_id].async_gather_direct(
+                        self.device_features[layer_id].async_gather_direct_raw(
                             "backward",
                             fds=self.fds,
                             pid=next_pid,
@@ -1240,25 +1183,9 @@ class Trainer:
                             stream=self.streams.act_h2d[0],
                         )
 
-                    if self.host_gradients[next_grad_layer] is not None:
-                        grad_buf = self.device_gradients[next_grad_layer]
-                        if grad_buf is not None:
-                            if (
-                                self._uses_partition_lru()
-                                and not self.host_gradients[
-                                    next_grad_layer
-                                ].is_allocated(next_pid)
-                            ):
-                                self._ensure_gradient_partition_resident(
-                                    next_grad_layer, next_pid
-                                )
-                            grad_buf.allocate(next_pid)
-                            self.host_gradients[next_grad_layer].async_upload(
-                                "gradient", 
-                                next_pid,
-                                grad_buf[next_pid],
-                                self.streams.h2d[0],
-                            )
+                    self._prefetch_gradient(
+                        next_grad_layer, next_pid, self.streams.h2d[0]
+                    )
 
         # Epilogue: synchronize last scatter + free last partition
         if pool_size > 1:
@@ -1275,9 +1202,4 @@ class Trainer:
             if self.device_gradients[next_grad_layer] is not None:
                 self.device_gradients[next_grad_layer].release(last_pid)
 
-        t0 = time.perf_counter_ns()
-        if self.cache is not None:
-            self.cache.on_backward_layer_complete(layer_id)
-
-        tn = time.perf_counter_ns()
-        stat.write_timestamp("backward", "SSD", t0, tn)
+        # Gradients are already on the SSD (accumulate_raw); nothing to flush.
