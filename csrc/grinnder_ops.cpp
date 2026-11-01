@@ -53,6 +53,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
   m.def("gather_partitions_direct_raw_async", &gather_partitions_direct_raw_async,
         "Start a cuFile batch gather into a GPU tensor; returns a job id");
+  m.def("gather_partitions_nvme_async", &gather_partitions_nvme_async,
+        "Start a gather into a GPU tensor using NVMe reads + host copies (no cuFile); returns a job id");
   m.def("gather_wait", &gather_wait, "Wait for one async gather",
         py::call_guard<py::gil_scoped_release>());
 }

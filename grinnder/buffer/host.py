@@ -757,12 +757,22 @@ class HostBuffer:
         stream.wait_stream(torch.cuda.current_stream(gpu_target.device))
         with torch.cuda.stream(stream):
             if self._ops is not None:
-                job = self._ops.gather_partitions_direct_raw_async(
-                    ftl.cuFD,
-                    gpu_target,
-                    runs_t,
-                    ftl.sector_size,
-                )
+                if os.environ.get("GRINNDER_GDS_DIRECT") == "1":
+                    # cuFile batch reads (real GDS path)
+                    job = self._ops.gather_partitions_direct_raw_async(
+                        ftl.cuFD,
+                        gpu_target,
+                        runs_t,
+                        ftl.sector_size,
+                    )
+                else:
+                    # NVMe reads into pinned host memory + copies to the GPU, no cuFile
+                    job = self._ops.gather_partitions_nvme_async(
+                        ftl.device_fd,
+                        gpu_target,
+                        runs_t,
+                        ftl.sector_size,
+                    )
             else:
                 print("Not calling async gather raw")
 

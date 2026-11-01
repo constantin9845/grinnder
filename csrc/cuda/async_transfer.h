@@ -69,6 +69,15 @@ int64_t gather_partitions_direct_raw_async(
   torch::Tensor runs,
   int64_t sector_size
 );
+/* Same as gather_partitions_direct_raw_async, but without cuFile: NVMe passthrough
+   reads (on the raw device fd) into pinned host memory, then copies to dst.
+   Wait with gather_wait(id). */
+int64_t gather_partitions_nvme_async(
+  int64_t fd,
+  torch::Tensor dst,
+  torch::Tensor runs,
+  int64_t sector_size
+);
 void gather_wait(int64_t id);
 
 void gpu_write(

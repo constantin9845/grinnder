@@ -25,6 +25,8 @@
 #include <linux/nvme_ioctl.h>
 #include <cstdio>
 #include <ctime>
+#include <atomic>
+#include <thread>
 
 // Set GRINNDER_GDS_DIRECT=1 when cuFile runs on the real GDS path (nvidia-fs
 // loaded, compat mode off). It turns on two workarounds that only that path needs:
@@ -817,6 +819,156 @@ int64_t gather_partitions_direct_raw_async(
         C10_CUDA_CHECK(cudaEventSynchronize(ready));
         C10_CUDA_CHECK(cudaEventDestroy(ready));
         gpu_write_run_batches(handle, ios, CUFILE_READ);   // `dst` held alive until done
+    };
+
+    std::lock_guard<std::mutex> lock(g_gpu_write_mutex);
+    const int64_t id = g_gpu_write_next_id++;
+    g_gpu_write_jobs.emplace(id, std::async(std::launch::async, std::move(job)));
+    return id;
+}
+
+// ---------------------------------------------------------------------------
+// SSD -> GPU gather without cuFile.
+//
+// Same runs, chunking and job/wait API as gather_partitions_direct_raw_async,
+// but the reads are NVMe passthrough reads (nvme_read) into pinned host memory,
+// followed by cudaMemcpyAsync to `dst`. The I/Os are processed in windows of
+// NVME_GATHER_WINDOW bytes with two staging buffers, so one window is copied to
+// the GPU while the next is being read. Each window's reads run on
+// GRINNDER_NVME_READ_THREADS threads (default 16), because every ioctl blocks.
+// ---------------------------------------------------------------------------
+
+static constexpr int64_t NVME_GATHER_WINDOW = 64LL << 20;
+
+static int nvme_read_threads() {
+    static const int n = [] {
+        const char* v = std::getenv("GRINNDER_NVME_READ_THREADS");
+        const int x = v ? std::atoi(v) : 0;
+        return x > 0 ? x : 16;
+    }();
+    return n;
+}
+
+int64_t gather_partitions_nvme_async(
+    int64_t fd,
+    torch::Tensor dst,
+    torch::Tensor runs,          /* [N, 3] int64: (dev_off, dst_off, size) in bytes */
+    int64_t sector_size
+) {
+    TORCH_CHECK(dst.is_cuda() && dst.is_contiguous(), "dst must be a contiguous CUDA tensor");
+    TORCH_CHECK(runs.dim() == 2 && runs.size(1) == 3 && runs.scalar_type() == at::kLong,
+                "runs must be an [N, 3] int64 tensor");
+
+    const int device = dst.get_device();
+    const int64_t dst_bytes = dst.numel() * dst.element_size();
+
+    // Build the chunk list now, so bad runs fail in the caller.
+    auto r = runs.to(at::kCPU).contiguous();
+    const int64_t* rp = r.data_ptr<int64_t>();
+    std::vector<GpuWriteIo> ios;
+    for (int64_t k = 0; k < r.size(0); ++k) {
+        const int64_t dev_off = rp[3*k], buf_off = rp[3*k+1], size = rp[3*k+2];
+        TORCH_CHECK(dev_off % sector_size == 0 && size % sector_size == 0,
+                    "gather run ", k, " not sector-aligned: dev_off=", dev_off, " size=", size);
+        TORCH_CHECK(buf_off >= 0 && buf_off + size <= dst_bytes,
+                    "gather run ", k, " exceeds dst: buf_off=", buf_off,
+                    " size=", size, " dst_bytes=", dst_bytes);
+        for (int64_t done = 0; done < size; done += GPU_WRITE_MAX_IO) {
+            ios.push_back({nullptr, buf_off + done, dev_off + done,
+                           std::min(GPU_WRITE_MAX_IO, size - done)});
+        }
+    }
+
+    // Kernels still using this memory must finish before the copies overwrite it.
+    cudaEvent_t ready;
+    C10_CUDA_CHECK(cudaEventCreateWithFlags(&ready, cudaEventDisableTiming));
+    C10_CUDA_CHECK(cudaEventRecord(ready, at::cuda::getCurrentCUDAStream(device)));
+
+    auto job = [fd, device, ready, dst, sector_size, ios = std::move(ios)]() {
+        c10::cuda::CUDAGuard guard(device);
+        C10_CUDA_CHECK(cudaEventSynchronize(ready));
+        C10_CUDA_CHECK(cudaEventDestroy(ready));
+        if (ios.empty()) return;
+
+        auto stream = c10::cuda::getStreamFromPool(false, device);
+        const auto pinned = torch::TensorOptions().dtype(torch::kUInt8).pinned_memory(true);
+        torch::Tensor stage[2] = {torch::empty({NVME_GATHER_WINDOW}, pinned),
+                                  torch::empty({NVME_GATHER_WINDOW}, pinned)};
+        cudaEvent_t copied[2];
+        bool pending[2] = {false, false};
+        for (auto& e : copied) C10_CUDA_CHECK(cudaEventCreateWithFlags(&e, cudaEventDisableTiming));
+
+        uint8_t* dst_raw = static_cast<uint8_t*>(dst.data_ptr());
+        const int max_threads = nvme_read_threads();
+        std::string error;
+        std::mutex error_mutex;
+        std::atomic<bool> failed{false};
+
+        size_t next = 0;
+        int buf = 0;
+        while (next < ios.size() && !failed) {
+            // Next window: as many I/Os as fit in one staging buffer.
+            const size_t first = next;
+            int64_t used = 0;
+            while (next < ios.size() && used + ios[next].size <= NVME_GATHER_WINDOW) {
+                used += ios[next].size;
+                ++next;
+            }
+            const size_t n = next - first;
+
+            // The GPU copy out of this buffer (two windows ago) must be done first.
+            if (pending[buf]) {
+                C10_CUDA_CHECK(cudaEventSynchronize(copied[buf]));
+                pending[buf] = false;
+            }
+            uint8_t* st = stage[buf].data_ptr<uint8_t>();
+
+            // I/Os sit back to back in the staging buffer.
+            std::vector<int64_t> stage_off(n);
+            for (size_t i = 0, off = 0; i < n; ++i) {
+                stage_off[i] = off;
+                off += ios[first + i].size;
+            }
+
+            std::atomic<size_t> cursor{0};
+            auto reader = [&] {
+                for (size_t i; !failed && (i = cursor.fetch_add(1)) < n;) {
+                    const GpuWriteIo& io = ios[first + i];
+                    try {
+                        nvme_read(fd, st + stage_off[i], io.dev_off / sector_size, io.size, sector_size);
+                    } catch (const std::exception& e) {
+                        std::lock_guard<std::mutex> lock(error_mutex);
+                        if (!failed.exchange(true)) error = e.what();
+                    }
+                }
+            };
+            std::vector<std::thread> threads;
+            const size_t nt = std::min<size_t>(max_threads, n);
+            for (size_t t = 0; t < nt; ++t) threads.emplace_back(reader);
+            for (auto& t : threads) t.join();
+            if (failed) break;
+
+            // One copy per span that is contiguous in dst (usually the whole window).
+            for (size_t i = 0; i < n;) {
+                int64_t len = ios[first + i].size;
+                size_t j = i + 1;
+                while (j < n && ios[first + j].buf_off == ios[first + i].buf_off + len) {
+                    len += ios[first + j].size;
+                    ++j;
+                }
+                C10_CUDA_CHECK(cudaMemcpyAsync(dst_raw + ios[first + i].buf_off, st + stage_off[i],
+                                               len, cudaMemcpyHostToDevice, stream));
+                i = j;
+            }
+            C10_CUDA_CHECK(cudaEventRecord(copied[buf], stream));
+            pending[buf] = true;
+            buf ^= 1;
+        }
+
+        // `dst` holds the data once gather_wait() returns.
+        C10_CUDA_CHECK(cudaStreamSynchronize(stream));
+        for (auto& e : copied) cudaEventDestroy(e);
+        TORCH_CHECK(error.empty(), error);
     };
 
     std::lock_guard<std::mutex> lock(g_gpu_write_mutex);
