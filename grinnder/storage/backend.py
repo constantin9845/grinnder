@@ -32,7 +32,9 @@ class StorageBackend:
     All files stored under ``storage_dir/{file_id}.pt``.
     """
 
-    def __init__(self, storage_dir: str, queue_depth: int = 64):
+    def __init__(self, storage_dir: str, queue_depth: int = 64, io_mode: str = "ours"):
+        assert io_mode in ("ours", "base"), f"unknown io_mode {io_mode!r}"
+        self.io_mode = io_mode
         self._storage_dir = ensure_dir(storage_dir)
 
         # GPU <-> Storage: kvikio required
@@ -61,10 +63,16 @@ class StorageBackend:
                 "The bundled liburing is in third_party/liburing/."
             )
         
-        self.host_ftl = FTL()
+        # ours: host FTL on the raw device. base: plain files under storage_dir,
+        # the raw device is never touched.
+        self.host_ftl = FTL() if io_mode == "ours" else None
 
-        # file_id -> job id of an async GPU write still in flight
+        # file_id -> job id of an async GPU write still in flight (ours only)
         self._pending_gpu_writes: Dict[str, int] = {}
+
+    @property
+    def uses_ftl(self) -> bool:
+        return self.host_ftl is not None
 
     def _path(self, file_id: str) -> str:
         return os.path.join(self._storage_dir, f"{file_id}.pt")
@@ -93,6 +101,17 @@ class StorageBackend:
 
         assert tensor.is_cuda, "gpu_write requires a CUDA tensor"
         assert tensor.is_contiguous(), "gpu_write requires contiguous tensor"
+
+        if not self.uses_ftl:
+            # base (original GriNNder): kvikio write of the whole tensor to its
+            # file, synchronous. Run with KVIKIO_COMPAT_MODE=ON under FEMU.
+            if stream is not None:
+                stream.synchronize()
+            t = tensor.detach().contiguous()
+            f = self._kvikio.CuFile(self._path(file_id), "w")
+            f.write(t, file_offset=0)
+            f.close()
+            return
 
         # A previous write of this file must land before we overwrite it.
         self.wait_gpu_writes([file_id])
@@ -208,32 +227,36 @@ class StorageBackend:
     # Host <-> Storage : used for initial storage of partitioned graph features
     # --------------------------------------------------------------------------
 
-    def host_write(self, tensor: Tensor, file_id: str, async_: bool = True) -> int:
-        import ctypes
-        """Write a CPU tensor to NVMe synchronously."""
-        path = self._path(file_id)
+    def host_write(self, tensor: Tensor, file_id: str, async_: bool = True) -> Optional[int]:
+        """Write a CPU tensor to storage.
 
+        ours: FTL device write (synchronous, verified); returns None.
+        base: io_uring write to the tensor's file (original); returns a
+              handle for wait().
+        """
         assert not tensor.is_cuda, "host_write requires a CPU tensor"
         assert tensor.is_contiguous(), "host_write requires contiguous tensor"
 
-        ptr = tensor.data_ptr()
-        nbytes = tensor.numel() * tensor.element_size()
-        buffer = (ctypes.c_char * nbytes).from_address(ptr)
+        if not self.uses_ftl:
+            return self._io_engine.submit_write(
+                self._path(file_id), tensor, 0, tensor.numel() * tensor.element_size()
+            )
 
         meta = self.host_ftl.map_tensor(file_id, tensor)
         self.host_ftl.device_write(meta, tensor, file_id)
 
         verify = self.host_ftl.verify_write(meta, tensor, file_id)
         assert verify, f"Data verification failed for file_id={file_id}! DRAM contents corrupted."
-        return 0
-    
+        return None
+
 
     def host_read(self, file_id: str, tensor: Tensor, async_: bool = True) -> int:
-        """Read from NVMe into a CPU tensor via io_uring.
+        """Read a file into a CPU tensor via io_uring (base mode).
 
         Returns:
             Handle for wait().
         """
+        assert not self.uses_ftl, "host_read reads files (io_mode=base); ours reads via the FTL"
         path = self._path(file_id)
         assert not tensor.is_cuda, "host_read requires a CPU tensor"
         assert tensor.is_contiguous(), "host_read requires contiguous tensor"
@@ -242,9 +265,10 @@ class StorageBackend:
             path, tensor, 0, tensor.numel() * tensor.element_size()
         )
 
-    def wait(self, handle: int) -> None:
-        """Wait for an async io_uring operation to complete."""
-        self._io_engine.wait(handle)
+    def wait(self, handle: Optional[int]) -> None:
+        """Wait for an async io_uring operation to complete (None: nothing to wait)."""
+        if handle is not None:
+            self._io_engine.wait(handle)
 
     def wait_all(self) -> None:
         """Wait for all pending io_uring operations."""
@@ -255,6 +279,9 @@ class StorageBackend:
     # ------------------------------------------------------------------
 
     def exists(self, file_id: str) -> bool:
+        """ours: the FTL has a mapping for it. base: its file exists."""
+        if self.uses_ftl:
+            return file_id in self.host_ftl.tensor_table
         return os.path.exists(self._path(file_id))
 
     def remove(self, file_id: str) -> None:

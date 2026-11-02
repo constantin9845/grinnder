@@ -22,6 +22,15 @@ from grinnder.utils import fix_seed, get_default_partitioner_threads, report_mem
 from grinnder.stats import stat
 
 
+def parse_size_gb(text: str) -> float:
+    """'16GB' / '512MB' / '1TB' / '16' (GB) -> GB."""
+    s = text.strip().upper().replace(" ", "")
+    for suffix, scale in (("TB", 1024.0), ("GB", 1.0), ("MB", 1 / 1024.0), ("G", 1.0), ("M", 1 / 1024.0)):
+        if s.endswith(suffix):
+            return float(s[: -len(suffix)]) * scale
+    return float(s)
+
+
 def build_model(args, graph):
     if args.model == "gcn":
         return GCN(
@@ -81,7 +90,18 @@ def main():
     
     parser.add_argument("--sparse", type=int, default=0,
                         help="Sparsify graph to reduce partition dependencies.")
+    parser.add_argument("--io_mode", "--io-mode", dest="io_mode", type=str, default="ours",
+                        choices=["base", "ours"],
+                        help="ours: host FTL, targeted rows SSD<->GPU. "
+                             "base: original GriNNder, partition files + DRAM cache.")
+    parser.add_argument("--cache-size", "--cache_size", dest="cache_size", type=str, default=None,
+                        help="Base only: DRAM limit for the partition cache, e.g. 16GB, 512MB, 16 "
+                             "(GB). Default: available memory minus safety margin.")
     args = parser.parse_args()
+    cache_size_gb = parse_size_gb(args.cache_size) if args.cache_size else 0.0
+    if args.io_mode == "base" and args.cache_mode != "partition_lru":
+        print(f"io_mode=base uses cache_mode=partition_lru (was {args.cache_mode})")
+        args.cache_mode = "partition_lru"
 
     fix_seed(args.seed)
     device = args.device
@@ -123,6 +143,12 @@ def main():
         runtime_safety_margin_gb=args.runtime_safety_margin_gb,
         pool_size=args.pool_size,
         device=device,
+        io_mode=args.io_mode,
+        cache_size_gb=cache_size_gb,
+    )
+    print(
+        f"\nIO mode: {config.io_mode}"
+        + (f", Cache size: {cache_size_gb:.2f}GB" if config.io_mode == "base" and cache_size_gb else "")
     )
     print(
         f"\nMode: {config.mode}, Partitions: {config.num_parts}, "

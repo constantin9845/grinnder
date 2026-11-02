@@ -49,12 +49,18 @@ class GradOffload(torch.autograd.Function):
             # not materialize a large, unused gathered-feature gradient.
             return None, None, None, None, None, None, None
 
-        # Accumulate gradients into the partitions' SSD copies (FTL rows):
-        # read rows already written, add on the GPU, write the rows back.
         # grad_output may not be contiguous from autograd — make it so
         grad_output = grad_output.contiguous()
         ctx.d2h_stream.wait_stream(ctx.compute_stream)
-        ctx.host_gradients.accumulate_raw(
+        # ours: write this partition's gradient to the SSD once (FTL), summed
+        #       per destination partition when it is read.
+        # base: scatter-add into the DRAM gradient partitions (original).
+        offload = (
+            ctx.host_gradients.accumulate_raw
+            if ctx.host_gradients.uses_ftl
+            else ctx.host_gradients.async_scatter
+        )
+        offload(
             ctx.pid,
             grad_output,
             ctx.boundaries,

@@ -116,6 +116,7 @@ class PartitionCache:
         fixed_resident_bytes: int = 0,
         safety_margin_bytes: int = 0,
         dependency_sets: Optional[List[Set[int]]] = None,
+        cache_size_bytes: int = 0,
     ):
         valid_modes = {"auto", "lru_layer", "partition_lru"}
         if mode not in valid_modes:
@@ -157,6 +158,14 @@ class PartitionCache:
             if self._mode == "lru_layer"
             else self._partition_activation_cache_budget
         )
+        # --cache-size (io_mode=base): DRAM limit for cached partitions, as given.
+        self._cache_size_bytes = max(0, int(cache_size_bytes))
+        if self._cache_size_bytes > 0:
+            self._activation_cache_budget = self._cache_size_bytes
+            print(
+                f"[cache] DRAM budget for cached partitions: "
+                f"{self._cache_size_bytes / 1024**3:.2f} GB (--cache-size)"
+            )
 
         # Track which layers are currently in host cache (layer-level tracking)
         self._cached_layers: OrderedDict[int, bool] = OrderedDict()
@@ -375,6 +384,70 @@ class PartitionCache:
             
 
         
+
+    def gather_with_swapping(
+        self,
+        phase,
+        layer_id: int,
+        target_pid: int,
+        gpu_target: torch.Tensor,
+        boundaries: List[Optional[torch.Tensor]],
+        stream: torch.cuda.Stream,
+    ) -> None:
+        """Base gather: whole dependency partitions storage -> DRAM, then DRAM -> GPU.
+
+        Dependencies fit the budget: load them all, one C++ gather (original).
+        Otherwise: go through the source partitions one at a time (cached ones
+        first): load it (evicting LRU partitions), copy its rows into their
+        fixed GPU row range [intra | boundary_from_p0 | ...], move on. Only a
+        budget smaller than one partition fails.
+        """
+        buf = self.host_buffers[layer_id]
+        deps = self._dependency_set(target_pid, boundaries)
+        demand = sum(self._partition_bytes(layer_id, p) for p in deps)
+
+        if demand <= self._activation_cache_budget:
+            self.ensure_dependencies_in_host(
+                layer_id, target_pid, phase, boundaries=boundaries
+            )
+            buf.async_gather(phase, target_pid, gpu_target, boundaries, stream)
+            return
+
+        # GPU row range of each source partition, in gather layout order.
+        segs = []
+        off = buf.part_sizes[target_pid]
+        segs.append((target_pid, None, 0, off))
+        for j in range(self.num_parts):
+            b = boundaries[j]
+            if j != target_pid and b is not None and b.numel() > 0:
+                segs.append((j, b, off, b.numel()))
+                off += b.numel()
+        assert off == gpu_target.size(0), (
+            f"Gather layout has {off} rows, gpu_target has {gpu_target.size(0)}"
+        )
+        # Use what is cached before anything gets evicted.
+        segs.sort(key=lambda s: (layer_id, s[0]) not in self._cached_partitions)
+
+        print(
+            f"[cache] layer {layer_id} partition {target_pid}: dependencies need "
+            f"{demand / 1024**3:.2f} GB > budget "
+            f"{self._activation_cache_budget / 1024**3:.2f} GB, swapping "
+            f"{len(segs)} partitions one at a time"
+        )
+
+        stream.wait_stream(torch.cuda.current_stream(gpu_target.device))
+        for src_pid, idx, row, n in segs:
+            self.ensure_dependencies_in_host(
+                layer_id, target_pid, phase, dependencies={src_pid}
+            )
+            src = buf[src_pid]
+            # Blocking copies: the partition may be evicted right after.
+            with torch.cuda.stream(stream), torch.no_grad():
+                if idx is None:
+                    gpu_target[row:row + n].copy_(src)
+                else:
+                    gpu_target[row:row + n].copy_(src.index_select(0, idx))
+            stream.synchronize()
 
     def on_layer_complete(self, layer_id: int, pids: int) -> None:
         """Called after forward layer completes. Decide what to flush."""

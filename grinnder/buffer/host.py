@@ -153,6 +153,11 @@ class HostBuffer:
         self._pending_contrib: List[str] = []
 
 
+    @property
+    def uses_ftl(self) -> bool:
+        """True for io_mode=ours (host FTL, SSD <-> GPU); False for base."""
+        return self._backend is not None and self._backend.uses_ftl
+
     def __getitem__(self, pid: int) -> Tensor:
         """Get host tensor for partition pid, allocating it if needed."""
         self.allocate(pid)
@@ -219,8 +224,8 @@ class HostBuffer:
         """Return whether a backing storage copy exists for one partition."""
         if self._backend is None:
             return False
-        # Data lives on the raw device; the FTL mapping is the source of truth.
-        return self._file_id(pid) in self._backend.host_ftl.tensor_table
+        # ours: FTL mapping; base: partition file.
+        return self._backend.exists(self._file_id(pid))
 
     def ensure_storage_copy(self, pid: int) -> None:
         """Write a resident partition to storage if no backing copy exists."""
@@ -400,9 +405,8 @@ class HostBuffer:
 
         t0 = time.perf_counter_ns()
         with torch.cuda.stream(stream):
-            if self._ops is not None and 2 == 3:
+            if self._ops is not None:
                 self._ops.gather_partitions(pid, self._tensors, gpu_target, bndries)
-                print("Not a fallback")
             else:
                 # Python fallback
                 print("Fallback")
@@ -1199,7 +1203,7 @@ class HostBuffer:
             file_id = f"{self._file_prefix}_p{pid}"
             self.allocate(pid)
             h = self._backend.host_write(self._tensors[pid], file_id)
-            #self._backend.wait(h)
+            self._backend.wait(h)   # base: io_uring handle; ours: None (already written)
         else:
             handles = []
             for i in range(self.num_parts):

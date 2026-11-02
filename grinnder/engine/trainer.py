@@ -72,7 +72,13 @@ class Trainer:
         num_parts = graph.num_parts
 
         # Storage backend
-        self.backend = StorageBackend(config.storage_dir) if config.mode == "grinnder" else None
+        # io_mode: 'ours' = host FTL, targeted SSD <-> GPU; 'base' = original
+        # GriNNder (partition files, DRAM partition cache).
+        self.backend = (
+            StorageBackend(config.storage_dir, io_mode=config.io_mode)
+            if config.mode == "grinnder"
+            else None
+        )
 
         # CUDA streams
         self.streams = StreamManager(pool_size=config.pool_size, device=config.device)
@@ -147,6 +153,11 @@ class Trainer:
                 fixed_resident_bytes=fixed_resident_bytes,
                 safety_margin_bytes=safety_margin_bytes,
                 dependency_sets=self._dependency_sets(graph),
+                cache_size_bytes=(
+                    int(config.cache_size_gb * (1024**3))
+                    if config.io_mode == "base"
+                    else 0
+                ),
             )
 
         self._single_partition_fast_path_enabled = (
@@ -267,16 +278,134 @@ class Trainer:
     def _uses_partition_lru(self) -> bool:
         return self.cache is not None and self.cache.mode == "partition_lru"
 
+    # ------------------------------------------------------------------
+    # Storage I/O path: io_mode 'ours' (host FTL) vs 'base' (original)
+    # ------------------------------------------------------------------
+
+    def _is_base(self) -> bool:
+        return self.config.io_mode == "base"
+
+    def _gather_features(
+        self, phase: str, layer_id: int, pid: int, stream: torch.cuda.Stream
+    ) -> None:
+        """Start the gather of partition pid's input (own rows + boundary rows)
+        into device_features[layer_id][pid]. Wait with device_features[...].h2d_synchronize.
+
+        ours: targeted rows SSD -> GPU (FTL).
+        base: whole dependency partitions file -> DRAM cache, gather DRAM -> GPU
+              (swapping partitions when they do not all fit).
+        """
+        df = self.device_features[layer_id]
+        if self._is_base():
+            df.wait_gather(pid)
+            df.allocate(pid)
+            self.cache.gather_with_swapping(
+                phase, layer_id, pid, df[pid], self.graph.boundaries[pid], stream
+            )
+        else:
+            df.async_gather_direct_raw(
+                phase,
+                fds=self.fds,
+                pid=pid,
+                host_buffer=self.host_features[layer_id],
+                boundaries=self.graph.boundaries[pid],
+                stream=stream,
+            )
+
+    def _load_final_activation(
+        self, pid: int, gpu_target: Optional[Tensor], stream: torch.cuda.Stream
+    ) -> None:
+        """Load the last layer's output of partition pid into gpu_target (loss).
+        Wait with host_features[-1].h2d_synchronize(stream, pid).
+
+        ours: whole partition SSD -> GPU (FTL).
+        base: whole partition file -> DRAM -> GPU (original).
+        """
+        if gpu_target is None:
+            return
+        hf = self.host_features[-1]
+        if self._is_base():
+            hf.storage_to_cpu("loss", pid)
+            hf.async_upload("loss", pid, gpu_target, stream)
+        else:
+            hf.storage_to_gpu(phase="loss", pid=pid, gpu_target=gpu_target, stream=stream)
+
+    def _begin_gradient_layer(self, layer_id: int) -> None:
+        """Before the backward pass that produces gradients of layer_id."""
+        hg = self.host_gradients[layer_id]
+        if hg is None:
+            return
+        if self._is_base():
+            hg.initialize_zeros(lazy=self._uses_partition_lru())
+        else:
+            hg.begin_accumulation()
+
+    def _end_gradient_layer(self, layer_id: int) -> None:
+        """After the backward pass that produced gradients of layer_id.
+
+        base: flush the DRAM gradient partitions to their files (original).
+        ours: nothing, gradients are already on the SSD.
+        """
+        if not self._is_base() or self.cache is None:
+            return
+        hg = self.host_gradients[layer_id]
+        if hg is not None:
+            for p in hg.allocated_pids():
+                self.cache.add_gradient_relay(layer_id, p)
+            limit = int(self.config.cache_size_gb * (1024**3))
+            used = hg.resident_bytes + self.cache._resident_activation_bytes
+            if limit > 0 and used > limit:
+                print(
+                    f"[cache] WARNING: layer {layer_id} gradients "
+                    f"({hg.resident_bytes / 1024**3:.2f} GB) + cached partitions "
+                    f"({self.cache._resident_activation_bytes / 1024**3:.2f} GB) exceed "
+                    f"--cache-size {limit / 1024**3:.2f} GB (gradients are not "
+                    f"limited by the cache)"
+                )
+        t0 = time.perf_counter_ns()
+        self.cache.on_backward_layer_complete(layer_id)
+        tn = time.perf_counter_ns()
+        stat.write_timestamp("backward", "SSD", t0, tn)
+
     def _prefetch_gradient(
         self, grad_layer: int, pid: int, stream: torch.cuda.Stream
     ) -> None:
-        """Start the SSD -> GPU read (FTL) of gradient partition pid into
-        device_gradients[grad_layer]. Wait with device_gradients[...].wait_gather(pid)."""
+        """Start loading gradient partition pid of grad_layer into
+        device_gradients[grad_layer][pid]. Wait with _wait_gradient.
+
+        ours: SSD -> GPU (FTL), contributions summed on the GPU.
+        base: DRAM (or its file, else zero) -> GPU (original).
+        """
         grad_host = self.host_gradients[grad_layer]
         grad_buf = self.device_gradients[grad_layer]
         if grad_host is None or grad_buf is None:
             return
-        grad_buf.async_read_raw(pid, grad_host, stream)
+        if self._is_base():
+            if self._uses_partition_lru() and not grad_host.is_allocated(pid):
+                self._ensure_gradient_partition_resident(grad_layer, pid)
+            grad_buf.allocate(pid)
+            grad_host.async_upload("gradient", pid, grad_buf[pid], stream)
+        else:
+            grad_buf.async_read_raw(pid, grad_host, stream)
+
+    def _wait_gradient(
+        self, grad_layer: int, pid: int, stream: torch.cuda.Stream
+    ) -> None:
+        """Wait for _prefetch_gradient(grad_layer, pid) issued on `stream`."""
+        if self._is_base():
+            hg = self.host_gradients[grad_layer]
+            if hg is None:
+                return
+            hg.h2d_synchronize(stream)
+            if self._uses_partition_lru():
+                hg.release(pid)
+        else:
+            db = self.device_gradients[grad_layer]
+            if db is None:
+                return
+            # This partition's read only (not the prefetch of the next one)
+            db.wait_gather(pid)
+            self.streams.compute.wait_stream(stream)
 
     def _ensure_gradient_partition_resident(self, layer_id: int, pid: int) -> None:
         """Load a gradient partition from storage, or materialize zero if absent."""
@@ -527,14 +656,7 @@ class Trainer:
         # Prologue: prefetch first assigned partition
         #self._prepare_cache_partition(layer_id, pids[0], "forward")
         t0 = time.perf_counter_ns()
-        self.device_features[layer_id].async_gather_direct_raw(
-            "forward",
-            fds=self.fds,
-            pid=pids[0],
-            host_buffer=self.host_features[layer_id],
-            boundaries=self.graph.boundaries[pids[0]],
-            stream=self.streams.h2d[0],
-        )
+        self._gather_features("forward", layer_id, pids[0], self.streams.h2d[0])
 
         for i, pid in enumerate(pids):
             pool_idx = i % pool_size
@@ -561,14 +683,7 @@ class Trainer:
                     next_pool = (i + 1) % pool_size
                     #self._prepare_cache_partition(layer_id, next_pid, "forward")
                     t0 = time.perf_counter_ns()
-                    self.device_features[layer_id].async_gather_direct_raw(
-                        "forward",
-                        fds=self.fds,
-                        pid=next_pid,
-                        host_buffer=self.host_features[layer_id],
-                        boundaries=self.graph.boundaries[next_pid],
-                        stream=self.streams.h2d[next_pool],
-                    )
+                    self._gather_features("forward", layer_id, next_pid, self.streams.h2d[next_pool])
 
                 x = self.device_features[layer_id][pid]
                 x.requires_grad_(True)
@@ -661,14 +776,7 @@ class Trainer:
                     next_pid = pids[i + 1]
                     #self._prepare_cache_partition(layer_id, next_pid, "forward")
                     t0 = time.perf_counter_ns()
-                    self.device_features[layer_id].async_gather_direct_raw(
-                        "forward",
-                        fds=self.fds,
-                        pid=next_pid,
-                        host_buffer=self.host_features[layer_id],
-                        boundaries=self.graph.boundaries[next_pid],
-                        stream=self.streams.h2d[0],
-                    )
+                    self._gather_features("forward", layer_id, next_pid, self.streams.h2d[0])
 
         # Epilogue: free last assigned partition's activation
         if pool_size > 1:
@@ -753,12 +861,7 @@ class Trainer:
             )
 
         print("LOSS : load partition [-1] [CPU --> GPU]")
-        self.host_features[-1].storage_to_gpu(
-            phase="loss", 
-            pid=first_pid, 
-            gpu_target=act_first,
-            stream=self.streams.h2d[0]
-        )
+        self._load_final_activation(first_pid, act_first, self.streams.h2d[0])
 
         for i, pid in enumerate(pids):
             pool_idx = i % pool_size
@@ -778,12 +881,7 @@ class Trainer:
                         act_next.numel() * act_next.element_size()
                     )
                 
-                self.host_features[-1].storage_to_gpu(
-                    phase="loss", 
-                    pid=next_pid,
-                    gpu_target=act_next,
-                    stream=self.streams.h2d[(i + 1) % pool_size]
-                )
+                self._load_final_activation(next_pid, act_next, self.streams.h2d[(i + 1) % pool_size])
 
                 print(f"LOSS : load partition [{next_pid}] [CPU --> GPU]")
 
@@ -834,12 +932,7 @@ class Trainer:
                     act_next.untyped_storage().resize_(
                         act_next.numel() * act_next.element_size()
                     )
-                self.host_features[-1].storage_to_gpu(
-                    phase="loss", 
-                    pid=next_pid, 
-                    gpu_target=act_next,
-                    stream=self.streams.h2d[(i + 1) % pool_size]
-                )
+                self._load_final_activation(next_pid, act_next, self.streams.h2d[(i + 1) % pool_size])
 
         self._pid_to_loss_idx = pid_to_loss_idx
 
@@ -873,19 +966,12 @@ class Trainer:
 
         # Gradients of this layer are accumulated on the SSD (FTL rows)
         if layer_id > 0 and self.host_gradients[layer_id] is not None:
-            self.host_gradients[layer_id].begin_accumulation()
+            self._begin_gradient_layer(layer_id)
 
         # Prologue: re-gather features for first partition's checkpoint recompute
         if self.config.mode == "grinnder" and layer_id > 0:
             #self._prepare_cache_partition(cache_layer_id, pids[0], "backward")
-            self.device_features[layer_id].async_gather_direct_raw(
-                "backward",
-                fds=self.fds,
-                pid=pids[0],
-                host_buffer=self.host_features[layer_id],
-                boundaries=self.graph.boundaries[pids[0]],
-                stream=self.streams.act_h2d[0],
-            )
+            self._gather_features("backward", layer_id, pids[0], self.streams.act_h2d[0])
 
         for i, pid in enumerate(pids):
             pool_idx = i % pool_size
@@ -908,14 +994,7 @@ class Trainer:
                 next_pid = pids[i + 1]
                 next_pool = (i + 1) % pool_size
                 #self._prepare_cache_partition(cache_layer_id, next_pid, "backward")
-                self.device_features[layer_id].async_gather_direct_raw(
-                    "backward",
-                    fds=self.fds,
-                    pid=next_pid,
-                    host_buffer=self.host_features[layer_id],
-                    boundaries=self.graph.boundaries[next_pid],
-                    stream=self.streams.act_h2d[next_pool],
-                )
+                self._gather_features("backward", layer_id, next_pid, self.streams.act_h2d[next_pool])
 
             with torch.cuda.stream(self.streams.compute):
                 # Free previous partition's re-gathered features
@@ -970,18 +1049,11 @@ class Trainer:
                 ):
                     next_pid = pids[i + 1]
                     #self._prepare_cache_partition(cache_layer_id, next_pid, "backward")
-                    self.device_features[layer_id].async_gather_direct_raw(
-                        "backward",
-                        fds=self.fds,
-                        pid=next_pid,
-                        host_buffer=self.host_features[layer_id],
-                        boundaries=self.graph.boundaries[next_pid],
-                        stream=self.streams.act_h2d[0],
-                    )
+                    self._gather_features("backward", layer_id, next_pid, self.streams.act_h2d[0])
 
-        # GradOffload accumulates ∇A^{L-1} into the SSD copy during the
-        # checkpoint recompute. The next backward phase reads it back, so all
-        # row writes from this phase must have landed first.
+        # GradOffload offloads ∇A^{L-1} during the checkpoint recompute
+        # (ours: SSD writes; base: scatter into DRAM). The next backward phase
+        # reads it back, so everything from this phase must have landed first.
         if layer_id > 0 and self.host_gradients[layer_id] is not None:
             t0 = time.perf_counter_ns()
             for i, _ in enumerate(pids):
@@ -996,6 +1068,9 @@ class Trainer:
             last_pid = pids[-1]
             if self.device_features[layer_id].is_allocated(last_pid):
                 self.device_features[layer_id].release(last_pid)
+
+        if layer_id > 0:
+            self._end_gradient_layer(layer_id)
 
 
     def _backward_layer(self, layer_id: int) -> None:
@@ -1023,21 +1098,14 @@ class Trainer:
 
         # Gradients of THIS layer are accumulated on the SSD (FTL rows)
         if self.host_gradients[layer_id] is not None:
-            self.host_gradients[layer_id].begin_accumulation()
+            self._begin_gradient_layer(layer_id)
 
         first_pid = pids[0]
 
         # Prologue: prefetch features for regathering + upload gradient for first pid
         if self.config.mode == "grinnder":
             #self._prepare_cache_partition(layer_id, first_pid, "backward")
-            self.device_features[layer_id].async_gather_direct_raw(
-                "backward",
-                fds=self.fds,
-                pid=first_pid,
-                host_buffer=self.host_features[layer_id],
-                boundaries=self.graph.boundaries[first_pid],
-                stream=self.streams.act_h2d[0],
-            )
+            self._gather_features("backward", layer_id, first_pid, self.streams.act_h2d[0])
 
         # Read gradient from next layer for first partition (SSD -> GPU)
         self._prefetch_gradient(next_grad_layer, first_pid, self.streams.h2d[0])
@@ -1061,14 +1129,7 @@ class Trainer:
 
                     if self.config.mode == "grinnder" and prefetch_next_feature:
                         #self._prepare_cache_partition(layer_id, next_pid, "backward")
-                        self.device_features[layer_id].async_gather_direct_raw(
-                            "backward",
-                            fds=self.fds,
-                            pid=next_pid,
-                            host_buffer=self.host_features[layer_id],
-                            boundaries=self.graph.boundaries[next_pid],
-                            stream=self.streams.act_h2d[next_pool],
-                        )
+                        self._gather_features("backward", layer_id, next_pid, self.streams.act_h2d[next_pool])
 
                     if prefetch_next_gradient:
                         self._prefetch_gradient(
@@ -1091,10 +1152,8 @@ class Trainer:
                     if self.device_gradients[next_grad_layer] is not None:
                         self.device_gradients[next_grad_layer].release(prev_pid)
 
-                # Wait for this partition's gradient read (not the prefetch)
-                if self.device_gradients[next_grad_layer] is not None:
-                    self.device_gradients[next_grad_layer].wait_gather(pid)
-                    self.streams.compute.wait_stream(self.streams.h2d[pool_idx])
+                # Wait for this partition's gradient load
+                self._wait_gradient(next_grad_layer, pid, self.streams.h2d[pool_idx])
 
                 # Backward: activation.backward(gradient_from_next_layer)
                 act = self.activations[layer_id][pid]
@@ -1132,14 +1191,7 @@ class Trainer:
                         next_pid = pids[i + 1]
                         next_pool = (i + 1) % pool_size
                         #self._prepare_cache_partition(layer_id, next_pid, "backward")
-                        self.device_features[layer_id].async_gather_direct_raw(
-                            "backward",
-                            fds=self.fds,
-                            pid=next_pid,
-                            host_buffer=self.host_features[layer_id],
-                            boundaries=self.graph.boundaries[next_pid],
-                            stream=self.streams.act_h2d[next_pool],
-                        )
+                        self._gather_features("backward", layer_id, next_pid, self.streams.act_h2d[next_pool])
 
                     if (
                         not prefetch_next_gradient
@@ -1174,14 +1226,7 @@ class Trainer:
 
                     if self.config.mode == "grinnder":
                         #self._prepare_cache_partition(layer_id, next_pid, "backward")
-                        self.device_features[layer_id].async_gather_direct_raw(
-                            "backward",
-                            fds=self.fds,
-                            pid=next_pid,
-                            host_buffer=self.host_features[layer_id],
-                            boundaries=self.graph.boundaries[next_pid],
-                            stream=self.streams.act_h2d[0],
-                        )
+                        self._gather_features("backward", layer_id, next_pid, self.streams.act_h2d[0])
 
                     self._prefetch_gradient(
                         next_grad_layer, next_pid, self.streams.h2d[0]
@@ -1202,4 +1247,5 @@ class Trainer:
             if self.device_gradients[next_grad_layer] is not None:
                 self.device_gradients[next_grad_layer].release(last_pid)
 
-        # Gradients are already on the SSD (accumulate_raw); nothing to flush.
+        # base: flush DRAM gradients to files. ours: already on the SSD.
+        self._end_gradient_layer(layer_id)

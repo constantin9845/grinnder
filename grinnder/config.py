@@ -58,6 +58,16 @@ class GriNNderConfig:
     host_memory_budget_gb: float = 0  # 0 = auto-detect
     runtime_safety_margin_gb: float = 0.0
 
+    # Storage I/O path (used when mode='grinnder'):
+    #   'ours': host FTL on the raw device; targeted rows SSD <-> GPU,
+    #           host memory only as staging.
+    #   'base': original GriNNder; partition files on a filesystem, whole
+    #           partitions SSD -> DRAM cache (LRU), gather DRAM -> GPU.
+    io_mode: Literal["ours", "base"] = "ours"
+    # Base only: DRAM budget (GB) for cached activation partitions, used as is.
+    # 0 = derive from available memory (host_memory_budget_gb / safety margin).
+    cache_size_gb: float = 0.0
+
     # System
     device: str = "cuda:0"
     pool_size: int = 2  # Double buffering
