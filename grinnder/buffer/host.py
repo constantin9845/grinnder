@@ -866,6 +866,7 @@ class HostBuffer:
         self.wait_accumulations()
 
         if self._accumulate:
+            # Gradient rows (hidden dim): only rows written this backward pass.
             written = self._written_rows[pid]
             rows = (
                 np.flatnonzero(written).astype(np.int64)
@@ -873,12 +874,16 @@ class HostBuffer:
                 else np.empty(0, dtype=np.int64)
             )
             need_zero = len(rows) < self.part_sizes[pid]
+            dev_offs = self._segment_dev_offsets([(pid, rows)], row_bytes)
+            runs_t = self._merge_runs(dev_offs, rows, row_bytes)
         else:
+            # Whole tensor: the FTL's page runs, as written. Works for any row
+            # size (e.g. 76-byte logits rows); the last page's padding is
+            # read but not copied.
             rows = np.arange(self.part_sizes[pid], dtype=np.int64)
             need_zero = False
-
-        dev_offs = self._segment_dev_offsets([(pid, rows)], row_bytes)
-        runs_t = self._merge_runs(dev_offs, rows, row_bytes)
+            runs = self._backend.host_ftl.get_tensor_io_runs(self._file_id(pid))
+            runs_t = torch.tensor(runs, dtype=torch.int64).reshape(-1, 3)
 
         t0 = time.perf_counter_ns()
         stream.wait_stream(torch.cuda.current_stream(gpu_target.device))

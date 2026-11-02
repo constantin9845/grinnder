@@ -888,19 +888,30 @@ int64_t gather_partitions_nvme_async(
     const int64_t dst_bytes = dst.numel() * dst.element_size();
 
     // Build the chunk list now, so bad runs fail in the caller.
+    // A run may extend past the end of dst (the zero-padded last page of a
+    // whole-tensor read): the full sectors are read, but only the bytes that
+    // fall inside dst are copied (`copy` below).
+    struct ReadIo {
+        int64_t buf_off;   // first byte in dst
+        int64_t dev_off;   // device byte offset
+        int64_t size;      // bytes read from the device (sector multiple)
+        int64_t copy;      // bytes copied to dst (<= size)
+    };
     auto r = runs.to(at::kCPU).contiguous();
     const int64_t* rp = r.data_ptr<int64_t>();
-    std::vector<GpuWriteIo> ios;
+    std::vector<ReadIo> ios;
     for (int64_t k = 0; k < r.size(0); ++k) {
         const int64_t dev_off = rp[3*k], buf_off = rp[3*k+1], size = rp[3*k+2];
         TORCH_CHECK(dev_off % sector_size == 0 && size % sector_size == 0,
                     "gather run ", k, " not sector-aligned: dev_off=", dev_off, " size=", size);
-        TORCH_CHECK(buf_off >= 0 && buf_off + size <= dst_bytes,
-                    "gather run ", k, " exceeds dst: buf_off=", buf_off,
-                    " size=", size, " dst_bytes=", dst_bytes);
+        TORCH_CHECK(buf_off >= 0 && buf_off < dst_bytes,
+                    "gather run ", k, " starts outside dst: buf_off=", buf_off,
+                    " dst_bytes=", dst_bytes);
         for (int64_t done = 0; done < size; done += GPU_WRITE_MAX_IO) {
-            ios.push_back({nullptr, buf_off + done, dev_off + done,
-                           std::min(GPU_WRITE_MAX_IO, size - done)});
+            const int64_t b = buf_off + done;
+            if (b >= dst_bytes) break;   // rest of the run is padding
+            const int64_t chunk = std::min(GPU_WRITE_MAX_IO, size - done);
+            ios.push_back({b, dev_off + done, chunk, std::min(chunk, dst_bytes - b)});
         }
     }
 
@@ -954,7 +965,7 @@ int64_t gather_partitions_nvme_async(
 
             try {
                 run_nvme_parallel(n, [&](size_t i) {
-                    const GpuWriteIo& io = ios[first + i];
+                    const ReadIo& io = ios[first + i];
                     nvme_read(fd, st + stage_off[i], io.dev_off / sector_size, io.size, sector_size);
                 });
             } catch (const std::exception& e) {
@@ -963,11 +974,13 @@ int64_t gather_partitions_nvme_async(
             }
 
             // One copy per span that is contiguous in dst (usually the whole window).
+            // A clipped I/O (copy < size) ends a span: its padding is not copied.
             for (size_t i = 0; i < n;) {
-                int64_t len = ios[first + i].size;
+                int64_t len = ios[first + i].copy;
                 size_t j = i + 1;
-                while (j < n && ios[first + j].buf_off == ios[first + i].buf_off + len) {
-                    len += ios[first + j].size;
+                while (j < n && ios[first + j - 1].copy == ios[first + j - 1].size &&
+                       ios[first + j].buf_off == ios[first + i].buf_off + len) {
+                    len += ios[first + j].copy;
                     ++j;
                 }
                 C10_CUDA_CHECK(cudaMemcpyAsync(dst_raw + ios[first + i].buf_off, st + stage_off[i],
