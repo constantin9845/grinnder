@@ -248,6 +248,10 @@ class FTL:
         self.tensor_table = {}
         self.next_free_lba = 0
 
+        # Bumped on every L2P change; cached per-tensor device LBA arrays
+        # (get_tensor_dev_lbas) are rebuilt when it moved.
+        self._map_version = 0
+
         self._ops = _load_ops()
         self.device_fd = self.open_device(device)
         self.cuFD = self._ops.register_fd(self.device_fd) if self._ops is not None else None
@@ -345,6 +349,7 @@ class FTL:
             raise ValueError(
                 f"Invalid LPN {lpn}")
 
+        self._map_version += 1
         old_ppa = self.l2p.get(lpn)
         new_ppa = self.allocate_page()
 
@@ -414,6 +419,7 @@ class FTL:
                 f"mapped to LPN {existing_lpn}"
             )
 
+        self._map_version += 1
         old_ppa = self.l2p.get(lpn)
 
         if old_ppa is not None:
@@ -435,6 +441,7 @@ class FTL:
 
     def invalidate_lpn(self, lpn):
 
+        self._map_version += 1
         old_ppa = self.l2p.pop(
             lpn,
             None
@@ -916,7 +923,21 @@ class FTL:
     
 
     def get_tensor_dev_lbas(self, file_id):
+        """Device LBA of each page of a tensor, from the current mapping.
+
+        Cached per tensor: the Python walk over every page only runs again
+        after the L2P mapping changed (_map_version).
+        """
         meta = self.tensor_table[file_id]
+        cached = meta.get("_dev_lba_cache")
+        if cached is not None and cached[0] == self._map_version:
+            return cached[1]
+        out = self._walk_tensor_dev_lbas(file_id, meta)
+        out.setflags(write=False)   # shared by all callers
+        meta["_dev_lba_cache"] = (self._map_version, out)
+        return out
+
+    def _walk_tensor_dev_lbas(self, file_id, meta):
         out = np.empty(len(meta["lba_list"]), dtype=np.uint64)
         for i, lba in enumerate(meta["lba_list"]):
             lpn = int(lba) // self.nsec

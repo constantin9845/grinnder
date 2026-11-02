@@ -49,6 +49,23 @@ def _empty_host_tensor(
         return torch.empty(shape, dtype=torch.float32)
 
 
+class PendingRead:
+    """Async SSD -> GPU read: one or more gather jobs, plus an optional step
+    (e.g. summing gradient contributions) that runs once they finished."""
+
+    def __init__(self, ops, jobs: List[Optional[int]], post=None):
+        self._ops = ops
+        self._jobs = [j for j in jobs if j is not None]
+        self._post = post
+
+    def wait(self) -> None:
+        while self._jobs:
+            self._ops.gather_wait(self._jobs.pop(0))
+        post, self._post = self._post, None
+        if post is not None:
+            post()
+
+
 def _empty_pinned_host_cache() -> None:
     """Release cached pinned-host blocks when PyTorch exposes the hook."""
     empty_cache = getattr(torch._C, "_host_emptyCache", None)
@@ -122,16 +139,18 @@ class HostBuffer:
 
         self._ops = _load_ops()
 
-        # pid -> job id of an SSD -> GPU read started by async_read_raw
-        self._pending_reads: Dict[int, int] = {}
+        # pid -> PendingRead of an SSD -> GPU read started by async_read_raw
+        self._pending_reads: Dict[int, "PendingRead"] = {}
 
-        # Gradient buffers (see begin_accumulation): per partition, which rows
-        # already hold data on the SSD this backward pass. Rows not yet written
-        # count as zero, so they are never read.
+        # Gradient buffers (see begin_accumulation). Each source partition's
+        # whole input gradient ([intra | boundary_from_p0 | ...]) is written
+        # once as its own SSD tensor "<prefix>_from<src>". _contrib[src] says
+        # where each destination's rows sit in it:
+        #   dst -> (first row in the blob, number of rows, dst row indices or None)
         self._accumulate = False
-        self._written_rows: List[Optional[np.ndarray]] = [None] * num_parts
-        # (job id, GPU tensor the write reads from) of in-flight row writes
-        self._pending_accum: List[Tuple[int, Tensor]] = []
+        self._contrib: Dict[int, Tuple[str, Dict[int, Tuple[int, int, Optional[Tensor]]]]] = {}
+        # file ids of contribution writes still in flight
+        self._pending_contrib: List[str] = []
 
 
     def __getitem__(self, pid: int) -> Tensor:
@@ -828,18 +847,18 @@ class HostBuffer:
             ftl.device_fd, gpu_src, runs_t, ftl.sector_size, ftl.page_size
         )
 
-    def _ensure_mapped(self, pid: int) -> None:
-        """Give a partition an FTL mapping before anything was written to it."""
-        ftl = self._backend.host_ftl
-        if self._file_id(pid) not in ftl.tensor_table:
-            ftl.map_tensor(
-                self._file_id(pid),
-                torch.empty(
-                    (self.part_sizes[pid], self.embedding_dim),
-                    dtype=torch.float32,
-                    device="meta",
-                ),
-            )
+    def _blob_row_runs(
+        self, file_id: str, first_row: int, n: int, dst_row: int, row_bytes: int
+    ) -> Tensor:
+        """Runs reading rows [first_row, first_row + n) of SSD tensor file_id
+        into rows [dst_row, dst_row + n) of a GPU tensor."""
+        rows = np.arange(first_row, first_row + n, dtype=np.int64)
+        dev_offs = self._backend.host_ftl.get_row_file_offsets(file_id, rows, row_bytes)
+        return self._merge_runs(
+            dev_offs.astype(np.int64),
+            np.arange(dst_row, dst_row + n, dtype=np.int64),
+            row_bytes,
+        )
 
     # ------------------------------------------------------------------
     # Whole partition: SSD -> GPU
@@ -847,61 +866,45 @@ class HostBuffer:
 
     def async_read_raw(
         self, pid: int, gpu_target: Tensor, stream: torch.cuda.Stream, track: bool = True
-    ) -> Optional[int]:
+    ) -> "PendingRead":
         """Read partition pid from the SSD into gpu_target [part_sizes[pid], dim].
 
-        Same path as the forward gather (FTL row offsets, NVMe reads, host
-        staging only). For gradient buffers only rows written this backward
-        pass are read; the rest are zero.
+        Same path as the forward gather (FTL addresses, NVMe reads, host
+        staging only).
+        - Activation buffers: the whole tensor, using its FTL page runs.
+        - Gradient buffers (after begin_accumulation): pid's own contribution
+          plus the rows other partitions wrote for pid, summed on the GPU.
 
         track=True: wait with h2d_synchronize / wait_reads(pid).
-        track=False: the caller waits on the returned job id.
+        track=False: the caller waits on the returned PendingRead.
         """
         assert gpu_target.is_cuda and gpu_target.is_contiguous()
         assert gpu_target.size(0) == self.part_sizes[pid]
-        row_bytes = gpu_target.size(1) * gpu_target.element_size()
 
         self.wait_reads(pid)
         self.wait_storage_writes(pid)
         self.wait_accumulations()
 
+        t0 = time.perf_counter_ns()
+        stream.wait_stream(torch.cuda.current_stream(gpu_target.device))
         if self._accumulate:
-            # Gradient rows (hidden dim): only rows written this backward pass.
-            written = self._written_rows[pid]
-            rows = (
-                np.flatnonzero(written).astype(np.int64)
-                if written is not None
-                else np.empty(0, dtype=np.int64)
-            )
-            need_zero = len(rows) < self.part_sizes[pid]
-            dev_offs = self._segment_dev_offsets([(pid, rows)], row_bytes)
-            runs_t = self._merge_runs(dev_offs, rows, row_bytes)
+            pending = self._read_gradient(pid, gpu_target, stream)
         else:
             # Whole tensor: the FTL's page runs, as written. Works for any row
             # size (e.g. 76-byte logits rows); the last page's padding is
             # read but not copied.
-            rows = np.arange(self.part_sizes[pid], dtype=np.int64)
-            need_zero = False
             runs = self._backend.host_ftl.get_tensor_io_runs(self._file_id(pid))
             runs_t = torch.tensor(runs, dtype=torch.int64).reshape(-1, 3)
-
-        t0 = time.perf_counter_ns()
-        stream.wait_stream(torch.cuda.current_stream(gpu_target.device))
-        with torch.cuda.stream(stream):
-            if need_zero:
-                with torch.no_grad():
-                    gpu_target.zero_()
-            job = self._submit_read(gpu_target, runs_t)
+            with torch.cuda.stream(stream):
+                job = self._submit_read(gpu_target, runs_t)
+            pending = PendingRead(self._ops, [job])
+            print(f"[read_raw] {self._file_id(pid)} runs={runs_t.size(0)}")
         tn = time.perf_counter_ns()
         stat.load_GPU_timestamp("gradient", "copy", t0, tn)
 
-        print(
-            f"[read_raw] {self._file_id(pid)} rows={len(rows)}/{self.part_sizes[pid]} "
-            f"runs={runs_t.size(0)}"
-        )
-        if track and job is not None:
-            self._pending_reads[pid] = job
-        return job
+        if track:
+            self._pending_reads[pid] = pending
+        return pending
 
     def wait_reads(self, pid: Optional[int] = None) -> None:
         """Wait for async_read_raw reads of one partition (or all)."""
@@ -909,22 +912,20 @@ class HostBuffer:
             return
         pids = list(self._pending_reads) if pid is None else [pid]
         for p in pids:
-            job = self._pending_reads.pop(p, None)
-            if job is not None:
-                self._ops.gather_wait(job)
+            pending = self._pending_reads.pop(p, None)
+            if pending is not None:
+                pending.wait()
 
     # ------------------------------------------------------------------
-    # Gradient accumulation on the SSD (GPU add, host only as staging)
+    # Gradients on the SSD: write each contribution once, sum on read
     # ------------------------------------------------------------------
 
     def begin_accumulation(self) -> None:
-        """Start a backward pass for this gradient buffer: every row counts
-        as zero until accumulate_raw first writes it. Mappings are kept."""
+        """Start a backward pass for this gradient buffer. Contributions of
+        the previous pass are forgotten (their FTL mappings are reused)."""
         self.wait_accumulations()
         self._accumulate = True
-        self._written_rows = [
-            np.zeros(self.part_sizes[pid], dtype=bool) for pid in range(self.num_parts)
-        ]
+        self._contrib = {}
 
     def accumulate_raw(
         self,
@@ -933,60 +934,112 @@ class HostBuffer:
         boundaries: List[Optional[Tensor]],
         stream: torch.cuda.Stream,
     ) -> None:
-        """grad[rows] += gpu_grad on the SSD, for the gathered layout of pid
-        ([intra(pid) | boundary_from_p0 | ...], same rows as the gather).
+        """Store partition pid's input gradient (gathered layout
+        [intra(pid) | boundary_from_p0 | ...]) on the SSD as one tensor.
 
-        Reads only rows that already hold data, adds on the GPU, then writes
-        the rows back to their FTL addresses. The write runs in the
-        background; wait_accumulations() / d2h_synchronize() waits for it.
+        No read before the write: the sum per destination partition happens
+        when it is read (_read_gradient). The write runs in the background;
+        wait_accumulations() / d2h_synchronize() waits for it.
         """
         assert self._backend is not None and self._accumulate, (
             "call begin_accumulation() before accumulate_raw()"
         )
         assert gpu_grad.is_cuda and gpu_grad.is_contiguous()
-        row_bytes = gpu_grad.size(1) * gpu_grad.element_size()
 
-        # Earlier accumulations may cover the same rows.
+        # Keep at most one contribution write in flight (bounds GPU memory
+        # held by pending writes); it had the previous partition's whole
+        # backward to finish.
         self.wait_accumulations()
 
-        segments = self._gather_segments(pid, boundaries, gpu_grad.size(0))
-        for i, _ in segments:
-            self._ensure_mapped(i)
-        dev_offs = self._segment_dev_offsets(segments, row_bytes)
-        total_rows = len(dev_offs)
-        assert total_rows == gpu_grad.size(0), (
-            f"Gradient has {gpu_grad.size(0)} rows, layout needs {total_rows}"
+        # Where each destination partition's rows sit in this gradient.
+        segs: Dict[int, Tuple[int, int, Optional[Tensor]]] = {}
+        num_boundary = sum(
+            b.numel() for j, b in enumerate(boundaries) if j != pid and b is not None
         )
-        written = np.concatenate([self._written_rows[i][rows] for i, rows in segments])
-        gpu_rows = np.arange(total_rows, dtype=np.int64)
+        n_intra = gpu_grad.size(0) - num_boundary
+        segs[pid] = (0, n_intra, None)
+        off = n_intra
+        for j in range(self.num_parts):
+            b = boundaries[j]
+            if j != pid and b is not None and b.numel() > 0:
+                segs[j] = (off, b.numel(), b)
+                off += b.numel()
+        assert off == gpu_grad.size(0), (
+            f"Gradient has {gpu_grad.size(0)} rows, layout needs {off}"
+        )
 
+        file_id = f"{self._file_prefix}_from{pid}"
         stream.wait_stream(torch.cuda.current_stream(gpu_grad.device))
-        gpu_grad.record_stream(stream)
-        with torch.cuda.stream(stream), torch.no_grad():
-            if written.any():
-                # Old values of rows already written; the others stay zero.
-                acc = torch.zeros_like(gpu_grad)
-                read_rows = gpu_rows[written]
-                job = self._submit_read(
-                    acc, self._merge_runs(dev_offs[written], read_rows, row_bytes)
-                )
-                if job is not None:
-                    self._ops.gather_wait(job)
-                acc.add_(gpu_grad)
-            else:
-                acc = gpu_grad
-            job = self._submit_write(acc, self._merge_runs(dev_offs, gpu_rows, row_bytes))
-
-        if job is not None:
-            self._pending_accum.append((job, acc))
-        for i, rows in segments:
-            self._written_rows[i][rows] = True
+        # Same write path as forward activations (FTL, mapping reused when
+        # the size matches). The job keeps gpu_grad alive until it is done.
+        self._backend.gpu_write(gpu_grad, file_id, stream, async_=True)
+        self._pending_contrib.append(file_id)
+        self._contrib[pid] = (file_id, segs)
 
     def wait_accumulations(self) -> None:
-        """Wait for all in-flight accumulate_raw writes of this buffer."""
-        while self._pending_accum:
-            job, _ = self._pending_accum.pop(0)
-            self._ops.gpu_write_wait(job)
+        """Wait for in-flight contribution writes of this buffer."""
+        if self._pending_contrib:
+            self._backend.wait_gpu_writes(file_ids=self._pending_contrib)
+            self._pending_contrib = []
+
+    def _read_gradient(
+        self, pid: int, gpu_target: Tensor, stream: torch.cuda.Stream
+    ) -> "PendingRead":
+        """Gradient of partition pid = its own contribution (all its rows)
+        + the boundary rows every other partition wrote for it.
+
+        Own rows are read straight into gpu_target; the other rows are read
+        (contiguous per source) into a staging tensor and index_add-ed into
+        gpu_target once the reads finished (PendingRead.wait)."""
+        row_bytes = gpu_target.size(1) * gpu_target.element_size()
+        own = self._contrib.get(pid)
+        others = [
+            (file_id, segs[pid])
+            for src, (file_id, segs) in self._contrib.items()
+            if src != pid and pid in segs
+        ]
+
+        jobs: List[Optional[int]] = []
+        adds: List[Tuple[Tensor, int, int]] = []   # (dst row indices, staging row, n)
+        with torch.cuda.stream(stream), torch.no_grad():
+            if own is not None:
+                file_id, segs = own
+                first, n, _ = segs[pid]
+                assert n == self.part_sizes[pid]
+                jobs.append(self._submit_read(
+                    gpu_target, self._blob_row_runs(file_id, first, n, 0, row_bytes)
+                ))
+            else:
+                gpu_target.zero_()
+
+            staging = None
+            if others:
+                total = sum(n for _, (_, n, _) in others)
+                staging = torch.empty(
+                    (total, gpu_target.size(1)),
+                    dtype=gpu_target.dtype,
+                    device=gpu_target.device,
+                )
+                runs = []
+                s = 0
+                for file_id, (first, n, idx) in others:
+                    runs.append(self._blob_row_runs(file_id, first, n, s, row_bytes))
+                    adds.append((idx.to(gpu_target.device, torch.long), s, n))
+                    s += n
+                jobs.append(self._submit_read(staging, torch.cat(runs)))
+
+        def post():
+            if not adds:
+                return
+            with torch.cuda.stream(stream), torch.no_grad():
+                for idx, s, n in adds:
+                    gpu_target.index_add_(0, idx, staging[s:s + n])
+
+        print(
+            f"[read_grad] {self._file_prefix}_p{pid} own={'yes' if own else 'no'} "
+            f"from_others={len(others)} rows={sum(n for _, (_, n, _) in others)}"
+        )
+        return PendingRead(self._ops, jobs, post)
 
     # ------------------------------------------------------------------
     # Scatter: one GPU tensor -> multiple host partitions (with accumulation)

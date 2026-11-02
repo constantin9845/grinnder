@@ -44,7 +44,7 @@ class DeviceBuffer:
         self.device = device
 
         # pid -> job id of an async SSD gather into self._tensors[pid]
-        self._pending_gathers: Dict[int, int] = {}
+        self._pending_gathers: Dict[int, object] = {}  # job id or PendingRead
         self._gather_ops = None
 
         # Pre-allocate tensor objects with zero storage (lazy allocation)
@@ -166,20 +166,26 @@ class DeviceBuffer:
         """
         self.wait_gather(pid)
         self.allocate(pid)
-        job = host_buffer.async_read_raw(pid, self._tensors[pid], stream, track=False)
-        if job is not None:
-            self._pending_gathers[pid] = job
-            self._gather_ops = host_buffer._ops
+        # PendingRead: its wait() also runs the GPU step that sums gradient
+        # contributions (on `stream`).
+        self._pending_gathers[pid] = host_buffer.async_read_raw(
+            pid, self._tensors[pid], stream, track=False
+        )
+        self._gather_ops = host_buffer._ops
 
     def wait_gather(self, pid: Optional[int] = None) -> None:
-        """Wait for the async SSD gather of one partition (or all of them)."""
+        """Wait for the async SSD gather/read of one partition (or all of them)."""
         if not self._pending_gathers:
             return
         pids = list(self._pending_gathers) if pid is None else [pid]
         for p in pids:
             job = self._pending_gathers.pop(p, None)
-            if job is not None:
+            if job is None:
+                continue
+            if isinstance(job, int):
                 self._gather_ops.gather_wait(job)
+            else:
+                job.wait()   # PendingRead
 
 
     def storage_to_gpu(
