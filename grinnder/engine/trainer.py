@@ -325,7 +325,13 @@ class Trainer:
             return
         hf = self.host_features[-1]
         if self._is_base():
-            hf.storage_to_cpu("loss", pid)
+            if self._uses_partition_lru():
+                # File -> DRAM, counted in --cache-size until released.
+                self.cache.load_activation_for_upload(
+                    len(self.host_features) - 1, pid, "loss"
+                )
+            else:
+                hf.storage_to_cpu("loss", pid)
             hf.async_upload("loss", pid, gpu_target, stream)
         else:
             hf.storage_to_gpu(phase="loss", pid=pid, gpu_target=gpu_target, stream=stream)
@@ -917,7 +923,9 @@ class Trainer:
             # Free activation
             self.activations[last_layer][pid].untyped_storage().resize_(0)
             if use_bypass:
-                self.host_features[-1].release(pid)
+                self.cache.release_activation_upload(
+                    len(self.host_features) - 1, pid
+                )
 
             if i < len(pids) - 1 and pool_size == 1:
                 next_pid = pids[i + 1]
