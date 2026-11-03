@@ -7,7 +7,7 @@ from GPU back to host partition buffers via boundaries.
 
 from __future__ import annotations
 
-from typing import Any, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 import torch
 from torch import Tensor
@@ -33,8 +33,10 @@ class GradOffload(torch.autograd.Function):
         boundaries: List[Optional[Tensor]],
         d2h_stream: torch.cuda.Stream,
         compute_stream: torch.cuda.Stream,
+        offload_fn: Optional[Callable[..., None]] = None,
     ) -> Tensor:
         ctx.layer_id = layer_id
+        ctx.offload_fn = offload_fn
         ctx.pid = pid
         ctx.host_gradients = host_gradients
         ctx.boundaries = boundaries
@@ -47,19 +49,21 @@ class GradOffload(torch.autograd.Function):
         if ctx.layer_id == 0 or ctx.host_gradients is None:
             # Input features have no previous layer. Stop here so PyTorch does
             # not materialize a large, unused gathered-feature gradient.
-            return None, None, None, None, None, None, None
+            return None, None, None, None, None, None, None, None
 
         # grad_output may not be contiguous from autograd — make it so
         grad_output = grad_output.contiguous()
         ctx.d2h_stream.wait_stream(ctx.compute_stream)
         # ours: write this partition's gradient to the SSD once (FTL), summed
         #       per destination partition when it is read.
-        # base: scatter-add into the DRAM gradient partitions (original).
-        offload = (
-            ctx.host_gradients.accumulate_raw
-            if ctx.host_gradients.uses_ftl
-            else ctx.host_gradients.async_scatter
-        )
+        # base: scatter-add into the DRAM gradient partitions (original), or
+        #       through offload_fn (the partition cache, within --cache-size).
+        if ctx.offload_fn is not None:
+            offload = ctx.offload_fn
+        elif ctx.host_gradients.uses_ftl:
+            offload = ctx.host_gradients.accumulate_raw
+        else:
+            offload = ctx.host_gradients.async_scatter
         offload(
             ctx.pid,
             grad_output,
@@ -69,4 +73,4 @@ class GradOffload(torch.autograd.Function):
 
         # Previous-layer backward is driven explicitly from the host gradient
         # buffer after the scatter completes.
-        return None, None, None, None, None, None, None
+        return None, None, None, None, None, None, None, None

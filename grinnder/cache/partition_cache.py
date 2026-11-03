@@ -158,26 +158,39 @@ class PartitionCache:
             if self._mode == "lru_layer"
             else self._partition_activation_cache_budget
         )
-        # --cache-size (io_mode=base): DRAM limit for cached partitions, as given.
+        # --cache-size (io_mode=base): DRAM limit for cached activation AND
+        # gradient partitions together, as given.
         self._cache_size_bytes = max(0, int(cache_size_bytes))
         if self._cache_size_bytes > 0:
             self._activation_cache_budget = self._cache_size_bytes
             print(
-                f"[cache] DRAM budget for cached partitions: "
-                f"{self._cache_size_bytes / 1024**3:.2f} GB (--cache-size)"
+                f"[cache] DRAM budget for cached partitions (activations + "
+                f"gradients): {self._cache_size_bytes / 1024**3:.2f} GB (--cache-size)"
             )
 
         # Track which layers are currently in host cache (layer-level tracking)
         self._cached_layers: OrderedDict[int, bool] = OrderedDict()
 
-        # Track which (layer, partition) pairs are cached (partition-level tracking)
-        # Used in partition_lru mode
-        self._cached_partitions: OrderedDict[Tuple[int, int], bool] = OrderedDict()
+        # partition_lru: one LRU for everything cached in DRAM.
+        #   (layer, pid)      activation partition
+        #   ("g", layer, pid) gradient partition being accumulated (backward)
+        self._cached_partitions: OrderedDict[Tuple, bool] = OrderedDict()
 
         # Hit/miss counters
         self._hits = 0
         self._misses = 0
         self._resident_activation_bytes = 0
+        # Gradient partitions in DRAM (accumulating + loaded for upload)
+        self._resident_gradient_bytes = 0
+        # (layer, pid) gradient partitions evicted mid-layer: their file holds
+        # the partial sum, so they are reloaded (not zeroed) when needed again.
+        self._spilled_gradients: Set[Tuple[int, int]] = set()
+        # (layer, pid) next-layer gradients loaded only to be uploaded to the
+        # GPU. Counted in the budget, never evicted (the copy may be running).
+        self._upload_gradients: Set[Tuple[int, int]] = set()
+        # Activation keys of the last async gather (DRAM -> GPU may still be
+        # running): not evicted until the copies are waited for.
+        self._inflight_gather_keys: Set[Tuple[int, int]] = set()
 
     @property
     def mode(self) -> str:
@@ -358,18 +371,12 @@ class PartitionCache:
                 self._misses += 1
 
         missing_bytes = sum(self._partition_bytes(layer_id, pid) for _, pid in missing)
-        while (
-            self._resident_activation_bytes + missing_bytes
-            > self._activation_cache_budget
-        ):
-            evict_key = self._pop_evictable_partition(keys)
-            if evict_key is None:
-                raise MemoryError(
-                    f"Cannot make room for layer {layer_id}, partition "
-                    f"{target_pid} dependency set within "
-                    f"{self._activation_cache_budget} bytes"
-                )
-            self._evict_partition(evict_key[0], evict_key[1])
+        if not self._make_room(missing_bytes, keys):
+            raise MemoryError(
+                f"Cannot make room for layer {layer_id}, partition "
+                f"{target_pid} dependency set within "
+                f"{self._activation_cache_budget} bytes"
+            )
 
         # target partition first
         self._cache_tracker.add_partition(layer_id, target_pid, self._partition_bytes(layer_id, target_pid))
@@ -406,24 +413,19 @@ class PartitionCache:
         deps = self._dependency_set(target_pid, boundaries)
         demand = sum(self._partition_bytes(layer_id, p) for p in deps)
 
-        if demand <= self._activation_cache_budget:
+        # Gradients loaded for upload cannot be evicted right now.
+        pinned = sum(self._grad_bytes(l, p) for l, p in self._upload_gradients)
+        if demand <= self._activation_cache_budget - pinned:
             self.ensure_dependencies_in_host(
                 layer_id, target_pid, phase, boundaries=boundaries
             )
             buf.async_gather(phase, target_pid, gpu_target, boundaries, stream)
+            # The copies run after we return: keep these partitions resident.
+            self._inflight_gather_keys = {(layer_id, p) for p in deps}
             return
 
-        # GPU row range of each source partition, in gather layout order.
-        segs = []
-        off = buf.part_sizes[target_pid]
-        segs.append((target_pid, None, 0, off))
-        for j in range(self.num_parts):
-            b = boundaries[j]
-            if j != target_pid and b is not None and b.numel() > 0:
-                segs.append((j, b, off, b.numel()))
-                off += b.numel()
-        assert off == gpu_target.size(0), (
-            f"Gather layout has {off} rows, gpu_target has {gpu_target.size(0)}"
+        segs = self._row_segments(
+            buf.part_sizes, target_pid, boundaries, gpu_target.size(0)
         )
         # Use what is cached before anything gets evicted.
         segs.sort(key=lambda s: (layer_id, s[0]) not in self._cached_partitions)
@@ -448,6 +450,215 @@ class PartitionCache:
                 else:
                     gpu_target[row:row + n].copy_(src.index_select(0, idx))
             stream.synchronize()
+
+    def _row_segments(
+        self,
+        part_sizes: List[int],
+        target_pid: int,
+        boundaries: List[Optional[torch.Tensor]],
+        total_rows: int,
+    ) -> List[Tuple[int, Optional[torch.Tensor], int, int]]:
+        """(src_pid, row indices or None, first GPU row, num rows) of each source
+        partition, in the gather/scatter layout [intra | boundary_from_p0 | ...]."""
+        segs = []
+        off = part_sizes[target_pid]
+        segs.append((target_pid, None, 0, off))
+        for j in range(self.num_parts):
+            b = boundaries[j]
+            if j != target_pid and b is not None and b.numel() > 0:
+                segs.append((j, b, off, b.numel()))
+                off += b.numel()
+        assert off == total_rows, (
+            f"Gather layout has {off} rows, GPU tensor has {total_rows}"
+        )
+        return segs
+
+    # ------------------------------------------------------------------
+    # Gradients (io_mode=base, partition_lru): same budget and LRU as the
+    # activation partitions.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _grad_key(layer_id: int, pid: int) -> Tuple[str, int, int]:
+        return ("g", layer_id, pid)
+
+    def _grad_bytes(self, layer_id: int, pid: int) -> int:
+        return self.grad_buffers[layer_id].partition_nbytes(pid)
+
+    @property
+    def resident_bytes(self) -> int:
+        """DRAM held by cached activation + gradient partitions."""
+        return self._resident_activation_bytes + self._resident_gradient_bytes
+
+    def ensure_gradients_in_host(self, layer_id: int, pids: Set[int]) -> bool:
+        """Make the gradient partitions `pids` of layer_id resident for
+        accumulation, evicting LRU partitions (activations or other gradients)
+        as needed. An evicted gradient partition comes back from its file, a
+        new one starts at zero. Returns False if they cannot all fit."""
+        keys = {self._grad_key(layer_id, p) for p in pids}
+        missing = []
+        for p in sorted(pids):
+            key = self._grad_key(layer_id, p)
+            if key in self._cached_partitions:
+                self._cached_partitions.move_to_end(key)
+                self._hits += 1
+            else:
+                missing.append(p)
+                self._misses += 1
+        need = sum(self._grad_bytes(layer_id, p) for p in missing)
+        if not self._make_room(need, keys):
+            return False
+        buf = self.grad_buffers[layer_id]
+        for p in missing:
+            if (layer_id, p) in self._spilled_gradients:
+                buf.storage_to_cpu("backward", pid=p)
+                self._spilled_gradients.discard((layer_id, p))
+                print(f"[cache] Reloaded gradient partition [Layer = {layer_id} | PID = {p}]")
+            else:
+                buf.zero_partition(p)
+            self._cached_partitions[self._grad_key(layer_id, p)] = True
+            self._resident_gradient_bytes += self._grad_bytes(layer_id, p)
+            self._cache_tracker.add_gradient(layer_id, p, self._grad_bytes(layer_id, p))
+        return True
+
+    def scatter_gradients(
+        self,
+        layer_id: int,
+        pid: int,
+        grad: torch.Tensor,
+        boundaries: List[Optional[torch.Tensor]],
+        stream: torch.cuda.Stream,
+    ) -> None:
+        """Base gradient offload: scatter-add partition pid's input gradient
+        (GPU, layout [intra | boundary_from_p0 | ...]) into the DRAM gradient
+        partitions of layer_id, within the cache budget.
+
+        All destination partitions fit: make them resident, one async C++
+        scatter (original). Otherwise: one destination partition at a time
+        (cached ones first), each made resident (evicting LRU partitions) and
+        added to synchronously.
+        """
+        buf = self.grad_buffers[layer_id]
+        deps = self._dependency_set(pid, boundaries)
+        if self.ensure_gradients_in_host(layer_id, deps):
+            buf.async_scatter(pid, grad, boundaries, stream)
+            return
+
+        segs = self._row_segments(buf.part_sizes, pid, boundaries, grad.size(0))
+        segs.sort(
+            key=lambda s: self._grad_key(layer_id, s[0]) not in self._cached_partitions
+        )
+        demand = sum(self._grad_bytes(layer_id, p) for p in deps)
+        print(
+            f"[cache] layer {layer_id} partition {pid}: gradients need "
+            f"{demand / 1024**3:.2f} GB > budget "
+            f"{self._activation_cache_budget / 1024**3:.2f} GB, accumulating "
+            f"{len(segs)} partitions one at a time"
+        )
+        for src_pid, idx, row, n in segs:
+            if not self.ensure_gradients_in_host(layer_id, {src_pid}):
+                raise MemoryError(
+                    f"Gradient partition [Layer = {layer_id} | PID = {src_pid}] "
+                    f"({self._grad_bytes(layer_id, src_pid)} bytes) does not fit "
+                    f"the {self._activation_cache_budget} byte cache budget"
+                )
+            with torch.cuda.stream(stream), torch.no_grad():
+                rows = grad[row:row + n].cpu()   # blocking
+            dst = buf[src_pid]
+            if idx is None:
+                dst.add_(rows)
+            else:
+                dst.index_add_(0, idx, rows)
+
+    def load_gradient_for_upload(self, layer_id: int, pid: int) -> None:
+        """Load a finished gradient partition (file, else zero) into DRAM so it
+        can be uploaded to the GPU. Counted in the budget and never evicted;
+        free it with release_gradient_upload once the upload is done."""
+        buf = self.grad_buffers[layer_id]
+        nbytes = self._grad_bytes(layer_id, pid)
+        if not self._make_room(nbytes, set()):
+            raise MemoryError(
+                f"Gradient partition [Layer = {layer_id} | PID = {pid}] "
+                f"({nbytes} bytes) does not fit the "
+                f"{self._activation_cache_budget} byte cache budget"
+            )
+        if buf.storage_exists(pid):
+            print(f"[Layer = {layer_id} | PID = {pid}] Gradients move SSD --> CPU")
+            buf.storage_to_cpu("gradient", pid=pid)
+        else:
+            buf.zero_partition(pid)
+        self._upload_gradients.add((layer_id, pid))
+        self._resident_gradient_bytes += nbytes
+        self._cache_tracker.add_gradient(layer_id, pid, nbytes)
+
+    def release_gradient_upload(self, layer_id: int, pid: int) -> None:
+        """Free a gradient partition loaded by load_gradient_for_upload."""
+        self.grad_buffers[layer_id].release(pid)
+        if (layer_id, pid) in self._upload_gradients:
+            self._upload_gradients.discard((layer_id, pid))
+            self._resident_gradient_bytes = max(
+                0, self._resident_gradient_bytes - self._grad_bytes(layer_id, pid)
+            )
+            self._cache_tracker.remove_gradient(layer_id, pid)
+
+    def _evict_gradient(self, layer_id: int, pid: int) -> None:
+        """Spill a partially accumulated gradient partition to its file."""
+        # Scatters into it may still be running on the D2H streams.
+        self._sync_transfers()
+        buf = self.grad_buffers[layer_id]
+        buf.cpu_to_storage(pid)
+        buf.release(pid)
+        self._spilled_gradients.add((layer_id, pid))
+        self._cached_partitions.pop(self._grad_key(layer_id, pid), None)
+        self._resident_gradient_bytes = max(
+            0, self._resident_gradient_bytes - self._grad_bytes(layer_id, pid)
+        )
+        self._cache_tracker.remove_gradient(layer_id, pid)
+        print(f"GRADIENT EVICTED [Layer = {layer_id} | PID = {pid}]")
+
+    def _drop_gradient_entry(self, layer_id: int, pid: int) -> None:
+        """Forget a resident gradient partition (caller freed or flushed it)."""
+        if self._cached_partitions.pop(self._grad_key(layer_id, pid), None) is not None:
+            self._resident_gradient_bytes = max(
+                0, self._resident_gradient_bytes - self._grad_bytes(layer_id, pid)
+            )
+
+    # ------------------------------------------------------------------
+    # Eviction
+    # ------------------------------------------------------------------
+
+    def _make_room(self, need: int, protected: Set[Tuple]) -> bool:
+        """Evict LRU partitions (activations or gradients, not `protected`)
+        until `need` more bytes fit the budget. Partitions of the last async
+        gather are evicted only after waiting for its copies."""
+        while self.resident_bytes + need > self._activation_cache_budget:
+            key = self._pop_evictable_partition(protected | self._inflight_gather_keys)
+            if key is None:
+                if not self._inflight_gather_keys:
+                    return False
+                self._sync_transfers()
+                continue
+            self._evict_key(key)
+        return True
+
+    def _evict_key(self, key: Tuple) -> None:
+        if len(key) == 3:
+            self._evict_gradient(key[1], key[2])
+        else:
+            self._evict_partition(key[0], key[1])
+
+    def _sync_transfers(self) -> None:
+        """Wait for every pending DRAM <-> GPU copy (gathers, scatters, uploads)."""
+        ops = getattr(self.host_buffers[0], "_ops", None) if self.host_buffers else None
+        if ops is not None:
+            for wait in (ops.d2h_synchronize, ops.h2d_synchronize):
+                try:
+                    wait()
+                except RuntimeError:
+                    pass  # nothing pending
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        self._inflight_gather_keys = set()
 
     def on_layer_complete(self, layer_id: int, pids: int) -> None:
         """Called after forward layer completes. Decide what to flush."""
@@ -492,12 +703,18 @@ class PartitionCache:
         """Called after backward layer completes. Flush gradients to storage."""
         if self.grad_buffers[layer_id] is not None:
             if self._mode == "partition_lru":
+                # Resident partitions go to their files now; spilled ones are
+                # already there.
                 for pid in self.grad_buffers[layer_id].allocated_pids():
                     self.grad_buffers[layer_id].cpu_to_storage(pid)
                     self.grad_buffers[layer_id].release(pid)
-                
+
                     print(f"Flushing gradients to SSD [Layer = {layer_id} | Partition = {pid}]\n")
                     self._cache_tracker.remove_gradient(layer_id, pid)
+                    self._drop_gradient_entry(layer_id, pid)
+                self._spilled_gradients = {
+                    k for k in self._spilled_gradients if k[0] != layer_id
+                }
                 return
             self.grad_buffers[layer_id].cpu_to_storage()
 
@@ -605,13 +822,26 @@ class PartitionCache:
             for layer_id in list(self._cached_layers.keys()):
                 self._evict_layer(layer_id)
         elif self._mode == "partition_lru":
-            for layer_id, pid in list(self._cached_partitions.keys()):
-                self._evict_partition(layer_id, pid)
+            self._sync_transfers()
+            for key in list(self._cached_partitions.keys()):
+                if len(key) == 3:
+                    # Leftover gradient: stale for the new epoch, just free it.
+                    self.grad_buffers[key[1]].release(key[2])
+                    self._cache_tracker.remove_gradient(key[1], key[2])
+                else:
+                    self._evict_partition(key[0], key[1])
+            for layer_id, pid in self._upload_gradients:
+                self.grad_buffers[layer_id].release(pid)
+                self._cache_tracker.remove_gradient(layer_id, pid)
         self._cached_layers.clear()
         self._cached_partitions.clear()
         self._hits = 0
         self._misses = 0
         self._resident_activation_bytes = 0
+        self._resident_gradient_bytes = 0
+        self._spilled_gradients.clear()
+        self._upload_gradients.clear()
+        self._inflight_gather_keys = set()
 
     def add_gradient_relay(self, layer, pid):
         self._cache_tracker.add_gradient(layer,pid,self._partition_bytes(layer,pid))

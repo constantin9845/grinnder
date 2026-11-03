@@ -348,20 +348,6 @@ class Trainer:
         """
         if not self._is_base() or self.cache is None:
             return
-        hg = self.host_gradients[layer_id]
-        if hg is not None:
-            for p in hg.allocated_pids():
-                self.cache.add_gradient_relay(layer_id, p)
-            limit = int(self.config.cache_size_gb * (1024**3))
-            used = hg.resident_bytes + self.cache._resident_activation_bytes
-            if limit > 0 and used > limit:
-                print(
-                    f"[cache] WARNING: layer {layer_id} gradients "
-                    f"({hg.resident_bytes / 1024**3:.2f} GB) + cached partitions "
-                    f"({self.cache._resident_activation_bytes / 1024**3:.2f} GB) exceed "
-                    f"--cache-size {limit / 1024**3:.2f} GB (gradients are not "
-                    f"limited by the cache)"
-                )
         t0 = time.perf_counter_ns()
         self.cache.on_backward_layer_complete(layer_id)
         tn = time.perf_counter_ns()
@@ -398,7 +384,7 @@ class Trainer:
                 return
             hg.h2d_synchronize(stream)
             if self._uses_partition_lru():
-                hg.release(pid)
+                self.cache.release_gradient_upload(grad_layer, pid)
         else:
             db = self.device_gradients[grad_layer]
             if db is None:
@@ -413,12 +399,8 @@ class Trainer:
         if grad is None or grad.is_allocated(pid):
             print("Gradients already allocated")
             return
-        if grad.storage_exists(pid):
-            print(f"[Layer = {layer_id} | PID = {pid}] Gradients move SSD --> CPU")
-            grad.storage_to_cpu("gradient", pid)
-            self.cache.add_gradient_relay(layer_id, pid)
-        else:
-            grad.zero_partition(pid)
+        # File (else zero) -> DRAM, counted in --cache-size.
+        self.cache.load_gradient_for_upload(layer_id, pid)
 
     def _prepare_cache_layer(self, layer_id: int) -> None:
         if self.cache is not None and self.cache.mode != "partition_lru":
@@ -795,6 +777,19 @@ class Trainer:
         if self.cache is not None:
             self.cache.on_layer_complete(layer_id, pids)
 
+    def _gradient_offload_fn(self, layer_id: int):
+        """base + partition_lru: scatter gradients through the partition cache
+        so they count against --cache-size (evicted to files when DRAM is
+        short). Otherwise None (GradOffload's default offload)."""
+        if layer_id == 0 or not (self._is_base() and self._uses_partition_lru()):
+            return None
+        cache = self.cache
+
+        def offload(pid, grad, boundaries, stream):
+            cache.scatter_gradients(layer_id, pid, grad, boundaries, stream)
+
+        return offload
+
     def _upoffload_wrapper(self, layer_id: int, pid: int, x: Tensor) -> Tensor:
         """Wrap forward_layer with gradient offload hook.
 
@@ -808,6 +803,7 @@ class Trainer:
             self.graph.boundaries[pid],
             self.streams.d2h[pid % self.config.pool_size],
             self.streams.compute,
+            self._gradient_offload_fn(layer_id),
         )
         # Load adj inside (not passed to checkpoint)
         adj = self._get_adj(pid)
