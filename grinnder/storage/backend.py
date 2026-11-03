@@ -69,6 +69,8 @@ class StorageBackend:
 
         # file_id -> job id of an async GPU write still in flight (ours only)
         self._pending_gpu_writes: Dict[str, int] = {}
+        # base: pinned staging buffers for GPU -> file writes (allocated on first use)
+        self._staging: Optional[list] = None
 
     @property
     def uses_ftl(self) -> bool:
@@ -103,14 +105,8 @@ class StorageBackend:
         assert tensor.is_contiguous(), "gpu_write requires contiguous tensor"
 
         if not self.uses_ftl:
-            # base (original GriNNder): kvikio write of the whole tensor to its
-            # file, synchronous. Run with KVIKIO_COMPAT_MODE=ON under FEMU.
-            if stream is not None:
-                stream.synchronize()
-            t = tensor.detach().contiguous()
-            f = self._kvikio.CuFile(self._path(file_id), "w")
-            f.write(t, file_offset=0)
-            f.close()
+            # base (original GriNNder): whole tensor to its file, synchronous.
+            self._base_gpu_write(tensor, file_id, stream)
             return
 
         # A previous write of this file must land before we overwrite it.
@@ -131,6 +127,45 @@ class StorageBackend:
             job = ftl.gpu_write(meta, tensor, file_id, async_=async_)
         if async_:
             self._pending_gpu_writes[file_id] = job
+
+    # GPU -> file in base mode goes through two reusable pinned buffers of
+    # this size, so host memory use stays fixed (and O_DIRECT keeps the data
+    # out of the page cache).
+    _BASE_STAGING_BYTES = 64 << 20
+
+    def _base_gpu_write(
+        self, tensor: Tensor, file_id: str, stream: Optional[torch.cuda.Stream]
+    ) -> None:
+        stream = stream or torch.cuda.current_stream(tensor.device)
+        stream.synchronize()
+        src = tensor.detach().contiguous().view(-1).view(torch.uint8)
+        nbytes = src.numel()
+        path = self._path(file_id)
+        if nbytes == 0:
+            self.wait(self._io_engine.submit_write(path, src.cpu(), 0, 0))
+            return
+
+        if self._staging is None:
+            # Pinned allocations are page aligned, as O_DIRECT requires.
+            self._staging = [
+                torch.empty(self._BASE_STAGING_BYTES, dtype=torch.uint8, pin_memory=True)
+                for _ in range(2)
+            ]
+        chunk = self._BASE_STAGING_BYTES
+        pending: list = [None, None]
+        for i, off in enumerate(range(0, nbytes, chunk)):
+            slot = i % 2
+            if pending[slot] is not None:
+                self.wait(pending[slot])  # staging buffer free again
+            n = min(chunk, nbytes - off)
+            buf = self._staging[slot]
+            with torch.cuda.stream(stream):
+                buf[:n].copy_(src[off:off + n], non_blocking=True)
+            stream.synchronize()
+            # Chunks start at multiples of 64 MiB, so file offsets stay aligned.
+            pending[slot] = self._io_engine.submit_write(path, buf, off, n)
+        for h in pending:
+            self.wait(h)
 
     def wait_gpu_writes(
         self,

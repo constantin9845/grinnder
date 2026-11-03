@@ -28,6 +28,10 @@ def _load_ops():
         return None
 
 
+# io_uring file I/O uses O_DIRECT, which needs 4 KiB aligned buffers.
+_IO_ALIGN = 4096
+
+
 def _empty_host_tensor(
     rows: int,
     cols: int,
@@ -178,11 +182,20 @@ class HostBuffer:
         """Allocate host storage for partition pid if it is not resident."""
         t = self._tensors[pid]
         expected = self.partition_nbytes(pid)
-        if t.untyped_storage().size() < expected:
-            t.untyped_storage().resize_(expected)
+        storage = t.untyped_storage()
+        if storage.size() < expected:
+            # Extra room so the view can start on a 4 KiB boundary (O_DIRECT).
+            storage.resize_(expected + _IO_ALIGN)
+        # CPU allocations are 64-byte aligned, so this is a whole number of
+        # float32 elements. Storage allocated elsewhere without the extra room
+        # stays at offset 0 (the I/O engine then uses a bounce buffer).
+        pad = (-storage.data_ptr()) % _IO_ALIGN
+        if pad % self._element_size != 0 or pad + expected > storage.size():
+            pad = 0
+        offset = pad // self._element_size
         expected_shape = (self.part_sizes[pid], self.embedding_dim)
-        if tuple(t.shape) != expected_shape:
-            t.set_(t.untyped_storage(), 0, expected_shape, (self.embedding_dim, 1))
+        if tuple(t.shape) != expected_shape or t.storage_offset() != offset:
+            t.set_(storage, offset, expected_shape, (self.embedding_dim, 1))
         return t
 
     def release(self, pid: int) -> None:
