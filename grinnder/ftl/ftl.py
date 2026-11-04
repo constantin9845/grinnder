@@ -240,10 +240,18 @@ class FTL:
             self.total_lpn * self.nsec
         )
 
-        self.l2p = {}
-        self.p2l = {}
-        self.valid = {} # page valid/invalid
+        # Page mapping as flat arrays (a few bytes per page) instead of dicts
+        # of PPA objects (~1.3 KB per page). PPA objects are built on demand
+        # (get_ppa etc.); the I/O paths only need page indices.
+        #   l2p[lpn]          physical page index, -1 = unmapped
+        #   p2l[page_index]   LPN, -1 = none
+        #   valid[page_index] page holds live data
+        idx_dtype = np.int32 if self.total_pages < 2**31 else np.int64
+        self.l2p = np.full(self.total_lpn, -1, dtype=idx_dtype)
+        self.p2l = np.full(self.total_pages, -1, dtype=idx_dtype)
+        self.valid = np.zeros(self.total_pages, dtype=np.bool_)
         self.next_page = 0
+        self._check_ppa_packing()
 
         self.tensor_table = {}
         self.next_free_lba = 0
@@ -279,13 +287,105 @@ class FTL:
 
         return lpn, sec
 
+    # ------------------------------------------------------------------
+    # Array helpers (vectorized mapping, no per-page Python objects)
+    # ------------------------------------------------------------------
+
+    def _pack_ppa(self, page_idx, sec=0):
+        """FEMU 64-bit PPAs of physical page indices (+ sector), vectorized.
+        Same bits as PPA.to_uint64(); checked by _check_ppa_packing()."""
+        x = np.asarray(page_idx, dtype=np.uint64).copy()
+        u = np.uint64
+        ch = x % u(self.nch);  x //= u(self.nch)
+        lun = x % u(self.nlun); x //= u(self.nlun)
+        pl = x % u(self.npl);  x //= u(self.npl)
+        pg = x % u(self.npg);  x //= u(self.npg)
+        blk = x
+        sec = np.asarray(sec, dtype=np.uint64)
+        # Bitfield order of PPA_Bitfield, from the least significant bit.
+        o_pg = BLK_BITS
+        o_sec = o_pg + PG_BITS
+        o_pl = o_sec + SEC_BITS
+        o_lun = o_pl + PL_BITS
+        o_ch = o_lun + LUN_BITS
+        return (
+            blk
+            | (pg << u(o_pg))
+            | (sec << u(o_sec))
+            | (pl << u(o_pl))
+            | (lun << u(o_lun))
+            | (ch << u(o_ch))
+        )
+
+    def _check_ppa_packing(self):
+        samples = sorted({0, 1, self.nch, self.total_pages // 3, self.total_pages - 1})
+        fast = self._pack_ppa(np.array(samples))
+        for i, idx in enumerate(samples):
+            ref = self.page_index_to_ppa(idx).to_uint64()
+            if int(fast[i]) != int(ref):
+                raise RuntimeError(
+                    f"FTL PPA packing mismatch at page {idx}: {int(fast[i]):#x} != {int(ref):#x}"
+                )
+
+    def _lpns_of(self, meta):
+        return (np.asarray(meta["lba_list"], dtype=np.int64) // self.nsec)
+
+    def _write_lpns(self, lpns):
+        """Map each LPN to a fresh physical page (out-of-place, like
+        write_lpn) and invalidate its old page. Returns the page indices."""
+        lpns = np.asarray(lpns, dtype=np.int64)
+        n = lpns.shape[0]
+        if n == 0:
+            return np.empty(0, dtype=np.int64)
+        if lpns.min() < 0 or lpns.max() >= self.total_lpn:
+            raise ValueError(f"Invalid LPN in range {lpns.min()}..{lpns.max()}")
+        if self.next_page + n > self.total_pages:
+            raise RuntimeError(
+                "FTL has no free physical pages. "
+                "GC is not implemented yet."
+            )
+        new = np.arange(self.next_page, self.next_page + n, dtype=np.int64)
+        self.next_page += n
+
+        old = self.l2p[lpns]
+        old = old[old >= 0]
+        if old.size:
+            self.valid[old] = False
+            self.p2l[old] = -1
+        self.l2p[lpns] = new
+        self.p2l[new] = lpns
+        self.valid[new] = True
+        self._map_version += 1
+        return new
+
+    def _invalidate_lpns(self, lpns):
+        lpns = np.asarray(lpns, dtype=np.int64)
+        old = self.l2p[lpns]
+        old = old[old >= 0]
+        if old.size:
+            self.valid[old] = False
+            self.p2l[old] = -1
+        self.l2p[lpns] = -1
+        self._map_version += 1
+
+    def _mapped_pages(self, lpns, what):
+        """Physical page indices of LPNs; error if any is unmapped."""
+        idx = self.l2p[np.asarray(lpns, dtype=np.int64)].astype(np.int64)
+        if idx.size and idx.min() < 0:
+            bad = int(np.asarray(lpns)[np.argmin(idx)])
+            raise RuntimeError(f"LPN {bad} of {what} has no physical mapping")
+        return idx
+
+    # ------------------------------------------------------------------
+
     def get_ppa(self, lpn):
         if lpn < 0 or lpn >= self.total_lpn:
             raise ValueError(
                 f"Invalid LPN {lpn}"
             )
 
-        return self.l2p.get(lpn)
+        idx = int(self.l2p[lpn])
+        return None if idx < 0 else self.page_index_to_ppa(idx)
 
     def get_ppa_for_lba(self, lba):
 
@@ -336,47 +436,17 @@ class FTL:
 
         self.next_page += 1
 
-        ppa = self.page_index_to_ppa(
-            page_index
-        )
-
         self.valid[page_index] = True
 
-        return ppa
+        return self.page_index_to_ppa(page_index)
 
     def write_lpn(self, lpn):
         if lpn < 0 or lpn >= self.total_lpn:
             raise ValueError(
                 f"Invalid LPN {lpn}")
 
-        self._map_version += 1
-        old_ppa = self.l2p.get(lpn)
-        new_ppa = self.allocate_page()
-
-        new_page_index = (
-            new_ppa.get_page_index()
-        )
-
-        if old_ppa is not None:
-
-            old_page_index = (
-                old_ppa.get_page_index()
-            )
-
-            self.valid[old_page_index] = False
-
-            self.p2l.pop(
-                old_page_index,
-                None
-            )
-
-        self.l2p[lpn] = new_ppa
-
-        self.p2l[new_page_index] = lpn
-
-        self.valid[new_page_index] = True
-
-        return new_ppa
+        new_idx = self._write_lpns([lpn])[0]
+        return self.page_index_to_ppa(int(new_idx))
 
     def write_page(self, lpn):
         return self.write_lpn(lpn)
@@ -406,12 +476,10 @@ class FTL:
 
         page_index = ppa.get_page_index()
 
-        existing_lpn = self.p2l.get(
-            page_index
-        )
+        existing_lpn = int(self.p2l[page_index])
 
         if (
-            existing_lpn is not None
+            existing_lpn >= 0
             and existing_lpn != lpn
         ):
             raise ValueError(
@@ -420,48 +488,29 @@ class FTL:
             )
 
         self._map_version += 1
-        old_ppa = self.l2p.get(lpn)
+        old_index = int(self.l2p[lpn])
 
-        if old_ppa is not None:
-
-            old_index = (
-                old_ppa.get_page_index()
-            )
-
+        if old_index >= 0:
             self.valid[old_index] = False
+            self.p2l[old_index] = -1
 
-            self.p2l.pop(
-                old_index,
-                None
-            )
-
-        self.l2p[lpn] = ppa
+        self.l2p[lpn] = page_index
         self.p2l[page_index] = lpn
         self.valid[page_index] = True
 
     def invalidate_lpn(self, lpn):
 
         self._map_version += 1
-        old_ppa = self.l2p.pop(
-            lpn,
-            None
-        )
+        old_index = int(self.l2p[lpn])
 
-        if old_ppa is None:
+        if old_index < 0:
             return None
 
-        page_index = (
-            old_ppa.get_page_index()
-        )
+        self.l2p[lpn] = -1
+        self.valid[old_index] = False
+        self.p2l[old_index] = -1
 
-        self.valid[page_index] = False
-
-        self.p2l.pop(
-            page_index,
-            None
-        )
-
-        return old_ppa
+        return self.page_index_to_ppa(old_index)
 
     def get_lpn(self, ppa):
 
@@ -469,10 +518,8 @@ class FTL:
             ppa.get_page_index()
         )
 
-        return self.p2l.get(
-            page_index,
-            None
-        )
+        lpn = int(self.p2l[page_index])
+        return None if lpn < 0 else lpn
 
     def get_mapping(self, lpn):
 
@@ -491,38 +538,14 @@ class FTL:
         self,
         lba_array: np.ndarray,
     ) -> np.ndarray:
-        lbas = np.asarray(lba_array,dtype=np.uint64)
-
-        result = np.empty(len(lbas),dtype=np.uint64)
-
-        for i, lba in enumerate(lbas):
-
-            lpn = int(lba) // self.nsec
-            sec = int(lba) % self.nsec
-
-            ppa = self.get_ppa(lpn)
-
-            if ppa is None:
-                raise KeyError(
-                    f"LPN {lpn} has no physical mapping"
-                )
-
-            sector_ppa = PPA(
-                [
-                    ppa.ch,
-                    ppa.lun,
-                    ppa.pl,
-                    ppa.blk,
-                    ppa.pg,
-                    sec,
-                    ppa.rsv,
-                ],
-                self.ssd_data,
+        lbas = np.asarray(lba_array, dtype=np.int64)
+        lpns = lbas // self.nsec
+        idx = self.l2p[lpns].astype(np.int64)
+        if idx.size and idx.min() < 0:
+            raise KeyError(
+                f"LPN {int(lpns[np.argmin(idx)])} has no physical mapping"
             )
-
-            result[i] = sector_ppa.to_uint64()
-
-        return result
+        return self._pack_ppa(idx, sec=lbas % self.nsec)
 
     def map_tensor(
         self,
@@ -585,14 +608,12 @@ class FTL:
             dtype=np.uint64,
         )
 
-        dev_lbas = np.empty(pages_needed, dtype=np.uint64)
-        mapped_ppas = np.empty(pages_needed, dtype=np.uint64) 
-
-        for i, lba in enumerate(page_start_lbas):
-            lpn = int(lba) // sectors_per_page
-            ppa = self.write_lpn(lpn)              
-            dev_lbas[i] = ppa.get_index()          
-            mapped_ppas[i] = ppa.to_uint64()
+        # One fresh physical page per LPN (same allocation order as calling
+        # write_lpn page by page). Device LBA of a page = page_index * nsec.
+        lpns = page_start_lbas.astype(np.int64) // sectors_per_page
+        page_idx = self._write_lpns(lpns)
+        dev_lbas = page_idx.astype(np.uint64) * np.uint64(sectors_per_page)
+        mapped_ppas = self._pack_ppa(page_idx)
 
         self.tensor_table[file_id] = {
             "file_id": file_id,
@@ -637,28 +658,8 @@ class FTL:
             )
 
         meta = self.tensor_table[file_id]
-
-        lba_list = meta["lba_list"]
-
-        ppas = np.empty(
-            len(lba_list),
-            dtype=np.uint64
-        )
-
-        for i, lba in enumerate(lba_list):
-
-            lpn = int(lba) // self.nsec
-
-            ppa = self.get_ppa(lpn)
-
-            if ppa is None:
-                raise RuntimeError(
-                    f"LPN {lpn} has no physical mapping"
-                )
-
-            ppas[i] = ppa.to_uint64()
-
-        return ppas
+        idx = self._mapped_pages(self._lpns_of(meta), f"'{file_id}'")
+        return self._pack_ppa(idx)
 
     def get_boundary_row_info(
         self,
@@ -729,14 +730,7 @@ class FTL:
         meta = self.tensor_table[file_id]
 
         # Invalidate every LPN belonging to this tensor.
-        for lba in meta["lba_list"]:
-
-            lpn = (
-                int(lba)
-                // self.nsec
-            )
-
-            self.invalidate_lpn(lpn)
+        self._invalidate_lpns(self._lpns_of(meta))
 
         del self.tensor_table[file_id]
 
@@ -844,21 +838,13 @@ class FTL:
 
     def stats(self):
 
-        mapped_pages = len(
-            self.l2p
-        )
+        mapped_pages = int(np.count_nonzero(self.l2p >= 0))
 
-        valid_pages = sum(
-            1
-            for value in self.valid.values()
-            if value
-        )
+        valid_pages = int(np.count_nonzero(self.valid))
 
-        invalid_pages = sum(
-            1
-            for value in self.valid.values()
-            if not value
-        )
+        # Pages handed out (below next_page) whose data was overwritten or
+        # deleted; GC would reclaim these.
+        invalid_pages = int(np.count_nonzero(~self.valid[: self.next_page]))
 
         free_pages = (
             self.total_pages
@@ -925,8 +911,8 @@ class FTL:
     def get_tensor_dev_lbas(self, file_id):
         """Device LBA of each page of a tensor, from the current mapping.
 
-        Cached per tensor: the Python walk over every page only runs again
-        after the L2P mapping changed (_map_version).
+        Cached per tensor: recomputed only after the L2P mapping changed
+        (_map_version).
         """
         meta = self.tensor_table[file_id]
         cached = meta.get("_dev_lba_cache")
@@ -938,14 +924,10 @@ class FTL:
         return out
 
     def _walk_tensor_dev_lbas(self, file_id, meta):
-        out = np.empty(len(meta["lba_list"]), dtype=np.uint64)
-        for i, lba in enumerate(meta["lba_list"]):
-            lpn = int(lba) // self.nsec
-            ppa = self.get_ppa(lpn)
-            if ppa is None:
-                raise RuntimeError(f"LPN {lpn} of '{file_id}' has no physical mapping")
-            out[i] = ppa.get_index()
-        return out
+        # Device LBA of a page = physical page index * sectors per page
+        # (PPA.get_index() with sec = 0).
+        idx = self._mapped_pages(self._lpns_of(meta), f"'{file_id}'")
+        return idx.astype(np.uint64) * np.uint64(self.nsec)
 
     def get_tensor_io_runs(self, file_id):
         return self._build_io_runs(self.get_tensor_dev_lbas(file_id))
