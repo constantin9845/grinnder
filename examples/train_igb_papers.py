@@ -165,17 +165,10 @@ def main():
         type=int,
         default=get_default_partitioner_threads(),
     )
-    parser.add_argument(
-        "--sparse",
-        type=int,
-        default=0,
-        help="Sparsify graph to reduce partition dependencies.",
-    )
     args = parser.parse_args()
 
     fix_seed(args.seed)
     device = args.device
-    sp = args.sparse
 
     # ---- Load dataset ----
     print(f"\n\nLoading ogbn-papers100M dataset from {args.ogb_root}...")

@@ -16,7 +16,7 @@ import os
 from torch import Tensor
 
 from grinnder.storage.backend import StorageBackend
-from grinnder.stats import stat
+from grinnder.stats import stat, timed
 
 
 def _load_ops():
@@ -274,6 +274,7 @@ class HostBuffer:
                 self._tensors[pid].copy_(gpu_data, non_blocking=True)
         self._zero_initialized[pid] = True
 
+    @timed("transfer")
     def d2h_synchronize(self, stream: torch.cuda.Stream) -> None:
         """Wait for D2H operations to complete.
 
@@ -294,6 +295,7 @@ class HostBuffer:
     # Host -> GPU (H2D)
     # ------------------------------------------------------------------
 
+    @timed("transfer")
     def async_upload(
         self, phase, pid: int, gpu_target: Tensor, stream: torch.cuda.Stream
     ) -> None:
@@ -324,6 +326,7 @@ class HostBuffer:
 
 
 
+    @timed("transfer")
     def h2d_synchronize(
         self, stream: torch.cuda.Stream, pid: Optional[int] = None
     ) -> None:
@@ -346,6 +349,7 @@ class HostBuffer:
     # Gather: multiple host partitions -> one GPU tensor
     # ------------------------------------------------------------------
 
+    @timed("transfer")
     def async_gather(
         self,
         phase,
@@ -881,6 +885,7 @@ class HostBuffer:
     # Whole partition: SSD -> GPU
     # ------------------------------------------------------------------
 
+    @timed("ssd")
     def async_read_raw(
         self, pid: int, gpu_target: Tensor, stream: torch.cuda.Stream, track: bool = True
     ) -> "PendingRead":
@@ -923,6 +928,7 @@ class HostBuffer:
             self._pending_reads[pid] = pending
         return pending
 
+    @timed("ssd")
     def wait_reads(self, pid: Optional[int] = None) -> None:
         """Wait for async_read_raw reads of one partition (or all)."""
         if not self._pending_reads:
@@ -993,6 +999,7 @@ class HostBuffer:
         self._pending_contrib.append(file_id)
         self._contrib[pid] = (file_id, segs)
 
+    @timed("ssd")
     def wait_accumulations(self) -> None:
         """Wait for in-flight contribution writes of this buffer."""
         if self._pending_contrib:
@@ -1062,6 +1069,7 @@ class HostBuffer:
     # Scatter: one GPU tensor -> multiple host partitions (with accumulation)
     # ------------------------------------------------------------------
 
+    @timed("transfer")
     def async_scatter(
         self,
         pid: int,

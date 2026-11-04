@@ -3,6 +3,8 @@ from typing import List
 import json
 from itertools import zip_longest
 
+from grinnder.stats.breakdown import TimeBreakdown
+
 class Stat:
     def __init__(self):
         self.running: bool = False
@@ -57,7 +59,15 @@ class Stat:
 
         # determine at gather step
         # compare across different numbers of partitions
-        self.actual_partition_size: List[float] = [] 
+        self.actual_partition_size: List[float] = []
+
+        # Per-epoch split of training time: SSD access / data movement /
+        # compute / other (see breakdown.py).
+        self.breakdown = TimeBreakdown()
+
+    def timed(self, category: str):
+        """with stat.timed("ssd" | "transfer" | "compute"): ..."""
+        return self.breakdown.timed(category)
 
 
     def started(self):
@@ -654,3 +664,19 @@ class Stat:
         plt.show()
 
 stat = Stat()
+
+
+def timed(category: str):
+    """Decorator: the call's time counts for `category` in the epoch time
+    breakdown ("ssd", "transfer" or "compute"; nested timers win)."""
+    import functools
+
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            with stat.breakdown.timed(category):
+                return fn(*args, **kwargs)
+
+        return wrapper
+
+    return deco

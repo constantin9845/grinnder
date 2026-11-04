@@ -3,18 +3,33 @@
 Same pipeline as train_igb_metis.py (METIS partitioning, same flags, same
 output), only the dataset differs.
 
-On first run the OGB dataset is downloaded (~57GB of features) and converted
-once into plain .npy files under <ogb_root>/ogbn_papers100M/grinnder_npy/.
-Later runs mmap those files, so features are not held in RAM, matching how
-IGB is loaded. The one-time conversion needs ~100GB of RAM.
+Data preparation (one-time, cached under <ogb_root>/ogbn_papers100M/grinnder_npy/):
+  1. The OGB dataset is downloaded (~57GB of features) and converted into
+     plain .npy files (~100GB RAM).
+  2. The edges are made undirected: both directions, duplicates and
+     self-loops removed (~3.2B edges, ~60GB RAM). GCN normalization and METIS
+     both assume an undirected graph; --no-undirected keeps the raw directed
+     citations instead.
+Features and edges are mmap-ed afterwards, not held in RAM.
+
+Partitioning needs far more memory than training (~250GB peak for the
+undirected graph), so it can run separately with --preprocess_only on a
+machine with enough RAM. It saves the partition cache; the training run (with
+the same --num_parts / --undirected) then loads it instead of partitioning.
+It also prints the SSD space a training epoch needs.
+
+Defaults (--num_parts 128, --hidden 128) keep partitions GPU-sized and the
+per-epoch SSD footprint under ~400GB (base). Hidden 256 needs ~590GB.
 
 Usage:
-  python examples/train_igb_metis_papers.py --ogb_root data/ogb_datasets --num_parts 128
-  python examples/train_igb_metis_papers.py --ogb_root data/ogb_datasets --mode hongtu
-  python examples/train_igb_metis_papers.py --ogb_root data/ogb_datasets --cache_mode lru_layer --storage_dir /pci5_nvme/grinnder
+  # big-memory machine: prepare data + partition, no GPU training
+  python examples/train_igb_metis_papers.py --ogb_root data/ogb_datasets --preprocess_only
+  # training VM: copy <ogb_root>/ogbn_papers100M/grinnder_npy and the partition cache, then
+  python examples/train_igb_metis_papers.py --ogb_root data/ogb_datasets --io_mode base --cache-size 16GB
 """
 
 import argparse
+import os
 import statistics
 import time
 from pathlib import Path
@@ -65,11 +80,61 @@ def _convert_papers100m_to_npy(root: Path, out_dir: Path, download: bool, confir
     np.save(out_dir / "node_feat.npy", graph["node_feat"])
 
 
+def _make_undirected(npy_dir: Path, num_nodes: int) -> None:
+    """edge_index.npy (directed) -> edge_index_undirected.npy.
+
+    Every edge in both directions, duplicates and self-loops removed (the
+    partitioner adds exactly one self-loop per node). Works on one int64 key
+    per edge (src * N + dst), sorted in place: peak RAM ~ 2 x 8 bytes per
+    undirected edge (~55GB for papers100M).
+    """
+    src_path = npy_dir / "edge_index.npy"
+    out_path = npy_dir / "edge_index_undirected.npy"
+    print(f"  Making edges undirected (one-time) -> {out_path}")
+    ei = np.load(src_path, mmap_mode="r")
+    e = ei.shape[1]
+    n = np.int64(num_nodes)  # N^2 < 2^63 for N = 111M
+    step = 100_000_000
+
+    keys = np.empty(2 * e, dtype=np.int64)
+    for s in range(0, e, step):
+        t = min(s + step, e)
+        src = np.asarray(ei[0, s:t], dtype=np.int64)
+        dst = np.asarray(ei[1, s:t], dtype=np.int64)
+        keys[s:t] = src * n + dst
+        keys[e + s:e + t] = dst * n + src
+    del ei
+    keys.sort()
+
+    # Keep the first of each run of equal keys, and drop self-loops
+    # (v * N + v = v * (N + 1): exactly the multiples of N + 1 below N^2).
+    keep = np.empty(keys.shape[0], dtype=bool)
+    keep[0] = True
+    np.not_equal(keys[1:], keys[:-1], out=keep[1:])
+    for s in range(0, keys.shape[0], step):
+        keep[s:s + step] &= (keys[s:s + step] % (n + 1)) != 0
+    keys = keys[keep]
+    del keep
+
+    m = keys.shape[0]
+    tmp_path = out_path.with_suffix(".tmp.npy")
+    out = np.lib.format.open_memmap(tmp_path, mode="w+", dtype=np.int64, shape=(2, m))
+    for s in range(0, m, step):
+        k = keys[s:s + step]
+        out[0, s:s + step] = k // n
+        out[1, s:s + step] = k % n
+    out.flush()
+    del out
+    os.replace(tmp_path, out_path)
+    print(f"  {e:,} directed edges -> {m:,} undirected (both directions stored)")
+
+
 def load_papers100m(
     root: str,
     mmap_features: bool = True,
     download: bool = True,
     confirm_download: bool = False,
+    undirected: bool = True,
 ) -> Data:
     """Load ogbn-papers100M in the same form load_igb() returns."""
     root_path = Path(root)
@@ -80,9 +145,15 @@ def load_papers100m(
     feat = np.load(npy_dir / "node_feat.npy", mmap_mode="r" if mmap_features else None)
     num_nodes = feat.shape[0]
 
+    edge_file = npy_dir / ("edge_index_undirected.npy" if undirected else "edge_index.npy")
+    if undirected and not edge_file.is_file():
+        _make_undirected(npy_dir, num_nodes)
+
     x = NumpyFeatureStore(feat) if mmap_features else torch.from_numpy(np.asarray(feat)).float()
     y = torch.from_numpy(np.load(npy_dir / "labels.npy")).long()
-    edge_index = torch.from_numpy(np.load(npy_dir / "edge_index.npy")).long().contiguous()
+    # mmap (copy-on-write) instead of loading 26-52GB: partitioning makes its
+    # own copies, and loading a cached partition only needs the edge count.
+    edge_index = torch.from_numpy(np.load(edge_file, mmap_mode="c"))
 
     masks = []
     for name in ("train_idx.npy", "valid_idx.npy", "test_idx.npy"):
@@ -139,12 +210,19 @@ def main():
     parser.add_argument("--confirm_download", action="store_true",
                         help="Skip OGB's interactive prompt for the large download")
     parser.add_argument("--num_classes", type=int, default=PAPERS_NUM_CLASSES, choices=[PAPERS_NUM_CLASSES])
+    parser.add_argument("--undirected", action=argparse.BooleanOptionalAction, default=True,
+                        help="Train on the undirected graph (standard for papers100M). "
+                             "--no-undirected uses the raw directed citations.")
+    parser.add_argument("--preprocess_only", action="store_true",
+                        help="Prepare data and partition (saving the partition cache), then exit "
+                             "without training. Run where enough RAM is available.")
     parser.add_argument("--mode", type=str, default="grinnder", choices=["hongtu", "grinnder"])
-    parser.add_argument("--num_parts", type=int, default=32)
+    parser.add_argument("--num_parts", type=int, default=128)
     parser.add_argument("--cache_mode", type=str, default="partition_lru",
                         choices=["auto", "lru_layer", "partition_lru"])
     parser.add_argument("--model", type=str, default="gcn", choices=["gcn", "gat"])
-    parser.add_argument("--hidden", type=int, default=256)
+    parser.add_argument("--hidden", type=int, default=128,
+                        help="Hidden size. 128 keeps a base epoch at ~360GB of SSD; 256 needs ~590GB.")
     parser.add_argument("--num_layers", type=int, default=3)
     parser.add_argument("--heads", type=int, default=1, help="GAT attention heads")
     parser.add_argument("--epochs", type=int, default=1)
@@ -162,8 +240,6 @@ def main():
     parser.add_argument("--materialize_features", action="store_true",
                         help="Load the full feature matrix into RAM instead of using mmap")
     
-    parser.add_argument("--sparse", type=int, default=0,
-                        help="Sparsify graph to reduce partition dependencies.")
     parser.add_argument("--io_mode", "--io-mode", dest="io_mode", type=str, default="ours",
                         choices=["base", "ours"],
                         help="ours: host FTL, targeted rows SSD<->GPU. "
@@ -171,7 +247,11 @@ def main():
     parser.add_argument("--cache-size", "--cache_size", dest="cache_size", type=str, default=None,
                         help="Base only: DRAM limit for the partition cache, e.g. 16GB, 512MB, 16 "
                              "(GB). Default: available memory minus safety margin.")
+    parser.add_argument("--breakdown_json", type=str, default="time_breakdown.json",
+                        help="Where to save the per-epoch time breakdown (SSD / data movement / compute).")
     args = parser.parse_args()
+    if args.preprocess_only and (args.no_save_partition_cache or not args.partition_cache_dir):
+        parser.error("--preprocess_only needs the partition cache to be saved")
     cache_size_gb = parse_size_gb(args.cache_size) if args.cache_size else 0.0
     if args.io_mode == "base" and args.cache_mode != "partition_lru":
         print(f"io_mode=base uses cache_mode=partition_lru (was {args.cache_mode})")
@@ -179,7 +259,6 @@ def main():
 
     fix_seed(args.seed)
     device = args.device
-    sp = args.sparse
 
     # ---- Load dataset ----
     print(f"\n\nLoading ogbn-papers100M dataset from {args.ogb_root}...")
@@ -189,6 +268,7 @@ def main():
         mmap_features=not args.materialize_features,
         download=args.download,
         confirm_download=args.confirm_download,
+        undirected=args.undirected,
     )
     t_load = time.time() - t0
     print(f"  Loaded in {t_load:.1f}s")
@@ -236,11 +316,11 @@ def main():
     if args.partition_cache_dir:
         cache_path = (
             Path(args.partition_cache_dir)
-            / f"ogbn_papers100m_grinnder_{args.num_parts}p.pt"
+            / f"ogbn_papers100m_{'undirected' if args.undirected else 'directed'}"
+              f"_grinnder_{args.num_parts}p.pt"
         )
     t0 = time.time()
     graph = build_partitioned_graph_metis(
-        sparse=sp,
         edge_index=data.edge_index,
         x=data.x,
         y=data.y,
@@ -295,6 +375,28 @@ def main():
             
         print("=" * 80)
 
+    # ---- SSD space per epoch ----
+    # base: input features + every layer output + gradients of the hidden layers.
+    # ours: gradients are stored per source partition including its boundary
+    #       rows, so they scale with the overlap ratio r = sum(expanded) / N.
+    n_nodes = graph.num_nodes
+    r = sum(graph.expanded_sizes) / n_nodes
+    out_dims = [args.hidden] * (args.num_layers - 1) + [graph.num_classes]
+    hidden_dims = out_dims[:-1]
+    to_gb = lambda nbytes: nbytes / 1e9
+    act_bytes = 4 * n_nodes * (graph.feat_dim + sum(out_dims))
+    base_bytes = act_bytes + 4 * n_nodes * sum(hidden_dims)
+    ours_bytes = act_bytes + 4 * sum(graph.expanded_sizes) * sum(hidden_dims)
+    print(
+        f"\nOverlap ratio r = {r:.2f} (expanded partition rows / nodes)\n"
+        f"SSD needed per epoch (hidden {args.hidden}, {args.num_layers} layers): "
+        f"base ~{to_gb(base_bytes):.0f} GB, ours ~{to_gb(ours_bytes):.0f} GB"
+    )
+
+    if args.preprocess_only:
+        print(f"\nPreprocessing done. Partition cache: {cache_path}")
+        return
+
     # Free original metadata container; graph keeps an mmap-backed feature source.
     del data
     torch.cuda.empty_cache()
@@ -340,6 +442,7 @@ def main():
         epoch_times.append(t_epoch)
 
         stat.print_timeline()
+        stat.breakdown.print_epoch(title=f"epoch {epoch}")
         print(f"Epoch Time = {t_epoch}")
         
 
@@ -361,6 +464,10 @@ def main():
     )
     print(f"Best Val: {best_val:.2%} | Best Test: {best_test:.2%}")
     print(f"\n{report_memory('Final')}")
+
+    stat.breakdown.print_summary()
+    stat.breakdown.save(args.breakdown_json)
+    print(f"Time breakdown saved to {args.breakdown_json}")
 
 
 if __name__ == "__main__":

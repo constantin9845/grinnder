@@ -26,6 +26,7 @@ from torch import Tensor
 from torch.autograd.graph import saved_tensors_hooks
 
 from grinnder.buffer.device import DeviceBuffer
+from grinnder.stats import stat
 
 
 class HongtuCheckpoint(saved_tensors_hooks):
@@ -39,12 +40,14 @@ class HongtuCheckpoint(saved_tensors_hooks):
 
     def __init__(self, pid: int, device_buffer: DeviceBuffer):
         def pack(tensor: Tensor):
-            return (tensor.device, tensor.cpu(), device_buffer)
+            with stat.timed("transfer"):  # snapshot GPU -> host
+                return (tensor.device, tensor.cpu(), device_buffer)
 
         def unpack(packed):
             device, cpu_tensor, dbuf = packed
             dbuf.allocate(pid)
-            dbuf[pid].copy_(cpu_tensor)
+            with stat.timed("transfer"):  # snapshot host -> GPU
+                dbuf[pid].copy_(cpu_tensor)
             return dbuf[pid]
 
         super().__init__(pack, unpack)

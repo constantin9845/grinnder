@@ -12,6 +12,7 @@ import torch
 from torch import Tensor
 
 from grinnder.buffer.host import HostBuffer
+from grinnder.stats import timed
 
 
 class DeviceBuffer:
@@ -134,6 +135,7 @@ class DeviceBuffer:
             self.allocate(pid)
             host_buffer.async_gather_direct(phase, fds, pid, self._tensors[pid], boundaries, stream)
 
+    @timed("ssd")
     def async_gather_direct_raw(
             self,
             phase,
@@ -156,6 +158,7 @@ class DeviceBuffer:
                 self._pending_gathers[pid] = job
                 self._gather_ops = host_buffer._ops
 
+    @timed("ssd")
     def async_read_raw(
         self, pid: int, host_buffer: HostBuffer, stream: torch.cuda.Stream
     ) -> None:
@@ -173,6 +176,7 @@ class DeviceBuffer:
         )
         self._gather_ops = host_buffer._ops
 
+    @timed("ssd")
     def wait_gather(self, pid: Optional[int] = None) -> None:
         """Wait for the async SSD gather/read of one partition (or all of them)."""
         if not self._pending_gathers:
@@ -203,6 +207,7 @@ class DeviceBuffer:
             self.allocate(pid)
             host_buffer.storage_to_gpu(phase, pid, gpu_target, stream)
 
+    @timed("transfer")
     def h2d_synchronize(self, stream: torch.cuda.Stream) -> None:
         """Wait for H2D operations to complete.
 

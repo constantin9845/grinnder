@@ -17,7 +17,7 @@ import torch
 from torch import Tensor
 
 from grinnder.utils import ensure_dir
-from grinnder.stats import stat
+from grinnder.stats import stat, timed
 from grinnder.ftl import FTL
 
 
@@ -83,6 +83,7 @@ class StorageBackend:
     # GPU <-> Storage (kvikio / GPUDirect Storage)
     # ------------------------------------------------------------------
 
+    @timed("ssd")
     def gpu_write(
         self,
         tensor: Tensor,
@@ -159,14 +160,16 @@ class StorageBackend:
                 self.wait(pending[slot])  # staging buffer free again
             n = min(chunk, nbytes - off)
             buf = self._staging[slot]
-            with torch.cuda.stream(stream):
-                buf[:n].copy_(src[off:off + n], non_blocking=True)
-            stream.synchronize()
+            with stat.timed("transfer"):  # GPU -> pinned staging
+                with torch.cuda.stream(stream):
+                    buf[:n].copy_(src[off:off + n], non_blocking=True)
+                stream.synchronize()
             # Chunks start at multiples of 64 MiB, so file offsets stay aligned.
             pending[slot] = self._io_engine.submit_write(path, buf, off, n)
         for h in pending:
             self.wait(h)
 
+    @timed("ssd")
     def wait_gpu_writes(
         self,
         file_ids: Optional[Iterable[str]] = None,
@@ -262,6 +265,7 @@ class StorageBackend:
     # Host <-> Storage : used for initial storage of partitioned graph features
     # --------------------------------------------------------------------------
 
+    @timed("ssd")
     def host_write(self, tensor: Tensor, file_id: str, async_: bool = True) -> Optional[int]:
         """Write a CPU tensor to storage.
 
@@ -285,6 +289,7 @@ class StorageBackend:
         return None
 
 
+    @timed("ssd")
     def host_read(self, file_id: str, tensor: Tensor, async_: bool = True) -> int:
         """Read a file into a CPU tensor via io_uring (base mode).
 
@@ -300,11 +305,13 @@ class StorageBackend:
             path, tensor, 0, tensor.numel() * tensor.element_size()
         )
 
+    @timed("ssd")
     def wait(self, handle: Optional[int]) -> None:
         """Wait for an async io_uring operation to complete (None: nothing to wait)."""
         if handle is not None:
             self._io_engine.wait(handle)
 
+    @timed("ssd")
     def wait_all(self) -> None:
         """Wait for all pending io_uring operations."""
         self._io_engine.wait_all()

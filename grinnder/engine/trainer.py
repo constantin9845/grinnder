@@ -426,16 +426,17 @@ class Trainer:
         from torch_sparse import SparseTensor
 
         rowptr, col, value = self.graph.adj_csr[pid]
-        return SparseTensor(
-            rowptr=rowptr.to(self.device),
-            col=col.to(self.device),
-            value=value.to(self.device) if value is not None else None,
-            sparse_sizes=(
-                self.graph.partition_sizes[pid],
-                self.graph.expanded_sizes[pid],
-            ),
-            is_sorted=True,
-        )
+        with stat.timed("transfer"):  # adjacency host -> GPU
+            return SparseTensor(
+                rowptr=rowptr.to(self.device),
+                col=col.to(self.device),
+                value=value.to(self.device) if value is not None else None,
+                sparse_sizes=(
+                    self.graph.partition_sizes[pid],
+                    self.graph.expanded_sizes[pid],
+                ),
+                is_sorted=True,
+            )
 
     # ==================================================================
     # Public API
@@ -480,12 +481,15 @@ class Trainer:
         if self._use_single_partition_fast_path():
             return self._train_single_partition_fast_path(optimizer)
 
+        bd = stat.breakdown
+        bd.begin_epoch()
         self.reset_epoch()
         optimizer.zero_grad()
 
         stat.start()
 
         # Phase 1: Layer-wise forward
+        bd.set_phase("forward")
         for layer_id in range(self.model.num_layers):
             self._progress(f"FORWARD LAYER {layer_id + 1}/{self.model.num_layers} START")
             self.cache.cache_tracker_print()
@@ -498,6 +502,7 @@ class Trainer:
 
         # Phase 2: compute per-partition losses. In bypass modes the final
         # activations are loaded from storage one partition at a time.
+        bd.set_phase("loss")
         self._progress("LOSS START")
         self.cache.cache_tracker_print()
         stat.start_loss()
@@ -510,6 +515,7 @@ class Trainer:
 
         # Phase 3: Layer-wise backward (reverse)
         # Losses are sum-reduced per partition. Backward accumulates gradients.
+        bd.set_phase("backward")
         self._progress(f"BACKWARD LAYER {self.model.num_layers}/{self.model.num_layers} START")
         self.cache.cache_tracker_print()
         stat.start_backward()
@@ -534,17 +540,21 @@ class Trainer:
 
         # Scale gradients by 1/total_train_nodes for mean reduction
         # (equivalent to CrossEntropyLoss(reduction='mean') over all nodes)
+        bd.set_phase("optimizer")
         n_total_train = metrics.get("_n_train", 1)
-        if n_total_train > 0:
-            for param in self.model.parameters():
-                if param.grad is not None:
-                    param.grad.div_(n_total_train)
+        with stat.timed("compute"):
+            if n_total_train > 0:
+                for param in self.model.parameters():
+                    if param.grad is not None:
+                        param.grad.div_(n_total_train)
 
-        # Phase 4: Weight update
-        self._progress("optimizer step start")
-        optimizer.step()
-        self._progress("optimizer step done")
+            # Phase 4: Weight update
+            self._progress("optimizer step start")
+            optimizer.step()
+            torch.cuda.synchronize(self.device)
+            self._progress("optimizer step done")
 
+        bd.end_epoch()
         return metrics
 
     @torch.no_grad()
@@ -681,24 +691,29 @@ class Trainer:
                 # saved_tensors_hooks wraps checkpoint(fn, x).
                 # checkpoint only saves x. adj loaded inside fn (not passed).
                 t00 = time.perf_counter_ns()
-                if self.config.mode == "hongtu":
-                    with HongtuCheckpoint(pid, self.device_features[layer_id]):
-                        out = checkpoint(
-                            self._upoffload_wrapper,
-                            layer_id, pid, x,
-                            use_reentrant=True,
-                        )
-                else:  # grinnder
-                    with ScatteredCheckpoint(
-                        pid,
-                        self.device_features[layer_id],
-                        self.streams.act_h2d[pool_idx],
-                    ):
-                        out = checkpoint(
-                            self._upoffload_wrapper,
-                            layer_id, pid, x,
-                            use_reentrant=True,
-                        )
+                with stat.timed("compute"):
+                    if self.config.mode == "hongtu":
+                        with HongtuCheckpoint(pid, self.device_features[layer_id]):
+                            out = checkpoint(
+                                self._upoffload_wrapper,
+                                layer_id, pid, x,
+                                use_reentrant=True,
+                            )
+                    else:  # grinnder
+                        with ScatteredCheckpoint(
+                            pid,
+                            self.device_features[layer_id],
+                            self.streams.act_h2d[pool_idx],
+                        ):
+                            out = checkpoint(
+                                self._upoffload_wrapper,
+                                layer_id, pid, x,
+                                use_reentrant=True,
+                            )
+                    # Kernels run asynchronously: wait here so their time is
+                    # counted as compute (the next partition's prefetch is
+                    # already queued on its own stream and keeps running).
+                    self.streams.compute.synchronize()
                 tn = time.perf_counter_ns()
                 stat.compute_timestamp("forward", t00, tn)
 
@@ -888,37 +903,39 @@ class Trainer:
                 print(f"LOSS : load partition [{next_pid}] [CPU --> GPU]")
 
             # Get masks and labels
-            y = self.graph.partition_labels(pid).to(self.device)
+            with stat.timed("transfer"):
+                y = self.graph.partition_labels(pid).to(self.device)
             train_mask = self.graph.partition_train_mask(pid)
             val_mask = self.graph.partition_val_mask(pid)
             test_mask = self.graph.partition_test_mask(pid)
             out = self.activations[last_layer][pid]
 
-            # Compute loss with sum reduction for partition-invariant gradients.
-            # Each partition contributes sum(losses) / total_train_nodes.
-            # This ensures identical gradients regardless of partition count.
-            n_part_train = train_mask.sum().item()
-            if n_part_train > 0:
-                loss = torch.nn.functional.cross_entropy(
-                    out[train_mask], y[train_mask], reduction="sum"
-                )
-                total_loss += loss.item()
-                n_train += n_part_train
-            else:
-                # Keep an autograd-connected zero loss for empty train partitions.
-                loss = out.sum() * 0.0
+            with stat.timed("compute"):
+                # Compute loss with sum reduction for partition-invariant gradients.
+                # Each partition contributes sum(losses) / total_train_nodes.
+                # This ensures identical gradients regardless of partition count.
+                n_part_train = train_mask.sum().item()
+                if n_part_train > 0:
+                    loss = torch.nn.functional.cross_entropy(
+                        out[train_mask], y[train_mask], reduction="sum"
+                    )
+                    total_loss += loss.item()
+                    n_train += n_part_train
+                else:
+                    # Keep an autograd-connected zero loss for empty train partitions.
+                    loss = out.sum() * 0.0
 
-            pid_to_loss_idx[pid] = len(losses)
-            losses.append(loss)
+                pid_to_loss_idx[pid] = len(losses)
+                losses.append(loss)
 
-            # Compute metrics
-            with torch.no_grad():
-                if val_mask.sum() > 0:
-                    n_val_correct += compute_micro_f1(out, y, val_mask) * val_mask.sum().item()
-                    n_val += val_mask.sum().item()
-                if test_mask.sum() > 0:
-                    n_test_correct += compute_micro_f1(out, y, test_mask) * test_mask.sum().item()
-                    n_test += test_mask.sum().item()
+                # Compute metrics
+                with torch.no_grad():
+                    if val_mask.sum() > 0:
+                        n_val_correct += compute_micro_f1(out, y, val_mask) * val_mask.sum().item()
+                        n_val += val_mask.sum().item()
+                    if test_mask.sum() > 0:
+                        n_test_correct += compute_micro_f1(out, y, test_mask) * test_mask.sum().item()
+                        n_test += test_mask.sum().item()
 
             # Free activation
             self.activations[last_layer][pid].untyped_storage().resize_(0)
@@ -1021,8 +1038,11 @@ class Trainer:
                 loss = losses[loss_idx]
 
                 t0 = time.perf_counter_ns()
-                loss.backward(retain_graph=False)
-                self.streams.compute.synchronize()
+                # Waits inside (re-gather, gradient offload) count for their
+                # own category.
+                with stat.timed("compute"):
+                    loss.backward(retain_graph=False)
+                    self.streams.compute.synchronize()
 
                 tn = time.perf_counter_ns()
                 stat.compute_timestamp("backward", t0, tn)
@@ -1165,12 +1185,13 @@ class Trainer:
                     grad_buf = self.device_gradients[next_grad_layer]
 
                     t0 = time.perf_counter_ns()
-                    if grad_buf is not None and grad_buf.is_allocated(pid):
-                        act.backward(grad_buf[pid], retain_graph=False)
-                    else:
-                        act.backward(retain_graph=False)
+                    with stat.timed("compute"):
+                        if grad_buf is not None and grad_buf.is_allocated(pid):
+                            act.backward(grad_buf[pid], retain_graph=False)
+                        else:
+                            act.backward(retain_graph=False)
 
-                    self.streams.compute.synchronize()
+                        self.streams.compute.synchronize()
 
                     tn = time.perf_counter_ns()
                     stat.compute_timestamp("backward", t0, tn)

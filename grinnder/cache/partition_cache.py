@@ -16,6 +16,7 @@ from typing import Dict, List, Literal, Optional, Set, Tuple
 import torch
 
 from grinnder.buffer.host import HostBuffer
+from grinnder.stats import timed
 from grinnder.storage.backend import StorageBackend
 from grinnder.utils import get_available_host_memory
 
@@ -402,6 +403,7 @@ class PartitionCache:
 
         
 
+    @timed("transfer")
     def gather_with_swapping(
         self,
         phase,

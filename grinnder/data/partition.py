@@ -424,7 +424,6 @@ from torch import Tensor
 
 
 def build_partitioned_graph_metis(
-    sparse: int,
     edge_index: Tensor,
     x: Any,
     y: Tensor,
@@ -440,8 +439,6 @@ def build_partitioned_graph_metis(
     from torch_geometric.data import Data
     from torch_geometric.loader import ClusterData
     from torch_geometric.utils import add_self_loops
-
-    print(f"Sparse = {sparse}")
 
     num_nodes = x.size(0)
     input_num_edges = int(edge_index.size(1))
@@ -539,90 +536,7 @@ def build_partitioned_graph_metis(
         expanded_sizes[pid] = expanded_size
         partition_sizes[pid] = batch_size
 
-    # --- 4. Sparsification ---
-    if sparse == 1:
-        for pid in range(config.num_parts):
-            boundaries = boundaries_list[pid]
-            adj_csr = adj_csr_list[pid]
-
-            if boundaries is None:
-                continue
-
-            total_ext_boundary_nodes = sum(
-                b.numel() for b in boundaries if b is not None
-            )
-
-            if total_ext_boundary_nodes > 0:
-                threshold = 0.01 * total_ext_boundary_nodes
-                old_expanded_size = expanded_sizes[pid]
-
-                # Filter boundary tensors below 1% threshold
-                filtered_boundaries = []
-                for b in boundaries:
-                    if b is not None and b.numel() >= threshold:
-                        filtered_boundaries.append(b)
-                    else:
-                        filtered_boundaries.append(None)
-
-                boundaries_list[pid] = filtered_boundaries
-
-                # Update expanded_sizes[pid] to pruned size
-                new_expanded_size = partition_sizes[pid] + sum(
-                    b.numel() for b in filtered_boundaries if b is not None
-                )
-                expanded_sizes[pid] = new_expanded_size
-
-                # Prune AND Remap adj_csr column indices
-                if adj_csr is not None:
-                    rp, c, v = adj_csr
-
-                    old_to_new_local = torch.full(
-                        (old_expanded_size,), -1, dtype=torch.long, device=c.device
-                    )
-
-                    num_own = partition_sizes[pid]
-                    old_to_new_local[:num_own] = torch.arange(
-                        num_own, device=c.device
-                    )
-
-                    old_offset = num_own
-                    new_offset = num_own
-
-                    for src_pid, orig_b in enumerate(boundaries):
-                        if orig_b is None or orig_b.numel() == 0:
-                            continue
-
-                        b_len = orig_b.numel()
-
-                        if filtered_boundaries[src_pid] is not None:
-                            old_to_new_local[
-                                old_offset : old_offset + b_len
-                            ] = torch.arange(
-                                new_offset, new_offset + b_len, device=c.device
-                            )
-                            new_offset += b_len
-
-                        old_offset += b_len
-
-                    remapped_c = old_to_new_local[c]
-                    mask = remapped_c != -1
-
-                    new_c = remapped_c[mask]
-                    new_v = v[mask] if v is not None else None
-
-                    row_lengths = torch.bincount(
-                        torch.repeat_interleave(
-                            torch.arange(rp.numel() - 1, device=c.device),
-                            rp[1:] - rp[:-1],
-                        )[mask],
-                        minlength=rp.numel() - 1,
-                    )
-                    new_rp = torch.zeros_like(rp)
-                    new_rp[1:] = torch.cumsum(row_lengths, dim=0)
-
-                    adj_csr_list[pid] = (new_rp, new_c, new_v)
-
-    # --- 5. Format Outputs & Cache ---
+    # --- 4. Format Outputs & Cache ---
     adj_csr_list_final = [
         adj for adj in adj_csr_list if adj is not None
     ]

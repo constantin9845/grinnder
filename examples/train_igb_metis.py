@@ -88,8 +88,6 @@ def main():
     parser.add_argument("--materialize_features", action="store_true",
                         help="Load the full IGB feature matrix into RAM instead of using mmap")
     
-    parser.add_argument("--sparse", type=int, default=0,
-                        help="Sparsify graph to reduce partition dependencies.")
     parser.add_argument("--io_mode", "--io-mode", dest="io_mode", type=str, default="ours",
                         choices=["base", "ours"],
                         help="ours: host FTL, targeted rows SSD<->GPU. "
@@ -97,6 +95,8 @@ def main():
     parser.add_argument("--cache-size", "--cache_size", dest="cache_size", type=str, default=None,
                         help="Base only: DRAM limit for the partition cache, e.g. 16GB, 512MB, 16 "
                              "(GB). Default: available memory minus safety margin.")
+    parser.add_argument("--breakdown_json", type=str, default="time_breakdown.json",
+                        help="Where to save the per-epoch time breakdown (SSD / data movement / compute).")
     args = parser.parse_args()
     cache_size_gb = parse_size_gb(args.cache_size) if args.cache_size else 0.0
     if args.io_mode == "base" and args.cache_mode != "partition_lru":
@@ -105,7 +105,6 @@ def main():
 
     fix_seed(args.seed)
     device = args.device
-    sp = args.sparse
 
     # ---- Load dataset ----
     print(f"\n\nLoading IGB-{args.igb_size} dataset from {args.igb_root}...")
@@ -170,7 +169,6 @@ def main():
         )
     t0 = time.time()
     graph = build_partitioned_graph_metis(
-        sparse=sp,
         edge_index=data.edge_index,
         x=data.x,
         y=data.y,
@@ -270,6 +268,7 @@ def main():
         epoch_times.append(t_epoch)
 
         stat.print_timeline()
+        stat.breakdown.print_epoch(title=f"epoch {epoch}")
         print(f"Epoch Time = {t_epoch}")
         
 
@@ -291,6 +290,10 @@ def main():
     )
     print(f"Best Val: {best_val:.2%} | Best Test: {best_test:.2%}")
     print(f"\n{report_memory('Final')}")
+
+    stat.breakdown.print_summary()
+    stat.breakdown.save(args.breakdown_json)
+    print(f"Time breakdown saved to {args.breakdown_json}")
 
 
 if __name__ == "__main__":
