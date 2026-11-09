@@ -1170,9 +1170,14 @@ int64_t gather_partitions_nvme_async(
                         TORCH_CHECK(vector_unsupported(ret),
                                     "NVMe vector read failed: ", e, " sectors, first lba=",
                                     list[0], " ", nvme_ret_str(ret));
-                        disable_vector_reads("vector read refused (" + nvme_ret_str(ret) +
-                                             "); if errno=22, try a smaller "
-                                             "GRINNDER_NVME_VECTOR_MAX");
+                        std::string hint;
+                        if (ret == -EACCES || ret == -EPERM) {
+                            hint = "; vendor opcode 0x92 needs root (CAP_SYS_ADMIN)";
+                        } else if (ret == -EINVAL) {
+                            hint = "; try a smaller GRINNDER_NVME_VECTOR_MAX";
+                        }
+                        disable_vector_reads("vector read refused (" + nvme_ret_str(ret) + ")" +
+                                             hint);
                     }
                     // Plain reads (also the fallback for a refused vector command).
                     for (size_t k = cmd.first; k < cmd.first + cmd.count; ++k) {
