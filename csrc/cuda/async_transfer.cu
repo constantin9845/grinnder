@@ -927,6 +927,27 @@ static const NvmeVecConfig& nvme_vec_config() {
     return cfg;
 }
 
+// Read commands sent by gather_partitions_nvme_async, printed at process exit.
+struct NvmeReadCounters {
+    std::atomic<uint64_t> plain_cmds{0};
+    std::atomic<uint64_t> vec_cmds{0};
+    std::atomic<uint64_t> vec_sectors{0};
+    std::atomic<uint64_t> gather_jobs{0};
+    ~NvmeReadCounters() {
+        if (gather_jobs.load() == 0) return;
+        const uint64_t v = vec_cmds.load();
+        std::fprintf(stderr,
+                     "[nvme] gather jobs=%llu, plain read cmds=%llu, vector read cmds=%llu "
+                     "(%llu sectors, avg %.1f per cmd)\n",
+                     static_cast<unsigned long long>(gather_jobs.load()),
+                     static_cast<unsigned long long>(plain_cmds.load()),
+                     static_cast<unsigned long long>(v),
+                     static_cast<unsigned long long>(vec_sectors.load()),
+                     v ? static_cast<double>(vec_sectors.load()) / v : 0.0);
+    }
+};
+static NvmeReadCounters g_nvme_counters;
+
 // Set once a vector command is refused; from then on plain reads only.
 static std::atomic<bool> g_vec_disabled{false};
 
@@ -1039,6 +1060,7 @@ int64_t gather_partitions_nvme_async(
         C10_CUDA_CHECK(cudaEventSynchronize(ready));
         C10_CUDA_CHECK(cudaEventDestroy(ready));
         if (ios.empty()) return;
+        g_nvme_counters.gather_jobs.fetch_add(1);
 
         auto stream = c10::cuda::getStreamFromPool(false, device);
         const auto pinned = torch::TensorOptions().dtype(torch::kUInt8).pinned_memory(true);
@@ -1135,7 +1157,16 @@ int64_t gather_partitions_nvme_async(
                             for (int64_t s = 0; s < io.size / VEC_SECTOR; ++s) list[e++] = lba + s;
                         }
                         const int ret = nvme_vread(fd, nsid, region, e);
-                        if (ret == 0) return;
+                        if (ret == 0) {
+                            if (g_nvme_counters.vec_cmds.fetch_add(1) == 0) {
+                                std::fprintf(stderr,
+                                             "[nvme] first vector read ok: %d sectors, "
+                                             "first lba=%llu\n",
+                                             e, static_cast<unsigned long long>(list[0]));
+                            }
+                            g_nvme_counters.vec_sectors.fetch_add(e);
+                            return;
+                        }
                         TORCH_CHECK(vector_unsupported(ret),
                                     "NVMe vector read failed: ", e, " sectors, first lba=",
                                     list[0], " ", nvme_ret_str(ret));
@@ -1149,6 +1180,7 @@ int64_t gather_partitions_nvme_async(
                         nvme_read(fd, st + stage_off[k], io.dev_off / sector_size, io.size,
                                   sector_size);
                     }
+                    g_nvme_counters.plain_cmds.fetch_add(cmd.count);
                 });
             } catch (const std::exception& e) {
                 error = e.what();    // still wait for copies already queued below
