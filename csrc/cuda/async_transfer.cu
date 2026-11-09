@@ -874,6 +874,120 @@ static void run_nvme_parallel(size_t n, const std::function<void(size_t)>& fn) {
     TORCH_CHECK(error.empty(), error);
 }
 
+// ---------------------------------------------------------------------------
+// Vector reads (FEMU blackbox SSD built with HOST_FTL, opcode 0x92).
+//
+// One command carries a list of up to N physical 512 B sector addresses and
+// returns their data packed in list order. Buffer layout of one command:
+//   [ u64 addr[nr] | padding to 4 KiB ][ nr * 512 B data ]
+// cdw12[15:0] = nr - 1, cdw13 = 0 (list in the data buffer's first page).
+// The buffer must be page aligned, or the kernel bounces it and the device
+// would not see the list.
+//
+// Small I/Os (boundary rows) are packed into vector commands; large ones
+// (own-partition runs, whole tensors) keep using nvme_read.
+//   GRINNDER_NVME_VECTOR=1          turn it on
+//   GRINNDER_NVME_VECTOR_MAX=64     sectors per command (max 512)
+//   GRINNDER_NVME_VECTOR_MIN_IO=32768  pack I/Os smaller than this (bytes)
+// If the device or kernel refuses the command, vector reads are switched
+// off for the rest of the run and the reads are redone one I/O at a time.
+// ---------------------------------------------------------------------------
+
+static constexpr int64_t VEC_SECTOR = 512;
+static constexpr int64_t VEC_LIST_BYTES = 4096;
+static constexpr int VEC_HARD_MAX = 512;            // FEMU BB_MAX_VEC
+static constexpr uint8_t NVME_OPC_VECTOR_READ = 0x92;
+
+struct NvmeVecConfig {
+    bool on;
+    int max_entries;
+    int64_t min_io;
+};
+
+static const NvmeVecConfig& nvme_vec_config() {
+    static const NvmeVecConfig cfg = [] {
+        NvmeVecConfig c{false, 64, 32 * 1024};
+        if (const char* v = std::getenv("GRINNDER_NVME_VECTOR")) c.on = std::atoi(v) != 0;
+        if (const char* v = std::getenv("GRINNDER_NVME_VECTOR_MAX")) {
+            const int x = std::atoi(v);
+            if (x > 0) c.max_entries = std::min(x, VEC_HARD_MAX);
+        }
+        if (const char* v = std::getenv("GRINNDER_NVME_VECTOR_MIN_IO")) {
+            const long long x = std::atoll(v);
+            if (x > 0) c.min_io = x;
+        }
+        if (c.on) {
+            std::fprintf(stderr,
+                         "[nvme] vector reads on: up to %d sectors per command, "
+                         "packing I/Os smaller than %lld B\n",
+                         c.max_entries, static_cast<long long>(c.min_io));
+        }
+        return c;
+    }();
+    return cfg;
+}
+
+// Set once a vector command is refused; from then on plain reads only.
+static std::atomic<bool> g_vec_disabled{false};
+
+static void disable_vector_reads(const std::string& why) {
+    if (!g_vec_disabled.exchange(true)) {
+        std::fprintf(stderr, "[nvme] vector reads off: %s. Using one read per I/O.\n",
+                     why.c_str());
+    }
+}
+
+// Namespace id of the block device behind fd (cached per fd); 0 if unknown.
+static uint32_t nvme_nsid(int64_t fd) {
+    static std::mutex m;
+    static std::unordered_map<int64_t, uint32_t> cache;
+    std::lock_guard<std::mutex> lock(m);
+    auto it = cache.find(fd);
+    if (it != cache.end()) return it->second;
+    const int r = ioctl(static_cast<int>(fd), NVME_IOCTL_ID);
+    const uint32_t nsid = r > 0 ? static_cast<uint32_t>(r) : 0;
+    cache.emplace(fd, nsid);
+    return nsid;
+}
+
+// One vector read. region: page-aligned, list already in its first nr*8 bytes,
+// data lands at region + VEC_LIST_BYTES. Returns 0, an NVMe status (> 0) or -errno.
+static int nvme_vread(int64_t fd, uint32_t nsid, uint8_t* region, int nr) {
+    struct nvme_passthru_cmd c;
+    std::memset(&c, 0, sizeof(c));
+    c.opcode = NVME_OPC_VECTOR_READ;
+    c.nsid = nsid;
+    c.addr = reinterpret_cast<uint64_t>(region);
+    c.data_len = static_cast<uint32_t>(VEC_LIST_BYTES + nr * VEC_SECTOR);
+    c.cdw12 = static_cast<uint32_t>(nr - 1);
+    c.cdw13 = 0;
+    const int ret = ioctl(static_cast<int>(fd), NVME_IOCTL_IO_CMD, &c);
+    return ret < 0 ? -errno : ret;
+}
+
+static std::string nvme_ret_str(int ret) {
+    char s[64];
+    if (ret < 0) std::snprintf(s, sizeof(s), "errno=%d (%s)", -ret, strerror(-ret));
+    else std::snprintf(s, sizeof(s), "nvme_status=0x%x", ret);
+    return s;
+}
+
+// Errors that mean "this device/kernel can't do vector reads" (fall back),
+// as opposed to a failed read (report it).
+//   Invalid Command Opcode: FEMU built without HOST_FTL.
+//   Invalid Field: FEMU refused the command itself (list + data > MDTS,
+//     LBA format size != FTL sector size, buffer in the CMB, ...).
+//   EINVAL/EPERM/EACCES/ENOTTY: the kernel refused it (size above
+//     max_hw_sectors, no CAP_SYS_ADMIN, not an NVMe device).
+// An LBA Out of Range (0x80) or any other status is a real read error.
+static bool vector_unsupported(int ret) {
+    if (ret > 0) {
+        const int sc = ret & 0x7ff;                   // SCT (10:8) | SC (7:0)
+        return sc == 0x001 || sc == 0x002;
+    }
+    return ret == -EINVAL || ret == -EPERM || ret == -EACCES || ret == -ENOTTY;
+}
+
 int64_t gather_partitions_nvme_async(
     int64_t fd,
     torch::Tensor dst,
@@ -937,49 +1051,119 @@ int64_t gather_partitions_nvme_async(
         uint8_t* dst_raw = static_cast<uint8_t*>(dst.data_ptr());
         std::string error;
 
+        // Vector reads: only for 512 B sectors (the list holds sector addresses).
+        const NvmeVecConfig& vcfg = nvme_vec_config();
+        const bool vec = vcfg.on && !g_vec_disabled.load() && sector_size == VEC_SECTOR;
+        const uint32_t nsid = vec ? nvme_nsid(fd) : 0;
+        if (vec && nsid == 0) disable_vector_reads("NVME_IOCTL_ID failed on the device fd");
+        const int64_t vec_max_bytes = static_cast<int64_t>(vcfg.max_entries) * VEC_SECTOR;
+        auto packable = [&](const ReadIo& io) {
+            return io.size < vcfg.min_io && io.size <= vec_max_bytes;
+        };
+
+        // One command: a single plain read, or a vector read of `count`
+        // consecutive I/Os. `region` is its staging offset (vector: the list
+        // page; data follows at region + VEC_LIST_BYTES).
+        struct Cmd {
+            size_t first;     // index of its first I/O within the window
+            size_t count;
+            bool vector;
+            int64_t region;
+        };
+
         size_t next = 0;
         int buf = 0;
         while (next < ios.size() && error.empty()) {
-            // Next window: as many I/Os as fit in one staging buffer.
-            const size_t first = next;
-            int64_t used = 0;
-            while (next < ios.size() && used + ios[next].size <= NVME_WINDOW) {
-                used += ios[next].size;
-                ++next;
-            }
-            const size_t n = next - first;
-
             // The GPU copy out of this buffer (two windows ago) must be done first.
             if (pending[buf]) {
                 C10_CUDA_CHECK(cudaEventSynchronize(copied[buf]));
                 pending[buf] = false;
             }
             uint8_t* st = stage[buf].data_ptr<uint8_t>();
+            const bool use_vec = vec && !g_vec_disabled.load();
+            // Vector regions start on a page boundary of the actual address.
+            const int64_t base_pad =
+                (-static_cast<int64_t>(reinterpret_cast<uintptr_t>(st))) & (VEC_LIST_BYTES - 1);
 
-            // I/Os sit back to back in the staging buffer.
-            std::vector<int64_t> stage_off(n);
-            for (size_t i = 0, off = 0; i < n; ++i) {
-                stage_off[i] = off;
-                off += ios[first + i].size;
+            // Next window: as many commands as fit in one staging buffer.
+            // Plain I/Os sit back to back; each vector command takes a page
+            // aligned [list page | data] region.
+            const size_t first = next;
+            std::vector<int64_t> stage_off;   // per I/O of the window
+            std::vector<Cmd> cmds;
+            int64_t used = 0;
+            while (next < ios.size()) {
+                if (use_vec && packable(ios[next])) {
+                    const int64_t start =
+                        base_pad + (((used - base_pad) + VEC_LIST_BYTES - 1) & ~(VEC_LIST_BYTES - 1));
+                    size_t j = next;
+                    int64_t data = 0;
+                    while (j < ios.size() && packable(ios[j]) &&
+                           data + ios[j].size <= vec_max_bytes) {
+                        data += ios[j].size;
+                        ++j;
+                    }
+                    if (start + VEC_LIST_BYTES + data > NVME_WINDOW) break;
+                    int64_t off = start + VEC_LIST_BYTES;
+                    for (size_t k = next; k < j; ++k) {
+                        stage_off.push_back(off);
+                        off += ios[k].size;
+                    }
+                    cmds.push_back({next - first, j - next, true, start});
+                    used = off;
+                    next = j;
+                } else {
+                    if (used + ios[next].size > NVME_WINDOW) break;
+                    stage_off.push_back(used);
+                    cmds.push_back({next - first, 1, false, used});
+                    used += ios[next].size;
+                    ++next;
+                }
             }
+            const size_t n = next - first;
 
             try {
-                run_nvme_parallel(n, [&](size_t i) {
-                    const ReadIo& io = ios[first + i];
-                    nvme_read(fd, st + stage_off[i], io.dev_off / sector_size, io.size, sector_size);
+                run_nvme_parallel(cmds.size(), [&](size_t c) {
+                    const Cmd& cmd = cmds[c];
+                    if (cmd.vector && !g_vec_disabled.load()) {
+                        uint8_t* region = st + cmd.region;
+                        uint64_t* list = reinterpret_cast<uint64_t*>(region);
+                        int e = 0;
+                        for (size_t k = cmd.first; k < cmd.first + cmd.count; ++k) {
+                            const ReadIo& io = ios[first + k];
+                            const uint64_t lba = static_cast<uint64_t>(io.dev_off / VEC_SECTOR);
+                            for (int64_t s = 0; s < io.size / VEC_SECTOR; ++s) list[e++] = lba + s;
+                        }
+                        const int ret = nvme_vread(fd, nsid, region, e);
+                        if (ret == 0) return;
+                        TORCH_CHECK(vector_unsupported(ret),
+                                    "NVMe vector read failed: ", e, " sectors, first lba=",
+                                    list[0], " ", nvme_ret_str(ret));
+                        disable_vector_reads("vector read refused (" + nvme_ret_str(ret) +
+                                             "); if errno=22, try a smaller "
+                                             "GRINNDER_NVME_VECTOR_MAX");
+                    }
+                    // Plain reads (also the fallback for a refused vector command).
+                    for (size_t k = cmd.first; k < cmd.first + cmd.count; ++k) {
+                        const ReadIo& io = ios[first + k];
+                        nvme_read(fd, st + stage_off[k], io.dev_off / sector_size, io.size,
+                                  sector_size);
+                    }
                 });
             } catch (const std::exception& e) {
                 error = e.what();    // still wait for copies already queued below
                 break;
             }
 
-            // One copy per span that is contiguous in dst (usually the whole window).
+            // One copy per span that is contiguous in dst and in staging
+            // (usually long runs; vector regions end at their list pages).
             // A clipped I/O (copy < size) ends a span: its padding is not copied.
             for (size_t i = 0; i < n;) {
                 int64_t len = ios[first + i].copy;
                 size_t j = i + 1;
                 while (j < n && ios[first + j - 1].copy == ios[first + j - 1].size &&
-                       ios[first + j].buf_off == ios[first + i].buf_off + len) {
+                       ios[first + j].buf_off == ios[first + i].buf_off + len &&
+                       stage_off[j] == stage_off[i] + len) {
                     len += ios[first + j].copy;
                     ++j;
                 }

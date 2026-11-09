@@ -849,7 +849,9 @@ class HostBuffer:
             return self._ops.gather_partitions_direct_raw_async(
                 ftl.cuFD, gpu_target, runs_t, ftl.sector_size
             )
-        # NVMe reads into pinned host memory + copies to the GPU, no cuFile
+        # NVMe reads into pinned host memory + copies to the GPU, no cuFile.
+        # GRINNDER_NVME_VECTOR=1 packs small reads (boundary rows) into vector
+        # read commands (opcode 0x92, FEMU HOST_FTL); see async_transfer.cu.
         return self._ops.gather_partitions_nvme_async(
             ftl.device_fd, gpu_target, runs_t, ftl.sector_size
         )
