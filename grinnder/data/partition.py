@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+import numpy as np
 import torch
 from torch import Tensor
 
@@ -103,6 +105,192 @@ def _reorder_graph_payload(
     return x, y[perm], train_mask[perm], val_mask[perm], test_mask[perm]
 
 
+def _consumer_grouped_positions(
+    n: int, consumers: List[Tuple[int, np.ndarray]], num_parts: int
+) -> np.ndarray:
+    """New local position of each row of one partition (row_order='grouped').
+
+    consumers: (dst, local rows of this partition that dst needs).
+    Rows needed by no other partition come first, then rows needed by one
+    partition (grouped per partition), then rows needed by two, ... Rows
+    with the same set of consumers stay together, in their old order.
+    """
+    used = np.zeros((n, num_parts), dtype=bool)
+    for dst, rows in consumers:
+        used[rows, dst] = True
+    ncons = used.sum(axis=1)
+    packed = np.packbits(used, axis=1, bitorder="little")
+    # np.lexsort: the last key is the primary one.
+    keys = tuple(packed[:, c] for c in range(packed.shape[1] - 1, -1, -1)) + (ncons,)
+    order = np.lexsort(keys)                       # new position -> old row
+    pos = np.empty(n, dtype=np.int64)
+    pos[order] = np.arange(n, dtype=np.int64)      # old row -> new position
+    return pos
+
+
+def _group_rows_by_consumers(
+    perm: Tensor,
+    ptr: Tensor,
+    adj_csr: List[Tuple[Tensor, Tensor, Optional[Tensor]]],
+    boundaries: List[List[Optional[Tensor]]],
+    num_parts: int,
+) -> Tuple[Tensor, List[Tuple[Tensor, Tensor, Optional[Tensor]]], List[List[Optional[Tensor]]]]:
+    """Reorder the rows inside every partition so that the boundary rows each
+    partition needs from another one sit next to each other (fewer, larger
+    SSD reads; see scripts/analyze_boundary_layout.py).
+
+    Only the order inside partitions changes (partition sizes, ptr and the
+    model's results stay the same). Returns the new perm, adjacencies and
+    boundary lists; boundary lists come out sorted. Apply the returned perm
+    to features, labels and masks.
+    """
+    sizes = [int(ptr[p + 1]) - int(ptr[p]) for p in range(num_parts)]
+
+    # 1. New position of every row inside its partition.
+    pos: List[np.ndarray] = []
+    for src in range(num_parts):
+        consumers = []
+        for dst in range(num_parts):
+            b = boundaries[dst][src] if dst != src else None
+            if b is not None and b.numel() > 0:
+                consumers.append((dst, b.cpu().numpy().astype(np.int64, copy=False)))
+        pos.append(_consumer_grouped_positions(sizes[src], consumers, num_parts))
+
+    # 2. perm: node at new global index ptr[p] + pos[p][l] is the one that
+    #    was at ptr[p] + l.
+    perm_np = perm.cpu().numpy()
+    new_perm = np.empty_like(perm_np)
+    for p in range(num_parts):
+        base = int(ptr[p])
+        new_perm[base + pos[p]] = perm_np[base:base + sizes[p]]
+
+    new_adj = []
+    new_boundaries = []
+    for dst in range(num_parts):
+        rowptr, col, val = adj_csr[dst]
+        n = sizes[dst]
+
+        # 3. Boundary lists: new local indices, sorted. The gathered layout
+        #    [intra | from_p0 | from_p1 | ...] keeps its block sizes and block
+        #    order; inside a block the rows follow the sorted list.
+        n_boundary = sum(
+            b.numel() for s, b in enumerate(boundaries[dst]) if s != dst and b is not None
+        )
+        colmap = np.empty(n + n_boundary, dtype=np.int64)   # old column -> new column
+        colmap[:n] = pos[dst]
+        off = n
+        blist: List[Optional[Tensor]] = [None] * num_parts
+        for src in range(num_parts):
+            b = boundaries[dst][src]
+            if src == dst or b is None:
+                continue
+            if b.numel() == 0:
+                blist[src] = b
+                continue
+            moved = pos[src][b.cpu().numpy()]
+            order = np.argsort(moved, kind="stable")
+            rank = np.empty(len(order), dtype=np.int64)
+            rank[order] = np.arange(len(order), dtype=np.int64)
+            colmap[off:off + len(order)] = off + rank
+            off += len(order)
+            blist[src] = torch.from_numpy(moved[order]).to(b.dtype)
+        assert off == n + n_boundary
+        new_boundaries.append(blist)
+
+        # 4. Adjacency (bipartite CSR, one row per own node): rows move to
+        #    their new positions, columns are renumbered with colmap.
+        rp = rowptr.cpu().numpy().astype(np.int64, copy=False)
+        assert len(rp) == n + 1, f"partition {dst}: rowptr has {len(rp)} entries, expected {n + 1}"
+        old_of_new = np.empty(n, dtype=np.int64)
+        old_of_new[pos[dst]] = np.arange(n, dtype=np.int64)
+        deg = np.diff(rp)[old_of_new]
+        new_rp = np.zeros(n + 1, dtype=np.int64)
+        np.cumsum(deg, out=new_rp[1:])
+        edge = np.repeat(rp[:-1][old_of_new] - new_rp[:-1], deg) + np.arange(
+            new_rp[-1], dtype=np.int64
+        )
+        new_col = colmap[col.cpu().numpy()[edge]]
+        edge_t = torch.from_numpy(edge)
+        new_adj.append((
+            torch.from_numpy(new_rp).to(rowptr.dtype),
+            torch.from_numpy(new_col).to(col.dtype),
+            val[edge_t] if val is not None else None,
+        ))
+
+    return torch.from_numpy(new_perm).to(perm.dtype), new_adj, new_boundaries
+
+
+def _effective_row_order(config: GriNNderConfig) -> str:
+    """Row order to apply. Grouping is opt-in (config.row_order='grouped')
+    and only used by io_mode='ours'; every other setup keeps the
+    partitioner's order."""
+    row_order = getattr(config, "row_order", "original")
+    if row_order == "grouped" and getattr(config, "io_mode", "ours") != "ours":
+        print(f"  row_order='grouped' only applies to io_mode='ours'; "
+              f"using 'original' for io_mode={config.io_mode!r}")
+        return "original"
+    return row_order
+
+
+def _finish_partitioned_graph(
+    *,
+    num_nodes: int,
+    num_edges: int,
+    num_parts: int,
+    partition_sizes: List[int],
+    adj_csr: List[Tuple[Tensor, Tensor, Optional[Tensor]]],
+    boundaries: List[List[Optional[Tensor]]],
+    expanded_sizes: List[int],
+    perm: Tensor,
+    ptr: Tensor,
+    x: Any,
+    y: Tensor,
+    train_mask: Tensor,
+    val_mask: Tensor,
+    test_mask: Tensor,
+    backend: Optional[StorageBackend],
+    row_order: str,
+) -> PartitionedGraph:
+    """Common last steps: optional row regrouping, node payload reordering,
+    adjacency upload. x/y/masks come in original node order."""
+    if row_order == "grouped":
+        t0 = time.time()
+        perm, adj_csr, boundaries = _group_rows_by_consumers(
+            perm, ptr, adj_csr, boundaries, num_parts
+        )
+        print(f"  Row order: grouped by consumer partitions ({time.time() - t0:.1f}s)")
+    elif row_order != "original":
+        raise ValueError(f"Unknown row_order {row_order!r} (use 'original' or 'grouped')")
+
+    x, y, train_mask, val_mask, test_mask = _reorder_graph_payload(
+        x, y, train_mask, val_mask, test_mask, perm
+    )
+
+    if backend is not None:
+        for pid, (rp, c, v) in enumerate(adj_csr):
+            backend.host_write(rp, f"adj_rowptr_p{pid}", async_=False)
+            backend.host_write(c, f"adj_col_p{pid}", async_=False)
+            if v is not None:
+                backend.host_write(v, f"adj_val_p{pid}", async_=False)
+
+    return PartitionedGraph(
+        num_nodes=num_nodes,
+        num_edges=num_edges,
+        num_parts=num_parts,
+        partition_sizes=partition_sizes,
+        adj_csr=adj_csr,
+        boundaries=boundaries,
+        expanded_sizes=expanded_sizes,
+        features=x,
+        labels=y,
+        train_mask=train_mask,
+        val_mask=val_mask,
+        test_mask=test_mask,
+        perm=perm,
+        ptr=ptr,
+    )
+
+
 def _partition_cache_matches(
     cache: Dict[str, Any],
     *,
@@ -135,35 +323,26 @@ def _graph_from_partition_cache(
     val_mask: Tensor,
     test_mask: Tensor,
     backend: Optional[StorageBackend],
+    row_order: str = "original",
 ) -> PartitionedGraph:
-    perm = cache["perm"]
-    x, y, train_mask, val_mask, test_mask = _reorder_graph_payload(
-        x, y, train_mask, val_mask, test_mask, perm
-    )
-
-    adj_csr_list = cache["adj_csr"]
-    if backend is not None:
-        for pid, (rp, c, v) in enumerate(adj_csr_list):
-            backend.host_write(rp, f"adj_rowptr_p{pid}", async_=False)
-            backend.host_write(c, f"adj_col_p{pid}", async_=False)
-            if v is not None:
-                backend.host_write(v, f"adj_val_p{pid}", async_=False)
-
-    return PartitionedGraph(
+    # The cache always holds the original row order; grouping is applied here.
+    return _finish_partitioned_graph(
         num_nodes=cache["num_nodes"],
         num_edges=cache["num_edges"],
         num_parts=cache["num_parts"],
         partition_sizes=cache["partition_sizes"],
-        adj_csr=adj_csr_list,
+        adj_csr=cache["adj_csr"],
         boundaries=cache["boundaries"],
         expanded_sizes=cache["expanded_sizes"],
-        features=x,
-        labels=y,
+        perm=cache["perm"],
+        ptr=cache["ptr"],
+        x=x,
+        y=y,
         train_mask=train_mask,
         val_mask=val_mask,
         test_mask=test_mask,
-        perm=perm,
-        ptr=cache["ptr"],
+        backend=backend,
+        row_order=row_order,
     )
 
 
@@ -278,7 +457,8 @@ def build_partitioned_graph(
         ):
             print(f"Loading partitioned graph cache from {cache_path}")
             return _graph_from_partition_cache(
-                cache, x, y, train_mask, val_mask, test_mask, backend
+                cache, x, y, train_mask, val_mask, test_mask, backend,
+                row_order=_effective_row_order(config),
             )
         print(f"Ignoring incompatible partitioned graph cache at {cache_path}")
 
@@ -304,9 +484,8 @@ def build_partitioned_graph(
     inv_perm = torch.empty_like(perm)
     inv_perm[perm] = torch.arange(num_nodes, dtype=torch.long)
 
-    x, y, train_mask, val_mask, test_mask = _reorder_graph_payload(
-        x, y, train_mask, val_mask, test_mask, perm
-    )
+    # x/y/masks are reordered at the end (_finish_partitioned_graph), once
+    # the final perm is known.
 
     # Remap edge_index through inverse permutation
     edge_index = inv_perm[edge_index]
@@ -369,15 +548,6 @@ def build_partitioned_graph(
         boundaries for boundaries in boundaries_list if boundaries is not None
     ]
 
-    # Step 7: Optionally store adjacencies on NVMe
-    if backend is not None:
-        for pid in range(config.num_parts):
-            rp, c, v = adj_csr_list_final[pid]
-            backend.host_write(rp, f"adj_rowptr_p{pid}", async_=False)
-            backend.host_write(c, f"adj_col_p{pid}", async_=False)
-            if v is not None:
-                backend.host_write(v, f"adj_val_p{pid}", async_=False)
-
     graph_num_edges = int(edge_index.size(1))
     if cache_path is not None and save_cache:
         _write_partition_cache(
@@ -398,7 +568,8 @@ def build_partitioned_graph(
             },
         )
 
-    return PartitionedGraph(
+    # Step 7: optional row regrouping, payload reorder, adjacencies on NVMe
+    return _finish_partitioned_graph(
         num_nodes=num_nodes,
         num_edges=graph_num_edges,
         num_parts=config.num_parts,
@@ -406,13 +577,15 @@ def build_partitioned_graph(
         adj_csr=adj_csr_list_final,
         boundaries=boundaries_list_final,
         expanded_sizes=expanded_sizes,
-        features=x,
-        labels=y,
+        perm=perm,
+        ptr=ptr,
+        x=x,
+        y=y,
         train_mask=train_mask,
         val_mask=val_mask,
         test_mask=test_mask,
-        perm=perm,
-        ptr=ptr,
+        backend=backend,
+        row_order=_effective_row_order(config),
     )
 
 
@@ -455,7 +628,8 @@ def build_partitioned_graph_metis(
         ):
             print(f"Loading partitioned graph cache from {cache_path}")
             return _graph_from_partition_cache(
-                cache, x, y, train_mask, val_mask, test_mask, backend
+                cache, x, y, train_mask, val_mask, test_mask, backend,
+                row_order=_effective_row_order(config),
             )
         print(f"Ignoring incompatible partitioned graph cache at {cache_path}")
 
@@ -477,9 +651,8 @@ def build_partitioned_graph_metis(
         num_nodes, dtype=torch.long, device=perm.device
     )
 
-    x, y, train_mask, val_mask, test_mask = _reorder_graph_payload(
-        x, y, train_mask, val_mask, test_mask, perm
-    )
+    # x/y/masks are reordered at the end (_finish_partitioned_graph), once
+    # the final perm is known.
 
     # Remap edge_index through inverse permutation
     edge_index = inv_perm[edge_index]
@@ -544,15 +717,6 @@ def build_partitioned_graph_metis(
         boundaries for boundaries in boundaries_list if boundaries is not None
     ]
 
-    # Optionally store adjacencies on NVMe
-    if backend is not None:
-        for pid in range(config.num_parts):
-            rp, c, v = adj_csr_list_final[pid]
-            backend.host_write(rp, f"adj_rowptr_p{pid}", async_=False)
-            backend.host_write(c, f"adj_col_p{pid}", async_=False)
-            if v is not None:
-                backend.host_write(v, f"adj_val_p{pid}", async_=False)
-
     graph_num_edges = int(edge_index.size(1))
     if cache_path is not None and save_cache:
         _write_partition_cache(
@@ -573,7 +737,8 @@ def build_partitioned_graph_metis(
             },
         )
 
-    return PartitionedGraph(
+    # Optional row regrouping, payload reorder, adjacencies on NVMe
+    return _finish_partitioned_graph(
         num_nodes=num_nodes,
         num_edges=graph_num_edges,
         num_parts=config.num_parts,
@@ -581,12 +746,13 @@ def build_partitioned_graph_metis(
         adj_csr=adj_csr_list_final,
         boundaries=boundaries_list_final,
         expanded_sizes=expanded_sizes,
-        features=x,
-        labels=y,
+        perm=perm,
+        ptr=ptr,
+        x=x,
+        y=y,
         train_mask=train_mask,
         val_mask=val_mask,
         test_mask=test_mask,
-        perm=perm,
-        ptr=ptr,
+        backend=backend,
+        row_order=_effective_row_order(config),
     )
-

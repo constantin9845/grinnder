@@ -68,6 +68,15 @@ class GriNNderConfig:
     # 0 = derive from available memory (host_memory_budget_gb / safety margin).
     cache_size_gb: float = 0.0
 
+    # Order of the rows inside each partition (io_mode="ours" only; base
+    # and other setups always use "original"):
+    #   'original': partitioner order.
+    #   'grouped':  rows needed by no other partition first, then rows
+    #               grouped by which partitions need them, so each boundary
+    #               gather reads fewer, larger SSD ranges. Same results;
+    #               applied on top of the partition cache at load time.
+    row_order: Literal["original", "grouped"] = "original"
+
     # System
     device: str = "cuda:0"
     pool_size: int = 2  # Double buffering
