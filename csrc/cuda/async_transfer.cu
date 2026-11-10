@@ -612,6 +612,7 @@ static void gpu_write_run_batches(CUfileHandle_t handle, const std::vector<GpuWr
 
         // Wait for every entry of this batch before reusing the batch handle.
         unsigned completed = 0;
+        int idle_s = 0;   // seconds without a completion, for the stall message
         while (completed < n) {
             unsigned nr = n - completed;
             struct timespec timeout = {1, 0};
@@ -619,6 +620,21 @@ static void gpu_write_run_batches(CUfileHandle_t handle, const std::vector<GpuWr
             if (st.err != CU_FILE_SUCCESS) {
                 error = "cuFileBatchIOGetStatus failed: err=" + std::to_string(static_cast<int>(st.err));
                 break;
+            }
+            if (nr == 0) {
+                if (++idle_s % 10 == 0) {
+                    const GpuWriteIo& io0 = ios[first];
+                    std::fprintf(stderr,
+                                 "[cufile] %s batch stalled %ds: %u/%u done "
+                                 "(batch starts at io %zu: dev_off=%lld buf_off=%lld bytes=%lld, "
+                                 "gds_direct=%d)\n",
+                                 what, idle_s, completed, n, first,
+                                 static_cast<long long>(io0.dev_off),
+                                 static_cast<long long>(io0.buf_off),
+                                 static_cast<long long>(io0.size), gds_direct_mode() ? 1 : 0);
+                }
+            } else {
+                idle_s = 0;
             }
             for (unsigned i = 0; i < nr; ++i) {
                 const size_t idx = reinterpret_cast<uintptr_t>(events[i].cookie);

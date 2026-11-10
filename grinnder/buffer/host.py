@@ -32,6 +32,58 @@ def _load_ops():
 _IO_ALIGN = 4096
 
 
+class _ScratchPool:
+    """GPU scratch buffers for coalesced reads, kept for the whole run.
+
+    Each gather takes one buffer and gives it back after its rows were
+    copied out. Buffers are never freed while training, so GDS keeps the
+    same GPU memory pinned instead of pinning a new allocation (and
+    freeing the old one) for every gather.
+    """
+
+    _GROW = 64 * 2**20   # buffers grow in 64 MiB steps
+
+    def __init__(self) -> None:
+        # device -> free buffers, as (uint8 tensor, event after its last use)
+        self._free: Dict[torch.device, List[Tuple[Tensor, Optional[torch.cuda.Event]]]] = {}
+
+    def acquire(self, device: torch.device, nbytes: int, stream: torch.cuda.Stream) -> Tensor:
+        """A 4 KiB aligned uint8 view of at least nbytes. Work queued on
+        `stream` after this call runs after the buffer's previous user."""
+        free = self._free.setdefault(device, [])
+        pick = None
+        for i, (buf, _) in enumerate(free):
+            if buf.numel() >= nbytes + _IO_ALIGN and (
+                pick is None or buf.numel() < free[pick][0].numel()
+            ):
+                pick = i
+        if pick is not None:
+            buf, ev = free.pop(pick)
+            if ev is not None:
+                stream.wait_event(ev)
+        else:
+            # Every free buffer is too small for this gather: drop them
+            # rather than keep them unused (their last use is on record).
+            free.clear()
+            size = -(-(nbytes + _IO_ALIGN) // self._GROW) * self._GROW
+            with torch.cuda.stream(stream):
+                buf = torch.empty(size, dtype=torch.uint8, device=device)
+        buf.record_stream(stream)
+        lead = (-buf.data_ptr()) % _IO_ALIGN
+        view = buf[lead:lead + nbytes]
+        view._scratch_base = buf   # what release() puts back
+        return view
+
+    def release(self, view: Tensor, stream: torch.cuda.Stream) -> None:
+        """Give a buffer back; its next user waits for work queued on `stream`."""
+        ev = torch.cuda.Event()
+        ev.record(stream)
+        self._free.setdefault(view.device, []).append((view._scratch_base, ev))
+
+
+_SCRATCH = _ScratchPool()
+
+
 def _coalesce_config() -> Optional[Tuple[int, int]]:
     """(gap bytes, max scratch bytes) when coalesced boundary reads are on
     (GRINNDER_READ_COALESCE=1, ours mode), else None. Set from
@@ -884,25 +936,26 @@ class HostBuffer:
         with torch.cuda.stream(stream):
             jobs.append(self._submit_read(gpu_target, direct_runs))
             if scratch_bytes > 0:
-                # 4 KiB aligned start, so GDS can DMA straight into it.
-                raw = torch.empty(
-                    scratch_bytes + _IO_ALIGN, dtype=torch.uint8, device=gpu_target.device
-                )
-                lead = (-raw.data_ptr()) % _IO_ALIGN
-                scratch = raw[lead:lead + scratch_bytes]
+                # Reused, 4 KiB aligned buffer, so GDS can DMA straight into it.
+                # acquire() runs before the submit, so the read also waits for
+                # the buffer's previous user.
+                scratch = _SCRATCH.acquire(gpu_target.device, scratch_bytes, stream)
                 scratch_runs = torch.from_numpy(
                     np.stack([run_dev, run_scr, run_len], axis=1).astype(np.int64)
                 )
                 jobs.append(self._submit_read(scratch, scratch_runs))
-                src_idx = torch.from_numpy(src_rows).to(gpu_target.device, non_blocking=True)
-                dst_idx = torch.from_numpy(dst_rows).to(gpu_target.device, non_blocking=True)
 
         def post():
+            # Runs after the reads finished: no CUDA work is queued while
+            # cuFile is still reading into the buffers.
             if scratch is None:
                 return
             with torch.cuda.stream(stream), torch.no_grad():
+                src_idx = torch.from_numpy(src_rows).to(gpu_target.device)
+                dst_idx = torch.from_numpy(dst_rows).to(gpu_target.device)
                 rows = scratch.view(gpu_target.dtype).view(-1, gpu_target.size(1))
                 gpu_target.index_copy_(0, dst_idx, rows.index_select(0, src_idx))
+            _SCRATCH.release(scratch, stream)
             # Kernels queued later on the caller's stream see the rows.
             torch.cuda.current_stream(gpu_target.device).wait_stream(stream)
 
