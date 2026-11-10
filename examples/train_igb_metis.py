@@ -11,6 +11,7 @@ Usage:
 """
 
 import argparse
+import os
 import statistics
 import time
 
@@ -97,7 +98,27 @@ def main():
                              "(GB). Default: available memory minus safety margin.")
     parser.add_argument("--breakdown_json", type=str, default="time_breakdown.json",
                         help="Where to save the per-epoch time breakdown (SSD / data movement / compute).")
+    parser.add_argument("--read_coalesce", action="store_true",
+                        help="Ours only: sort boundary rows by SSD address, read each flash page "
+                             "once (nearby pages in one read) into a GPU scratch buffer, then "
+                             "copy the rows into place on the GPU. No host staging, works with "
+                             "cuFile (GRINNDER_GDS_DIRECT=1).")
+    parser.add_argument("--coalesce_gap_kb", type=int, default=0,
+                        help="With --read_coalesce: join pages up to this many KiB apart into "
+                             "one read (the gap is read and ignored). 0 = only touching pages.")
+    parser.add_argument("--coalesce_max_mb", type=int, default=512,
+                        help="With --read_coalesce: GPU scratch limit per gather, in MiB. Pages "
+                             "with the most needed rows go first; the rest are read row by row.")
     args = parser.parse_args()
+    if args.read_coalesce:
+        if args.io_mode != "ours":
+            print("--read_coalesce only applies to io_mode=ours; ignored")
+        else:
+            os.environ["GRINNDER_READ_COALESCE"] = "1"
+            os.environ["GRINNDER_COALESCE_GAP_KB"] = str(args.coalesce_gap_kb)
+            os.environ["GRINNDER_COALESCE_MAX_MB"] = str(args.coalesce_max_mb)
+            print(f"Coalesced boundary reads on: gap {args.coalesce_gap_kb} KiB, "
+                  f"scratch limit {args.coalesce_max_mb} MiB")
     cache_size_gb = parse_size_gb(args.cache_size) if args.cache_size else 0.0
     if args.io_mode == "base" and args.cache_mode != "partition_lru":
         print(f"io_mode=base uses cache_mode=partition_lru (was {args.cache_mode})")

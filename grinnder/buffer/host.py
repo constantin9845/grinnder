@@ -32,6 +32,17 @@ def _load_ops():
 _IO_ALIGN = 4096
 
 
+def _coalesce_config() -> Optional[Tuple[int, int]]:
+    """(gap bytes, max scratch bytes) when coalesced boundary reads are on
+    (GRINNDER_READ_COALESCE=1, ours mode), else None. Set from
+    --read_coalesce / --coalesce_gap_kb / --coalesce_max_mb."""
+    if os.environ.get("GRINNDER_READ_COALESCE") != "1":
+        return None
+    gap = int(os.environ.get("GRINNDER_COALESCE_GAP_KB", "0")) * 1024
+    max_bytes = int(os.environ.get("GRINNDER_COALESCE_MAX_MB", "512")) * 2**20
+    return max(0, gap), max(0, max_bytes)
+
+
 def _empty_host_tensor(
     rows: int,
     cols: int,
@@ -756,11 +767,19 @@ class HostBuffer:
         assert total_rows <= gpu_target.size(0), (
             f"Gather needs {total_rows} rows but gpu_target has {gpu_target.size(0)}"
         )
+        coalesce = _coalesce_config()
+        n_target = len(segments[0][1])
+        page_size = self._backend.host_ftl.page_size
+        if coalesce is not None and page_size % row_bytes == 0 and total_rows > n_target:
+            return self._gather_coalesced(
+                pid, gpu_target, dev_offs, n_target, row_bytes, page_size, stream, coalesce
+            )
+
         runs_t = self._merge_runs(dev_offs, np.arange(total_rows, dtype=np.int64), row_bytes)
 
         print(
-            f"[gather_raw] pid={pid} target_rows={len(segments[0][1])} "
-            f"boundary_rows={total_rows - len(segments[0][1])} runs={runs_t.size(0)}"
+            f"[gather_raw] pid={pid} target_rows={n_target} "
+            f"boundary_rows={total_rows - n_target} runs={runs_t.size(0)}"
         )
 
         # The reads start in the background once `stream` reaches this point,
@@ -779,6 +798,123 @@ class HostBuffer:
         )
         # Job id: gpu_target holds the data only after self._ops.gather_wait(job).
         return job
+
+    def _gather_coalesced(
+        self,
+        pid: int,
+        gpu_target: Tensor,
+        dev_offs: np.ndarray,
+        n_target: int,
+        row_bytes: int,
+        page_size: int,
+        stream: torch.cuda.Stream,
+        cfg: Tuple[int, int],
+    ) -> "PendingRead":
+        """Gather with coalesced boundary reads (GRINNDER_READ_COALESCE=1).
+
+        Target rows: read straight into gpu_target, as in the plain path.
+        Boundary rows: sorted by device address and reduced to the flash
+        pages that hold them. Each page is read once, pages at most `gap`
+        bytes apart share one read, and the reads land in a GPU scratch
+        buffer. After the reads, one index_copy_ moves every needed row to
+        its place in gpu_target. No host memory is used for the data, so
+        this works with cuFile (GDS) as well as the NVMe passthrough path.
+
+        Scratch is capped at `max_bytes`: pages with the most needed rows
+        are taken first; rows on the remaining pages are read one by one
+        into gpu_target, as in the plain path.
+        """
+        gap, max_bytes = cfg
+        total_rows = len(dev_offs)
+        b_offs = dev_offs[n_target:]
+        b_gpu_rows = np.arange(n_target, total_rows, dtype=np.int64)
+
+        # Flash page of each boundary row, and the row's offset inside it.
+        row_page = b_offs - (b_offs % page_size)
+        pages, row_to_page, counts = np.unique(
+            row_page, return_inverse=True, return_counts=True
+        )   # pages sorted by device address
+
+        # Pick pages for the scratch buffer, most needed rows first.
+        max_pages = max(0, max_bytes // page_size)
+        if len(pages) <= max_pages:
+            chosen = np.ones(len(pages), dtype=bool)
+        else:
+            order = np.argsort(-counts, kind="stable")
+            chosen = np.zeros(len(pages), dtype=bool)
+            chosen[order[:max_pages]] = True
+        sel = pages[chosen]
+
+        # Reads: runs of chosen pages, joined when the gap between them is
+        # at most `gap` bytes (gap pages are read and ignored). Without room
+        # for the gaps, only touching pages are joined.
+        def page_runs(g: int):
+            if len(sel) == 0:
+                return np.empty(0, np.int64), np.empty(0, np.int64)
+            between = sel[1:] - (sel[:-1] + page_size)
+            breaks = np.flatnonzero(between > g) + 1
+            starts = np.concatenate(([0], breaks))
+            ends = np.concatenate((breaks, [len(sel)])) - 1
+            return sel[starts], sel[ends] + page_size - sel[starts]
+
+        run_dev, run_len = page_runs(gap)
+        if run_len.sum() > max_bytes and gap > 0:
+            run_dev, run_len = page_runs(0)
+        run_scr = np.concatenate(([0], np.cumsum(run_len)[:-1])).astype(np.int64)
+        scratch_bytes = int(run_len.sum())
+
+        # Scratch position of each chosen page: its run's start + offset in the run.
+        sel_run = np.searchsorted(run_dev, sel, side="right") - 1
+        sel_scr = run_scr[sel_run] + (sel - run_dev[sel_run])
+        page_scr = np.full(len(pages), -1, dtype=np.int64)
+        page_scr[chosen] = sel_scr
+
+        row_scr = page_scr[row_to_page]
+        in_scratch = row_scr >= 0
+        src_rows = (row_scr[in_scratch] + (b_offs[in_scratch] % page_size)) // row_bytes
+        dst_rows = b_gpu_rows[in_scratch]
+
+        # Direct reads: target rows + boundary rows not taken into scratch.
+        direct = np.concatenate((np.arange(n_target, dtype=np.int64), b_gpu_rows[~in_scratch]))
+        direct_runs = self._merge_runs(dev_offs[direct], direct, row_bytes)
+
+        jobs: List[Optional[int]] = []
+        scratch = None
+        stream.wait_stream(torch.cuda.current_stream(gpu_target.device))
+        with torch.cuda.stream(stream):
+            jobs.append(self._submit_read(gpu_target, direct_runs))
+            if scratch_bytes > 0:
+                # 4 KiB aligned start, so GDS can DMA straight into it.
+                raw = torch.empty(
+                    scratch_bytes + _IO_ALIGN, dtype=torch.uint8, device=gpu_target.device
+                )
+                lead = (-raw.data_ptr()) % _IO_ALIGN
+                scratch = raw[lead:lead + scratch_bytes]
+                scratch_runs = torch.from_numpy(
+                    np.stack([run_dev, run_scr, run_len], axis=1).astype(np.int64)
+                )
+                jobs.append(self._submit_read(scratch, scratch_runs))
+                src_idx = torch.from_numpy(src_rows).to(gpu_target.device, non_blocking=True)
+                dst_idx = torch.from_numpy(dst_rows).to(gpu_target.device, non_blocking=True)
+
+        def post():
+            if scratch is None:
+                return
+            with torch.cuda.stream(stream), torch.no_grad():
+                rows = scratch.view(gpu_target.dtype).view(-1, gpu_target.size(1))
+                gpu_target.index_copy_(0, dst_idx, rows.index_select(0, src_idx))
+            # Kernels queued later on the caller's stream see the rows.
+            torch.cuda.current_stream(gpu_target.device).wait_stream(stream)
+
+        n_b = total_rows - n_target
+        print(
+            f"[gather_coalesce] pid={pid} target_rows={n_target} boundary_rows={n_b} "
+            f"pages={len(pages)} scratch_pages={int(chosen.sum())} "
+            f"reads={direct_runs.size(0) + len(run_dev)} "
+            f"(direct={direct_runs.size(0)}, scratch={len(run_dev)}) "
+            f"scratch={scratch_bytes / 2**20:.1f} MiB gap={gap // 1024} KiB"
+        )
+        return PendingRead(self._ops, jobs, post)
 
     # ------------------------------------------------------------------
     # SSD <-> GPU helpers (host FTL addressing, host memory only as staging)

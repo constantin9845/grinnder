@@ -151,6 +151,8 @@ class DeviceBuffer:
             """
             self.wait_gather(pid)
             self.allocate(pid)
+            # A job id, or a PendingRead with --read_coalesce (its wait()
+            # also copies the scratch rows into place).
             job = host_buffer.async_gather_direct_raw(
                 phase, fds, pid, self._tensors[pid], boundaries, stream
             )
