@@ -52,6 +52,11 @@ bool device_read_and_verify(
 
 int64_t register_fd(int raw_fd);
 
+/* GDS mode (cuFile batch path + its workarounds). Set by StorageBackend from
+   config.gds (--gds) before any I/O; off by default. */
+void set_gds_direct(bool on);
+bool get_gds_direct();
+
 static inline uint64_t encode_host_ftl_bit(uint64_t raw_ppa);
 
 void gather_partitions_direct_raw(

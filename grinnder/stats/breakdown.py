@@ -155,6 +155,8 @@ class TimeBreakdown:
         self._counts: Dict[str, Dict[str, int]] = {}
         self._wall_ns: Dict[str, int] = {}
         self._snapshots: Dict[str, dict] = {}
+        # Run settings saved with the JSON (e.g. io_mode, gds).
+        self.meta: Dict[str, object] = {}
 
     # ---- recording -----------------------------------------------------
 
@@ -413,6 +415,7 @@ class TimeBreakdown:
             json.dump(
                 {
                     "schema": 2,
+                    "meta": self.meta,
                     "categories": {c: LABELS[c] for c in ALL_CATEGORIES},
                     "tree": {c: list(leaves) for c, leaves in TREE.items()},
                     "epochs": [

@@ -75,13 +75,22 @@ class Trainer:
         # io_mode: 'ours' = host FTL, targeted SSD <-> GPU; 'base' = original
         # GriNNder (partition files, DRAM partition cache).
         self.backend = (
-            StorageBackend(config.storage_dir, io_mode=config.io_mode)
+            StorageBackend(config.storage_dir, io_mode=config.io_mode, gds=config.gds)
             if config.mode == "grinnder"
             else None
         )
 
         # CUDA streams
         self.streams = StreamManager(pool_size=config.pool_size, device=config.device)
+
+        stat.breakdown.meta.update(
+            mode=config.mode,
+            io_mode=config.io_mode,
+            gds=bool(self.backend is not None and self.backend.gds),
+            row_order=config.row_order,
+            pool_size=config.pool_size,
+            num_parts=config.num_parts,
+        )
 
         # HostBuffers for activations: one per layer (0..L)
         # Layer 0 = input features, Layers 1..L = output of each layer

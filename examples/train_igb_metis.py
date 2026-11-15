@@ -95,6 +95,10 @@ def main():
     parser.add_argument("--cache-size", "--cache_size", dest="cache_size", type=str, default=None,
                         help="Base only: DRAM limit for the partition cache, e.g. 16GB, 512MB, 16 "
                              "(GB). Default: available memory minus safety margin.")
+    parser.add_argument("--gds", type=int, default=0, choices=[0, 1],
+                        help="Ours only. 1: SSD<->GPU reads/writes via cuFile batch I/O "
+                             "(GPUDirect Storage). 0 (default): NVMe passthrough + pinned "
+                             "host buffer. Ignored with --io_mode base.")
     parser.add_argument("--breakdown_json", type=str, default="time_breakdown.json",
                         help="Where to save the per-epoch time breakdown (SSD / data movement / compute).")
     parser.add_argument("--row_order", type=str, default="original", choices=["original", "grouped"],
@@ -152,11 +156,13 @@ def main():
         device=device,
         io_mode=args.io_mode,
         cache_size_gb=cache_size_gb,
+        gds=bool(args.gds) and args.io_mode == "ours",
         row_order=args.row_order,
     )
     print(
         f"\nIO mode: {config.io_mode}"
         + (f", Cache size: {cache_size_gb:.2f}GB" if config.io_mode == "base" and cache_size_gb else "")
+        + (f", GDS: {'on' if config.gds else 'off'}" if config.io_mode == "ours" else "")
         + f", Row order: {config.row_order}"
     )
     print(

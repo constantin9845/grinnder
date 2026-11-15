@@ -123,6 +123,9 @@ def main() -> int:
     if not args.no_host:
         header += f" on `{socket.gethostname()}`"
     lines = [header]
+    meta = data.get("meta") or {}
+    if meta:
+        lines.append(" · ".join(f"{k}={v}" for k, v in meta.items()))
     if args.message:
         lines.append(args.message)
     lines.append(f"```{summary_line(data)}```")

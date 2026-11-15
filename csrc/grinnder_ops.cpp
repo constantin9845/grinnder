@@ -50,6 +50,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
   m.def("device_read_and_verify", &device_read_and_verify, "Write CPU tensors to storage and verify no corruption");
   m.def("register_fd", &register_fd, "register fd with CUfile");
+  m.def("set_gds_direct", &set_gds_direct, "Turn GDS mode (cuFile batch path) on or off");
+  m.def("get_gds_direct", &get_gds_direct, "Whether GDS mode is on");
   m.def("gather_partitions_direct_raw", &gather_partitions_direct_raw,
         "Gather rows from raw block device to GPU tensor (blocking)",
         py::call_guard<py::gil_scoped_release>());

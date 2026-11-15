@@ -179,7 +179,7 @@ class PPA:
 
 
 class FTL:
-    def __init__(self, device="/dev/nvme0n1", row_size=4096):
+    def __init__(self, device="/dev/nvme0n1", row_size=4096, gds=False):
 
         '''
             1 sector = 512 B
@@ -261,6 +261,10 @@ class FTL:
         # Bumped on every L2P change; cached per-tensor device LBA arrays
         # (get_tensor_dev_lbas) are rebuilt when it moved.
         self._map_version = 0
+
+        # SSD <-> GPU data path: cuFile batch I/O (True) or NVMe passthrough
+        # + pinned host buffer (False). Set by StorageBackend (config.gds).
+        self.gds = bool(gds)
 
         self._ops = _load_ops()
         self.device_fd = self.open_device(device)
@@ -801,8 +805,8 @@ class FTL:
         with stat.timed("ftl.runs.build"):
             runs = self.get_tensor_io_runs(file_id)
             runs_t = torch.tensor(runs, dtype=torch.int64).reshape(-1, 3)
-        if os.environ.get("GRINNDER_GDS_DIRECT") == "1":
-            # cuFile batch writes (real GDS path)
+        if self.gds:
+            # cuFile batch writes (GDS path)
             job = self._ops.gpu_write_async(
                 self.cuFD, tensor, runs_t, self.sector_size, self.page_size
             )

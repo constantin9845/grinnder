@@ -863,7 +863,7 @@ class HostBuffer:
         if runs_t.size(0) == 0:
             return None
         ftl = self._backend.host_ftl
-        if os.environ.get("GRINNDER_GDS_DIRECT") == "1":
+        if ftl.gds:
             # cuFile batch reads (real GDS path)
             return self._ops.gather_partitions_direct_raw_async(
                 ftl.cuFD, gpu_target, runs_t, ftl.sector_size
@@ -881,7 +881,7 @@ class HostBuffer:
         if runs_t.size(0) == 0:
             return None
         ftl = self._backend.host_ftl
-        if os.environ.get("GRINNDER_GDS_DIRECT") == "1":
+        if ftl.gds:
             return self._ops.gpu_write_async(
                 ftl.cuFD, gpu_src, runs_t, ftl.sector_size, ftl.page_size
             )

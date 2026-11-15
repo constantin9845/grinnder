@@ -32,9 +32,22 @@ class StorageBackend:
     All files stored under ``storage_dir/{file_id}.pt``.
     """
 
-    def __init__(self, storage_dir: str, queue_depth: int = 64, io_mode: str = "ours"):
+    def __init__(
+        self,
+        storage_dir: str,
+        queue_depth: int = 64,
+        io_mode: str = "ours",
+        gds: bool = False,
+    ):
         assert io_mode in ("ours", "base"), f"unknown io_mode {io_mode!r}"
         self.io_mode = io_mode
+        # Ours only: cuFile batch I/O (True) or NVMe passthrough + pinned
+        # host buffer (False). Base never uses either.
+        if gds and io_mode != "ours":
+            print("[storage] gds only applies to io_mode=ours; ignored")
+        self.gds = bool(gds) and io_mode == "ours"
+        if io_mode == "ours":
+            self._set_gds_mode(self.gds)
         self._storage_dir = ensure_dir(storage_dir)
 
         # GPU <-> Storage: kvikio required
@@ -65,7 +78,11 @@ class StorageBackend:
         
         # ours: host FTL on the raw device. base: plain files under storage_dir,
         # the raw device is never touched.
-        self.host_ftl = FTL() if io_mode == "ours" else None
+        self.host_ftl = FTL(gds=self.gds) if io_mode == "ours" else None
+        if io_mode == "ours":
+            print("[storage] ours I/O path: "
+                  + ("GDS (cuFile batch)" if self.gds
+                     else "NVMe passthrough + pinned host buffer"))
 
         # file_id -> job id of an async GPU write still in flight (ours only)
         # file_id -> (write job, breakdown key of waiting for it)
@@ -74,6 +91,23 @@ class StorageBackend:
         self._handle_keys: Dict[int, str] = {}
         # base: pinned staging buffers for GPU -> file writes (allocated on first use)
         self._staging: Optional[list] = None
+
+    @staticmethod
+    def _set_gds_mode(gds: bool) -> None:
+        """Pass the GDS choice (config.gds / --gds) to the C++ side, which
+        applies the real-GDS workarounds when it is on. This is the only
+        switch; GRINNDER_GDS_DIRECT is no longer read."""
+        if os.environ.get("GRINNDER_GDS_DIRECT"):
+            print("[storage] GRINNDER_GDS_DIRECT is ignored; use --gds 0|1")
+        try:
+            from grinnder._C import set_gds_direct, get_gds_direct
+        except ImportError as e:
+            raise ImportError(
+                "grinnder._C has no set_gds_direct: rebuild the C++ extension "
+                "(pip install -e . --no-build-isolation)"
+            ) from e
+        set_gds_direct(bool(gds))
+        assert get_gds_direct() == bool(gds)
 
     @property
     def uses_ftl(self) -> bool:

@@ -29,19 +29,21 @@
 #include <thread>
 #include <functional>
 
-// Set GRINNDER_GDS_DIRECT=1 when cuFile runs on the real GDS path (nvidia-fs
-// loaded, compat mode off). It turns on two workarounds that only that path needs:
+// GDS mode, set from Python by StorageBackend (config.gds, i.e. --gds) through
+// set_gds_direct() before any I/O. On, Python uses the cuFile batch functions
+// and these two workarounds that the real GDS path needs are applied:
 //  - each batch IO gets its own devPtr_base with devPtr_offset = 0, because for
 //    unregistered buffers GDS rejects devPtr_offset + size > 1 MiB;
 //  - only one cuFile batch runs at a time, because overlapping batches hit an
 //    internal libcufile assertion (cufio_batch line 521).
-// Leave it unset for compat mode, which needs neither and runs faster without them.
+// Off (default), Python uses the NVMe passthrough functions instead.
+static std::atomic<bool> g_gds_direct{false};
+
+void set_gds_direct(bool on) { g_gds_direct.store(on); }
+bool get_gds_direct() { return g_gds_direct.load(); }
+
 static bool gds_direct_mode() {
-    static const bool on = [] {
-        const char* v = std::getenv("GRINNDER_GDS_DIRECT");
-        return v && v[0] == '1';
-    }();
-    return on;
+    return g_gds_direct.load(std::memory_order_relaxed);
 }
 
 static std::unordered_map<int, CUfileHandle_t> g_cufile_handles;

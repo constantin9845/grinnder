@@ -77,6 +77,13 @@ class GriNNderConfig:
     #               applied on top of the partition cache at load time.
     row_order: Literal["original", "grouped"] = "original"
 
+    # Ours only: SSD <-> GPU data path of the FTL reads and writes.
+    #   False: NVMe passthrough on the raw device + pinned host buffer.
+    #   True:  cuFile batch I/O (GPUDirect Storage), with the C++
+    #          workarounds the real GDS path needs.
+    # Set it with --gds 0|1 in the training scripts; nothing else decides it.
+    gds: bool = False
+
     # System
     device: str = "cuda:0"
     pool_size: int = 2  # Double buffering
