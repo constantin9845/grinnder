@@ -403,7 +403,7 @@ class PartitionCache:
 
         
 
-    @timed("transfer")
+    @timed("transfer.cpu.gather")
     def gather_with_swapping(
         self,
         phase,

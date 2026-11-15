@@ -16,7 +16,7 @@ import os
 from torch import Tensor
 
 from grinnder.storage.backend import StorageBackend
-from grinnder.stats import stat, timed
+from grinnder.stats import stat, timed, timed_by
 
 
 def _load_ops():
@@ -57,17 +57,21 @@ class PendingRead:
     """Async SSD -> GPU read: one or more gather jobs, plus an optional step
     (e.g. summing gradient contributions) that runs once they finished."""
 
-    def __init__(self, ops, jobs: List[Optional[int]], post=None):
+    def __init__(self, ops, jobs: List[Optional[int]], post=None, kind: str = "partition"):
         self._ops = ops
         self._jobs = [j for j in jobs if j is not None]
         self._post = post
+        self._wait_key = f"ssd.read.{kind}.wait"   # kind: partition | gradient
 
     def wait(self) -> None:
-        while self._jobs:
-            self._ops.gather_wait(self._jobs.pop(0))
+        if self._jobs:
+            with stat.timed(self._wait_key):
+                while self._jobs:
+                    self._ops.gather_wait(self._jobs.pop(0))
         post, self._post = self._post, None
         if post is not None:
-            post()
+            with stat.timed("compute.grad_sum"):
+                post()
 
 
 def _empty_pinned_host_cache() -> None:
@@ -105,6 +109,7 @@ class HostBuffer:
         backend: Optional[StorageBackend] = None,
         file_prefix: str = "host",
         lazy: bool = True,
+        kind: str = "activation",
         pin_memory: bool = False,
     ):
         self.num_parts = num_parts
@@ -142,6 +147,13 @@ class HostBuffer:
             self._tensors.append(t)
 
         self._ops = _load_ops()
+
+        # "activation" (features/activations) or "gradient": picks the
+        # breakdown keys of this buffer's transfers and SSD writes.
+        assert kind in ("activation", "gradient"), kind
+        self.kind = kind
+        self._h2d_key = "transfer.h2d." + ("features" if kind == "activation" else "gradient")
+        self._d2h_key = f"transfer.d2h.{kind}"
 
         # pid -> PendingRead of an SSD -> GPU read started by async_read_raw
         self._pending_reads: Dict[int, "PendingRead"] = {}
@@ -274,7 +286,7 @@ class HostBuffer:
                 self._tensors[pid].copy_(gpu_data, non_blocking=True)
         self._zero_initialized[pid] = True
 
-    @timed("transfer")
+    @timed_by(lambda self, *a, **k: self._d2h_key)
     def d2h_synchronize(self, stream: torch.cuda.Stream) -> None:
         """Wait for D2H operations to complete.
 
@@ -295,7 +307,7 @@ class HostBuffer:
     # Host -> GPU (H2D)
     # ------------------------------------------------------------------
 
-    @timed("transfer")
+    @timed_by(lambda self, *a, **k: self._h2d_key)
     def async_upload(
         self, phase, pid: int, gpu_target: Tensor, stream: torch.cuda.Stream
     ) -> None:
@@ -326,7 +338,7 @@ class HostBuffer:
 
 
 
-    @timed("transfer")
+    @timed_by(lambda self, *a, **k: self._h2d_key)
     def h2d_synchronize(
         self, stream: torch.cuda.Stream, pid: Optional[int] = None
     ) -> None:
@@ -349,7 +361,7 @@ class HostBuffer:
     # Gather: multiple host partitions -> one GPU tensor
     # ------------------------------------------------------------------
 
-    @timed("transfer")
+    @timed("transfer.cpu.gather")
     def async_gather(
         self,
         phase,
@@ -759,10 +771,11 @@ class HostBuffer:
         n_target = len(segments[0][1])
         runs_t = self._merge_runs(dev_offs, np.arange(total_rows, dtype=np.int64), row_bytes)
 
-        print(
-            f"[gather_raw] pid={pid} target_rows={n_target} "
-            f"boundary_rows={total_rows - n_target} runs={runs_t.size(0)}"
-        )
+        with stat.timed("ftl.log"):
+            print(
+                f"[gather_raw] pid={pid} target_rows={n_target} "
+                f"boundary_rows={total_rows - n_target} runs={runs_t.size(0)}"
+            )
 
         # The reads start in the background once `stream` reaches this point,
         # i.e. after everything already queued on the current stream (so memory
@@ -774,10 +787,11 @@ class HostBuffer:
         bt = gpu_target.numel() * gpu_target.element_size()
         gb = round(bt / (1024**3), 3)
 
-        print(
-            f"\tPartition {pid} loads "
-            f"{gb} GB from other partitions"
-        )
+        with stat.timed("ftl.log"):
+            print(
+                f"\tPartition {pid} loads "
+                f"{gb} GB from other partitions"
+            )
         # Job id: gpu_target holds the data only after self._ops.gather_wait(job).
         return job
 
@@ -823,6 +837,7 @@ class HostBuffer:
         return np.concatenate(dev_offs).astype(np.int64)
 
     @staticmethod
+    @timed("ftl.runs.merge")
     def _merge_runs(dev_offs: np.ndarray, gpu_rows: np.ndarray, row_bytes: int) -> Tensor:
         """Merge rows that are back to back both on the device and in the GPU
         tensor into runs of (dev_off, gpu_off, size), in bytes."""
@@ -834,6 +849,9 @@ class HostBuffer:
         ) + 1
         starts = np.concatenate(([0], breaks))
         lens = np.diff(np.concatenate((starts, [n])))
+        stat.breakdown.count("ftl.rows.in", n)
+        stat.breakdown.count("ftl.runs.out", len(starts))
+        stat.breakdown.count("ftl.bytes.read", int(n) * row_bytes)
         runs = np.stack(
             [dev_offs[starts], gpu_rows[starts] * row_bytes, lens * row_bytes], axis=1
         ).astype(np.int64)
@@ -888,7 +906,7 @@ class HostBuffer:
     # Whole partition: SSD -> GPU
     # ------------------------------------------------------------------
 
-    @timed("ssd")
+    @timed_by(lambda self, *a, **k: f"ssd.read.{'gradient' if self._accumulate else 'partition'}.submit")
     def async_read_raw(
         self, pid: int, gpu_target: Tensor, stream: torch.cuda.Stream, track: bool = True
     ) -> "PendingRead":
@@ -918,12 +936,14 @@ class HostBuffer:
             # Whole tensor: the FTL's page runs, as written. Works for any row
             # size (e.g. 76-byte logits rows); the last page's padding is
             # read but not copied.
-            runs = self._backend.host_ftl.get_tensor_io_runs(self._file_id(pid))
-            runs_t = torch.tensor(runs, dtype=torch.int64).reshape(-1, 3)
+            with stat.timed("ftl.runs.build"):
+                runs = self._backend.host_ftl.get_tensor_io_runs(self._file_id(pid))
+                runs_t = torch.tensor(runs, dtype=torch.int64).reshape(-1, 3)
             with torch.cuda.stream(stream):
                 job = self._submit_read(gpu_target, runs_t)
             pending = PendingRead(self._ops, [job])
-            print(f"[read_raw] {self._file_id(pid)} runs={runs_t.size(0)}")
+            with stat.timed("ftl.log"):
+                print(f"[read_raw] {self._file_id(pid)} runs={runs_t.size(0)}")
         tn = time.perf_counter_ns()
         stat.load_GPU_timestamp("gradient", "copy", t0, tn)
 
@@ -931,7 +951,7 @@ class HostBuffer:
             self._pending_reads[pid] = pending
         return pending
 
-    @timed("ssd")
+    @timed_by(lambda self, *a, **k: f"ssd.read.{'gradient' if self._accumulate else 'partition'}.wait")
     def wait_reads(self, pid: Optional[int] = None) -> None:
         """Wait for async_read_raw reads of one partition (or all)."""
         if not self._pending_reads:
@@ -998,11 +1018,11 @@ class HostBuffer:
         stream.wait_stream(torch.cuda.current_stream(gpu_grad.device))
         # Same write path as forward activations (FTL, mapping reused when
         # the size matches). The job keeps gpu_grad alive until it is done.
-        self._backend.gpu_write(gpu_grad, file_id, stream, async_=True)
+        self._backend.gpu_write(gpu_grad, file_id, stream, async_=True, kind="gradient")
         self._pending_contrib.append(file_id)
         self._contrib[pid] = (file_id, segs)
 
-    @timed("ssd")
+    @timed("ssd.write.gradient.wait")
     def wait_accumulations(self) -> None:
         """Wait for in-flight contribution writes of this buffer."""
         if self._pending_contrib:
@@ -1062,17 +1082,18 @@ class HostBuffer:
                 for idx, s, n in adds:
                     gpu_target.index_add_(0, idx, staging[s:s + n])
 
-        print(
-            f"[read_grad] {self._file_prefix}_p{pid} own={'yes' if own else 'no'} "
-            f"from_others={len(others)} rows={sum(n for _, (_, n, _) in others)}"
-        )
-        return PendingRead(self._ops, jobs, post)
+        with stat.timed("ftl.log"):
+            print(
+                f"[read_grad] {self._file_prefix}_p{pid} own={'yes' if own else 'no'} "
+                f"from_others={len(others)} rows={sum(n for _, (_, n, _) in others)}"
+            )
+        return PendingRead(self._ops, jobs, post, kind="gradient")
 
     # ------------------------------------------------------------------
     # Scatter: one GPU tensor -> multiple host partitions (with accumulation)
     # ------------------------------------------------------------------
 
-    @timed("transfer")
+    @timed("transfer.cpu.scatter")
     def async_scatter(
         self,
         pid: int,
@@ -1146,7 +1167,7 @@ class HostBuffer:
         # i.e. after the kernels that produced gpu_data. Call
         # wait_storage_writes(pid) before freeing or overwriting gpu_data.
         stream.wait_stream(torch.cuda.current_stream(gpu_data.device))
-        self._backend.gpu_write(gpu_data, file_id, stream, async_=True)
+        self._backend.gpu_write(gpu_data, file_id, stream, async_=True, kind=self.kind)
 
     def wait_storage_writes(self, pid: Optional[int] = None) -> None:
         """Wait for async GPU->SSD writes of one partition (or all of this buffer)."""

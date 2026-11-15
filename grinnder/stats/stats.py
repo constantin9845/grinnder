@@ -65,9 +65,10 @@ class Stat:
         # compute / other (see breakdown.py).
         self.breakdown = TimeBreakdown()
 
-    def timed(self, category: str):
-        """with stat.timed("ssd" | "transfer" | "compute"): ..."""
-        return self.breakdown.timed(category)
+    def timed(self, key: str):
+        """with stat.timed("ssd.read.gather.wait"): ... (any key of
+        breakdown.TREE, or a bare top-level category)."""
+        return self.breakdown.timed(key)
 
 
     def started(self):
@@ -666,15 +667,31 @@ class Stat:
 stat = Stat()
 
 
-def timed(category: str):
-    """Decorator: the call's time counts for `category` in the epoch time
-    breakdown ("ssd", "transfer" or "compute"; nested timers win)."""
+def timed(key: str):
+    """Decorator: the call's time counts for `key` in the epoch time
+    breakdown (a breakdown.TREE key such as "ftl.runs.merge", or a bare
+    top-level category; nested timers win)."""
     import functools
 
     def deco(fn):
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
-            with stat.breakdown.timed(category):
+            with stat.breakdown.timed(key):
+                return fn(*args, **kwargs)
+
+        return wrapper
+
+    return deco
+
+def timed_by(key_fn):
+    """Decorator like timed(), with the key chosen per call:
+    key_fn(*args, **kwargs) -> key (e.g. from the buffer's kind)."""
+    import functools
+
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            with stat.breakdown.timed(key_fn(*args, **kwargs)):
                 return fn(*args, **kwargs)
 
         return wrapper

@@ -3,6 +3,8 @@ import ctypes
 import numpy as np
 import torch
 
+from grinnder.stats import stat, timed
+
 def _load_ops():
     """Lazy-load C++ extension ops."""
     try:
@@ -636,12 +638,13 @@ class FTL:
 
         self.next_free_lba = end_lba + 1
 
-        print(
-            f"[FTL] Registered '{file_id}': "
-            f"LBAs {start_lba}..{end_lba} "
-            f"({sectors_needed} sectors, "
-            f"{total_bytes / (1024**2):.2f} MB)"
-        )
+        with stat.timed("ftl.log"):
+            print(
+                f"[FTL] Registered '{file_id}': "
+                f"LBAs {start_lba}..{end_lba} "
+                f"({sectors_needed} sectors, "
+                f"{total_bytes / (1024**2):.2f} MB)"
+            )
 
         return self.tensor_table[file_id]
 
@@ -734,9 +737,8 @@ class FTL:
 
         del self.tensor_table[file_id]
 
-        print(
-            f"[FTL] Unmapped tensor '{file_id}'"
-        )
+        with stat.timed("ftl.log"):
+            print(f"[FTL] Unmapped tensor '{file_id}'")
 
     def _convert_ppas_to_tensor(
         self,
@@ -776,8 +778,9 @@ class FTL:
         assert tensor.is_contiguous(), ("device write requires contiguous tensor")
 
         assert not tensor.is_cuda and tensor.is_contiguous()
-        runs = self.get_tensor_io_runs(file_id)           
-        runs_t = torch.tensor(runs, dtype=torch.int64)      
+        with stat.timed("ftl.runs.build"):
+            runs = self.get_tensor_io_runs(file_id)
+            runs_t = torch.tensor(runs, dtype=torch.int64)
         self._ops.device_write(self.device_fd, tensor, runs_t, self.sector_size, self.page_size)
 
         
@@ -795,8 +798,9 @@ class FTL:
         )
 
         # Same LBA runs as device_write; read from the current mapping.
-        runs = self.get_tensor_io_runs(file_id)
-        runs_t = torch.tensor(runs, dtype=torch.int64).reshape(-1, 3)
+        with stat.timed("ftl.runs.build"):
+            runs = self.get_tensor_io_runs(file_id)
+            runs_t = torch.tensor(runs, dtype=torch.int64).reshape(-1, 3)
         if os.environ.get("GRINNDER_GDS_DIRECT") == "1":
             # cuFile batch writes (real GDS path)
             job = self._ops.gpu_write_async(
@@ -830,8 +834,9 @@ class FTL:
             "device_read_and_verify requires a contiguous CPU tensor"
         )
 
-        runs = self.get_tensor_io_runs(file_id)
-        runs_t = torch.tensor(runs, dtype=torch.int64)
+        with stat.timed("ftl.runs.build"):
+            runs = self.get_tensor_io_runs(file_id)
+            runs_t = torch.tensor(runs, dtype=torch.int64)
         return self._ops.device_read_and_verify(
             self.device_fd, tensor, runs_t, self.sector_size, self.page_size
         )
@@ -891,6 +896,7 @@ class FTL:
         ]
     
 
+    @timed("ftl.translate.rows")
     def get_row_file_offsets(self, file_id, rows, row_bytes):
         """Device byte offsets (cuFile file_offset) for the given row indices"""
         if self.page_size % row_bytes != 0:
@@ -917,8 +923,11 @@ class FTL:
         meta = self.tensor_table[file_id]
         cached = meta.get("_dev_lba_cache")
         if cached is not None and cached[0] == self._map_version:
+            stat.breakdown.count("ftl.lookup.hit")
             return cached[1]
-        out = self._walk_tensor_dev_lbas(file_id, meta)
+        stat.breakdown.count("ftl.lookup.miss")
+        with stat.timed("ftl.lookup.walk"):
+            out = self._walk_tensor_dev_lbas(file_id, meta)
         out.setflags(write=False)   # shared by all callers
         meta["_dev_lba_cache"] = (self._map_version, out)
         return out
@@ -929,6 +938,7 @@ class FTL:
         idx = self._mapped_pages(self._lpns_of(meta), f"'{file_id}'")
         return idx.astype(np.uint64) * np.uint64(self.nsec)
 
+    @timed("ftl.runs.build")
     def get_tensor_io_runs(self, file_id):
         return self._build_io_runs(self.get_tensor_dev_lbas(file_id))
 

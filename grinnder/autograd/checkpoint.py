@@ -40,13 +40,13 @@ class HongtuCheckpoint(saved_tensors_hooks):
 
     def __init__(self, pid: int, device_buffer: DeviceBuffer):
         def pack(tensor: Tensor):
-            with stat.timed("transfer"):  # snapshot GPU -> host
+            with stat.timed("transfer.checkpoint"):  # snapshot GPU -> host
                 return (tensor.device, tensor.cpu(), device_buffer)
 
         def unpack(packed):
             device, cpu_tensor, dbuf = packed
             dbuf.allocate(pid)
-            with stat.timed("transfer"):  # snapshot host -> GPU
+            with stat.timed("transfer.checkpoint"):  # snapshot host -> GPU
                 dbuf[pid].copy_(cpu_tensor)
             return dbuf[pid]
 

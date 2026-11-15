@@ -11,13 +11,13 @@ from __future__ import annotations
 import contextlib
 import os
 import shutil
-from typing import Dict, Iterable, Optional
+from typing import Dict, Iterable, Optional, Tuple
 
 import torch
 from torch import Tensor
 
 from grinnder.utils import ensure_dir
-from grinnder.stats import stat, timed
+from grinnder.stats import stat, timed, timed_by
 from grinnder.ftl import FTL
 
 
@@ -68,7 +68,10 @@ class StorageBackend:
         self.host_ftl = FTL() if io_mode == "ours" else None
 
         # file_id -> job id of an async GPU write still in flight (ours only)
-        self._pending_gpu_writes: Dict[str, int] = {}
+        # file_id -> (write job, breakdown key of waiting for it)
+        self._pending_gpu_writes: Dict[str, Tuple[int, str]] = {}
+        # base mode: io_uring handle -> breakdown key of waiting for it
+        self._handle_keys: Dict[int, str] = {}
         # base: pinned staging buffers for GPU -> file writes (allocated on first use)
         self._staging: Optional[list] = None
 
@@ -83,13 +86,14 @@ class StorageBackend:
     # GPU <-> Storage (kvikio / GPUDirect Storage)
     # ------------------------------------------------------------------
 
-    @timed("ssd")
+    @timed_by(lambda self, *a, kind="activation", **k: f"ssd.write.{kind}.submit")
     def gpu_write(
         self,
         tensor: Tensor,
         file_id: str,
         stream: Optional[torch.cuda.Stream] = None,
         async_: bool = False,
+        kind: str = "activation",
     ) -> None:
         """Write a GPU tensor directly to NVMe via GDS (host FTL LBA runs).
 
@@ -100,14 +104,17 @@ class StorageBackend:
         With async_=True the write runs in the background (cuFile batch API).
         Call wait_gpu_writes() before freeing or overwriting `tensor`;
         reads of the same file_id wait automatically.
+
+        kind ("activation" | "gradient") only labels the time breakdown.
         """
+        assert kind in ("activation", "gradient"), kind
 
         assert tensor.is_cuda, "gpu_write requires a CUDA tensor"
         assert tensor.is_contiguous(), "gpu_write requires contiguous tensor"
 
         if not self.uses_ftl:
             # base (original GriNNder): whole tensor to its file, synchronous.
-            self._base_gpu_write(tensor, file_id, stream)
+            self._base_gpu_write(tensor, file_id, stream, kind)
             return
 
         # A previous write of this file must land before we overwrite it.
@@ -117,17 +124,22 @@ class StorageBackend:
         nbytes = tensor.numel() * tensor.element_size()
         meta = ftl.tensor_table.get(file_id)
         if meta is not None and meta["total_bytes"] != nbytes:
-            ftl.delete_tensor(file_id)
+            with stat.timed("ftl.map.unmap"):
+                ftl.delete_tensor(file_id)
+            stat.breakdown.count("ftl.map.unmap")
             meta = None
         if meta is None:
-            meta = ftl.map_tensor(file_id, tensor)
+            with stat.timed("ftl.map.alloc"):
+                meta = ftl.map_tensor(file_id, tensor)
+            stat.breakdown.count("ftl.map.alloc")
+            stat.breakdown.count("ftl.pages.alloc", meta["num_pages"])
 
         # The write starts once all work queued so far on `stream`
         # (or the current stream) has finished.
         with torch.cuda.stream(stream) if stream is not None else contextlib.nullcontext():
             job = ftl.gpu_write(meta, tensor, file_id, async_=async_)
         if async_:
-            self._pending_gpu_writes[file_id] = job
+            self._pending_gpu_writes[file_id] = (job, f"ssd.write.{kind}.wait")
 
     # GPU -> file in base mode goes through two reusable pinned buffers of
     # this size, so host memory use stays fixed (and O_DIRECT keeps the data
@@ -135,15 +147,20 @@ class StorageBackend:
     _BASE_STAGING_BYTES = 64 << 20
 
     def _base_gpu_write(
-        self, tensor: Tensor, file_id: str, stream: Optional[torch.cuda.Stream]
+        self,
+        tensor: Tensor,
+        file_id: str,
+        stream: Optional[torch.cuda.Stream],
+        kind: str = "activation",
     ) -> None:
+        wait_key = f"ssd.write.{kind}.wait"
         stream = stream or torch.cuda.current_stream(tensor.device)
         stream.synchronize()
         src = tensor.detach().contiguous().view(-1).view(torch.uint8)
         nbytes = src.numel()
         path = self._path(file_id)
         if nbytes == 0:
-            self.wait(self._io_engine.submit_write(path, src.cpu(), 0, 0))
+            self.wait(self._io_engine.submit_write(path, src.cpu(), 0, 0), key=wait_key)
             return
 
         if self._staging is None:
@@ -157,19 +174,18 @@ class StorageBackend:
         for i, off in enumerate(range(0, nbytes, chunk)):
             slot = i % 2
             if pending[slot] is not None:
-                self.wait(pending[slot])  # staging buffer free again
+                self.wait(pending[slot], key=wait_key)  # staging buffer free again
             n = min(chunk, nbytes - off)
             buf = self._staging[slot]
-            with stat.timed("transfer"):  # GPU -> pinned staging
+            with stat.timed("transfer.staging"):  # GPU -> pinned staging
                 with torch.cuda.stream(stream):
                     buf[:n].copy_(src[off:off + n], non_blocking=True)
                 stream.synchronize()
             # Chunks start at multiples of 64 MiB, so file offsets stay aligned.
             pending[slot] = self._io_engine.submit_write(path, buf, off, n)
         for h in pending:
-            self.wait(h)
+            self.wait(h, key=wait_key)
 
-    @timed("ssd")
     def wait_gpu_writes(
         self,
         file_ids: Optional[Iterable[str]] = None,
@@ -189,8 +205,9 @@ class StorageBackend:
         else:
             targets = [f for f in self._pending_gpu_writes if f.startswith(prefix)]
         for f in targets:
-            job = self._pending_gpu_writes.pop(f)
-            self.host_ftl.gpu_write_wait(job)
+            job, key = self._pending_gpu_writes.pop(f)
+            with stat.timed(key):
+                self.host_ftl.gpu_write_wait(job)
 
         #verify = self.host_ftl.verify_write(meta, tensor, file_id)
         #assert verify, f"Data verification failed for file_id={file_id}! DRAM contents corrupted."
@@ -265,7 +282,7 @@ class StorageBackend:
     # Host <-> Storage : used for initial storage of partitioned graph features
     # --------------------------------------------------------------------------
 
-    @timed("ssd")
+    @timed("ssd.host.write")
     def host_write(self, tensor: Tensor, file_id: str, async_: bool = True) -> Optional[int]:
         """Write a CPU tensor to storage.
 
@@ -277,19 +294,25 @@ class StorageBackend:
         assert tensor.is_contiguous(), "host_write requires contiguous tensor"
 
         if not self.uses_ftl:
-            return self._io_engine.submit_write(
+            h = self._io_engine.submit_write(
                 self._path(file_id), tensor, 0, tensor.numel() * tensor.element_size()
             )
+            self._handle_keys[h] = "ssd.host.write"
+            return h
 
-        meta = self.host_ftl.map_tensor(file_id, tensor)
+        with stat.timed("ftl.map.alloc"):
+            meta = self.host_ftl.map_tensor(file_id, tensor)
+        stat.breakdown.count("ftl.map.alloc")
+        stat.breakdown.count("ftl.pages.alloc", meta["num_pages"])
         self.host_ftl.device_write(meta, tensor, file_id)
 
-        verify = self.host_ftl.verify_write(meta, tensor, file_id)
+        with stat.timed("ftl.verify"):
+            verify = self.host_ftl.verify_write(meta, tensor, file_id)
         assert verify, f"Data verification failed for file_id={file_id}! DRAM contents corrupted."
         return None
 
 
-    @timed("ssd")
+    @timed("ssd.host.read")
     def host_read(self, file_id: str, tensor: Tensor, async_: bool = True) -> int:
         """Read a file into a CPU tensor via io_uring (base mode).
 
@@ -301,14 +324,23 @@ class StorageBackend:
         assert not tensor.is_cuda, "host_read requires a CPU tensor"
         assert tensor.is_contiguous(), "host_read requires contiguous tensor"
 
-        return self._io_engine.submit_read(
+        h = self._io_engine.submit_read(
             path, tensor, 0, tensor.numel() * tensor.element_size()
         )
+        self._handle_keys[h] = "ssd.host.read"
+        return h
 
-    @timed("ssd")
-    def wait(self, handle: Optional[int]) -> None:
-        """Wait for an async io_uring operation to complete (None: nothing to wait)."""
-        if handle is not None:
+    def wait(self, handle: Optional[int], key: Optional[str] = None) -> None:
+        """Wait for an async io_uring operation to complete (None: nothing to wait).
+
+        The time counts for `key`, else for the key host_read/host_write
+        recorded for the handle.
+        """
+        if handle is None:
+            return
+        key = key or self._handle_keys.pop(handle, "ssd")
+        self._handle_keys.pop(handle, None)
+        with stat.timed(key):
             self._io_engine.wait(handle)
 
     @timed("ssd")

@@ -104,6 +104,7 @@ class Trainer:
                     num_parts, graph.partition_sizes, dims[l],
                     backend=self.backend,
                     file_prefix=f"grad_l{l}",
+                    kind="gradient",
                 )
             )
 
@@ -124,6 +125,7 @@ class Trainer:
                 DeviceBuffer(
                     num_parts, graph.partition_sizes, dims[l],
                     device=config.device,
+                    kind="gradient",
                 )
             )
 
@@ -426,7 +428,7 @@ class Trainer:
         from torch_sparse import SparseTensor
 
         rowptr, col, value = self.graph.adj_csr[pid]
-        with stat.timed("transfer"):  # adjacency host -> GPU
+        with stat.timed("transfer.h2d.adjacency"):
             return SparseTensor(
                 rowptr=rowptr.to(self.device),
                 col=col.to(self.device),
@@ -542,7 +544,7 @@ class Trainer:
         # (equivalent to CrossEntropyLoss(reduction='mean') over all nodes)
         bd.set_phase("optimizer")
         n_total_train = metrics.get("_n_train", 1)
-        with stat.timed("compute"):
+        with stat.timed("compute.optimizer"):
             if n_total_train > 0:
                 for param in self.model.parameters():
                     if param.grad is not None:
@@ -554,6 +556,8 @@ class Trainer:
             torch.cuda.synchronize(self.device)
             self._progress("optimizer step done")
 
+        if self.backend is not None and self.backend.uses_ftl:
+            bd.snapshot("ftl", self.backend.host_ftl.stats())
         bd.end_epoch()
         return metrics
 
@@ -691,7 +695,7 @@ class Trainer:
                 # saved_tensors_hooks wraps checkpoint(fn, x).
                 # checkpoint only saves x. adj loaded inside fn (not passed).
                 t00 = time.perf_counter_ns()
-                with stat.timed("compute"):
+                with stat.timed("compute.forward"):
                     if self.config.mode == "hongtu":
                         with HongtuCheckpoint(pid, self.device_features[layer_id]):
                             out = checkpoint(
@@ -828,7 +832,11 @@ class Trainer:
         )
         # Load adj inside (not passed to checkpoint)
         adj = self._get_adj(pid)
-        out = self.model.forward_layer(layer_id, x, adj)
+        # Reentrant checkpoint runs this under no_grad in forward and with
+        # grad enabled when backward recomputes it.
+        key = "compute.recompute" if torch.is_grad_enabled() else "compute.forward"
+        with stat.timed(key):
+            out = self.model.forward_layer(layer_id, x, adj)
         del adj
 
         return out
@@ -903,14 +911,14 @@ class Trainer:
                 print(f"LOSS : load partition [{next_pid}] [CPU --> GPU]")
 
             # Get masks and labels
-            with stat.timed("transfer"):
+            with stat.timed("transfer.h2d.labels"):
                 y = self.graph.partition_labels(pid).to(self.device)
             train_mask = self.graph.partition_train_mask(pid)
             val_mask = self.graph.partition_val_mask(pid)
             test_mask = self.graph.partition_test_mask(pid)
             out = self.activations[last_layer][pid]
 
-            with stat.timed("compute"):
+            with stat.timed("compute.loss"):
                 # Compute loss with sum reduction for partition-invariant gradients.
                 # Each partition contributes sum(losses) / total_train_nodes.
                 # This ensures identical gradients regardless of partition count.
@@ -1040,7 +1048,7 @@ class Trainer:
                 t0 = time.perf_counter_ns()
                 # Waits inside (re-gather, gradient offload) count for their
                 # own category.
-                with stat.timed("compute"):
+                with stat.timed("compute.backward"):
                     loss.backward(retain_graph=False)
                     self.streams.compute.synchronize()
 
@@ -1185,7 +1193,7 @@ class Trainer:
                     grad_buf = self.device_gradients[next_grad_layer]
 
                     t0 = time.perf_counter_ns()
-                    with stat.timed("compute"):
+                    with stat.timed("compute.backward"):
                         if grad_buf is not None and grad_buf.is_allocated(pid):
                             act.backward(grad_buf[pid], retain_graph=False)
                         else:
