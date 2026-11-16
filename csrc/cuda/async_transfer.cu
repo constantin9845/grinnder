@@ -810,20 +810,41 @@ int64_t gather_partitions_direct_raw_async(
     const int64_t dst_bytes = dst.numel() * dst.element_size();
 
     // Build the chunk list now, so bad runs fail in the caller.
+    // A run may extend past the end of dst (the zero-padded last page of a
+    // whole-tensor read, see gpu_write_async): the sectors that fit are read
+    // straight into dst, the rest of that chunk into a GPU scratch buffer, and
+    // only the bytes inside dst are copied over after the reads.
+    struct TailCopy {
+        torch::Tensor scratch;   // holds the chunk's padded end
+        int64_t dst_off;         // where its first byte goes in dst
+        int64_t bytes;           // bytes copied to dst (< scratch size)
+    };
     auto r = runs.to(at::kCPU).contiguous();
     const int64_t* rp = r.data_ptr<int64_t>();
     void* dst_raw = dst.data_ptr();
     std::vector<GpuWriteIo> ios;
+    std::vector<TailCopy> tails;
     for (int64_t k = 0; k < r.size(0); ++k) {
         const int64_t dev_off = rp[3*k], buf_off = rp[3*k+1], size = rp[3*k+2];
         TORCH_CHECK(dev_off % sector_size == 0 && size % sector_size == 0,
                     "gather run ", k, " not sector-aligned: dev_off=", dev_off, " size=", size);
-        TORCH_CHECK(buf_off >= 0 && buf_off + size <= dst_bytes,
-                    "gather run ", k, " exceeds dst: buf_off=", buf_off,
-                    " size=", size, " dst_bytes=", dst_bytes);
+        TORCH_CHECK(buf_off >= 0 && buf_off < dst_bytes,
+                    "gather run ", k, " starts outside dst: buf_off=", buf_off,
+                    " dst_bytes=", dst_bytes);
         for (int64_t done = 0; done < size; done += GPU_WRITE_MAX_IO) {
-            ios.push_back({dst_raw, buf_off + done, dev_off + done,
-                           std::min(GPU_WRITE_MAX_IO, size - done)});
+            const int64_t b = buf_off + done;
+            if (b >= dst_bytes) break;   // rest of the run is padding
+            const int64_t chunk = std::min(GPU_WRITE_MAX_IO, size - done);
+            if (b + chunk <= dst_bytes) {
+                ios.push_back({dst_raw, b, dev_off + done, chunk});
+                continue;
+            }
+            const int64_t full = (dst_bytes - b) / sector_size * sector_size;
+            if (full > 0) ios.push_back({dst_raw, b, dev_off + done, full});
+            const int64_t rest = chunk - full;   // sector multiple, includes padding
+            auto scratch = torch::empty({rest}, dst.options().dtype(at::kByte));
+            ios.push_back({scratch.data_ptr(), 0, dev_off + done + full, rest});
+            tails.push_back({scratch, b + full, dst_bytes - b - full});
         }
     }
 
@@ -833,11 +854,21 @@ int64_t gather_partitions_direct_raw_async(
     C10_CUDA_CHECK(cudaEventCreateWithFlags(&ready, cudaEventDisableTiming));
     C10_CUDA_CHECK(cudaEventRecord(ready, at::cuda::getCurrentCUDAStream(device)));
 
-    auto job = [handle, device, ready, dst, ios = std::move(ios)]() {
+    auto job = [handle, device, ready, dst, ios = std::move(ios), tails = std::move(tails)]() {
         c10::cuda::CUDAGuard guard(device);
         C10_CUDA_CHECK(cudaEventSynchronize(ready));
         C10_CUDA_CHECK(cudaEventDestroy(ready));
         gpu_write_run_batches(handle, ios, CUFILE_READ);   // `dst` held alive until done
+        if (!tails.empty()) {
+            // Valid bytes of the padded last page: scratch -> dst.
+            auto stream = c10::cuda::getStreamFromPool(false, device);
+            for (const TailCopy& t : tails) {
+                C10_CUDA_CHECK(cudaMemcpyAsync(
+                    static_cast<uint8_t*>(dst.data_ptr()) + t.dst_off,
+                    t.scratch.data_ptr(), t.bytes, cudaMemcpyDeviceToDevice, stream));
+            }
+            C10_CUDA_CHECK(cudaStreamSynchronize(stream));
+        }
     };
 
     std::lock_guard<std::mutex> lock(g_gpu_write_mutex);
