@@ -12,7 +12,7 @@ import torch
 from torch import Tensor
 
 from grinnder.buffer.host import HostBuffer
-from grinnder.stats import timed, timed_by
+from grinnder.stats import stat, timed, timed_by
 
 
 class DeviceBuffer:
@@ -182,9 +182,11 @@ class DeviceBuffer:
         )
         self._gather_ops = host_buffer._ops
 
-    @timed("ssd.read.gather.wait")
     def wait_gather(self, pid: Optional[int] = None) -> None:
-        """Wait for the async SSD gather/read of one partition (or all of them)."""
+        """Wait for the async SSD gather/read of one partition (or all of them).
+
+        Timed (and traced) only when a read is pending: release()/reset() call
+        this for every partition, and empty checks would only add noise."""
         if not self._pending_gathers:
             return
         pids = list(self._pending_gathers) if pid is None else [pid]
@@ -192,10 +194,11 @@ class DeviceBuffer:
             job = self._pending_gathers.pop(p, None)
             if job is None:
                 continue
-            if isinstance(job, int):
-                self._gather_ops.gather_wait(job)
-            else:
-                job.wait()   # PendingRead
+            with stat.timed("ssd.read.gather.wait"):
+                if isinstance(job, int):
+                    self._gather_ops.gather_wait(job)
+                else:
+                    job.wait()   # PendingRead (its own wait key is the inner timer)
 
 
     def storage_to_gpu(
