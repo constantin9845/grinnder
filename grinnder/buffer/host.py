@@ -16,7 +16,7 @@ import os
 from torch import Tensor
 
 from grinnder.storage.backend import StorageBackend
-from grinnder.stats import stat, timed, timed_by
+from grinnder.stats import stat, timed, timed_by, trace
 
 
 def _load_ops():
@@ -783,6 +783,13 @@ class HostBuffer:
         stream.wait_stream(torch.cuda.current_stream(gpu_target.device))
         with torch.cuda.stream(stream):
             job = self._submit_read(gpu_target, runs_t)
+        if trace.recording and job is not None:
+            trace.event(
+                "job", job=job, what="gather", phase=phase, pid=pid,
+                target_rows=n_target, boundary_rows=total_rows - n_target,
+                from_parts={int(p): len(r) for p, r in segments[1:]},
+                runs=runs_t.size(0),
+            )
 
         bt = gpu_target.numel() * gpu_target.element_size()
         gb = round(bt / (1024**3), 3)
@@ -941,6 +948,9 @@ class HostBuffer:
                 runs_t = torch.tensor(runs, dtype=torch.int64).reshape(-1, 3)
             with torch.cuda.stream(stream):
                 job = self._submit_read(gpu_target, runs_t)
+            if trace.recording and job is not None:
+                trace.event("job", job=job, what="partition", pid=pid,
+                            file=self._file_id(pid), runs=runs_t.size(0))
             pending = PendingRead(self._ops, [job])
             with stat.timed("ftl.log"):
                 print(f"[read_raw] {self._file_id(pid)} runs={runs_t.size(0)}")
@@ -1056,6 +1066,9 @@ class HostBuffer:
                 jobs.append(self._submit_read(
                     gpu_target, self._blob_row_runs(file_id, first, n, 0, row_bytes)
                 ))
+                if trace.recording and jobs[-1] is not None:
+                    trace.event("job", job=jobs[-1], what="gradient.own", pid=pid,
+                                file=file_id, rows=n)
             else:
                 gpu_target.zero_()
 
@@ -1074,6 +1087,9 @@ class HostBuffer:
                     adds.append((idx.to(gpu_target.device, torch.long), s, n))
                     s += n
                 jobs.append(self._submit_read(staging, torch.cat(runs)))
+                if trace.recording and jobs[-1] is not None:
+                    trace.event("job", job=jobs[-1], what="gradient.others", pid=pid,
+                                files=[f for f, _ in others], rows=total)
 
         def post():
             if not adds:

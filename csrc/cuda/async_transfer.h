@@ -57,6 +57,14 @@ int64_t register_fd(int raw_fd);
 void set_gds_direct(bool on);
 bool get_gds_direct();
 
+/* Event trace (--trace): one chronological log of Python events and GDS
+   worker events. trace_drain returns and clears (seq, t_ns, tid, name, args_json). */
+void trace_enable(bool on);
+bool trace_enabled();
+void trace_event(const std::string& name, const std::string& args_json);
+int64_t trace_pending();
+std::vector<std::tuple<int64_t, int64_t, int64_t, std::string, std::string>> trace_drain();
+
 static inline uint64_t encode_host_ftl_bit(uint64_t raw_ppa);
 
 void gather_partitions_direct_raw(

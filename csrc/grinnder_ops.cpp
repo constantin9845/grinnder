@@ -52,6 +52,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("register_fd", &register_fd, "register fd with CUfile");
   m.def("set_gds_direct", &set_gds_direct, "Turn GDS mode (cuFile batch path) on or off");
   m.def("get_gds_direct", &get_gds_direct, "Whether GDS mode is on");
+  m.def("trace_enable", &trace_enable, "Turn the event trace on or off");
+  m.def("trace_enabled", &trace_enabled, "Whether the event trace is on");
+  m.def("trace_event", &trace_event, "Record one trace event (name, JSON args)");
+  m.def("trace_pending", &trace_pending, "Number of trace events not drained yet");
+  m.def("trace_drain", &trace_drain,
+        "Return and clear trace events as (seq, t_ns, tid, name, args_json) tuples");
   m.def("gather_partitions_direct_raw", &gather_partitions_direct_raw,
         "Gather rows from raw block device to GPU tensor (blocking)",
         py::call_guard<py::gil_scoped_release>());

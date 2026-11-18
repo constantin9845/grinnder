@@ -27,7 +27,7 @@ from grinnder.cache.partition_cache import PartitionCache
 from grinnder.engine.streams import StreamManager
 from grinnder.storage.backend import StorageBackend
 from grinnder.utils import compute_micro_f1
-from grinnder.stats import stat
+from grinnder.stats import stat, trace
 
 
 class Trainer:
@@ -494,6 +494,7 @@ class Trainer:
 
         bd = stat.breakdown
         bd.begin_epoch()
+        trace.begin_epoch()
         self.reset_epoch()
         optimizer.zero_grad()
 
@@ -568,6 +569,7 @@ class Trainer:
         if self.backend is not None and self.backend.uses_ftl:
             bd.snapshot("ftl", self.backend.host_ftl.stats())
         bd.end_epoch()
+        trace.end_epoch()
         return metrics
 
     @torch.no_grad()
@@ -671,6 +673,7 @@ class Trainer:
 
         for i, pid in enumerate(pids):
             pool_idx = i % pool_size
+            trace.event("partition", phase="forward", layer=layer_id, pid=pid)
 
             # Wait for H2D of current partition
             self.device_features[layer_id].h2d_synchronize(
@@ -899,6 +902,7 @@ class Trainer:
 
         for i, pid in enumerate(pids):
             pool_idx = i % pool_size
+            trace.event("partition", phase="loss", layer=last_layer, pid=pid)
 
             self.host_features[-1].h2d_synchronize(self.streams.h2d[pool_idx], pid)
             torch.cuda.current_stream().wait_stream(self.streams.h2d[pool_idx])
@@ -1013,6 +1017,7 @@ class Trainer:
 
         for i, pid in enumerate(pids):
             pool_idx = i % pool_size
+            trace.event("partition", phase="backward", layer=self.model.num_layers - 1, pid=pid)
             loss_idx = self._pid_to_loss_idx[pid]
 
             # Wait for re-gather to complete
@@ -1153,6 +1158,7 @@ class Trainer:
 
         for i, pid in enumerate(pids):
             pool_idx = i % pool_size
+            trace.event("partition", phase="backward", layer=layer_id, pid=pid)
 
             # Wait for H2D of gradient and regathered features
             if self.config.mode == "grinnder":

@@ -28,6 +28,8 @@
 #include <atomic>
 #include <thread>
 #include <functional>
+#include <tuple>
+#include <sys/syscall.h>
 
 // GDS mode, set from Python by StorageBackend (config.gds, i.e. --gds) through
 // set_gds_direct() before any I/O. On, Python uses the cuFile batch functions
@@ -44,6 +46,88 @@ bool get_gds_direct() { return g_gds_direct.load(); }
 
 static bool gds_direct_mode() {
     return g_gds_direct.load(std::memory_order_relaxed);
+}
+
+// ---------------------------------------------------------------------------
+// Event trace (--trace).
+//
+// One chronological log for the whole process: Python events (trace_event)
+// and the GDS worker threads' events go into the same buffer. Each event gets
+// a sequence number and a CLOCK_MONOTONIC timestamp under one mutex, so `seq`
+// is the exact order events were recorded in, across all threads. Python
+// drains the buffer (trace_drain) and writes it to a file. Off: one atomic
+// load per call site.
+// ---------------------------------------------------------------------------
+
+struct TraceEvent {
+    int64_t seq;
+    int64_t t_ns;
+    int64_t tid;
+    std::string name;
+    std::string args;   // JSON object
+};
+
+static std::atomic<bool> g_trace_on{false};
+static std::mutex g_trace_mutex;
+static std::vector<TraceEvent> g_trace;
+static int64_t g_trace_seq = 0;
+
+static inline bool trace_on() { return g_trace_on.load(std::memory_order_relaxed); }
+
+static void trace_emit(const char* name, std::string args) {
+    if (!trace_on()) return;
+    thread_local const int64_t tid = static_cast<int64_t>(::syscall(SYS_gettid));
+    std::lock_guard<std::mutex> lock(g_trace_mutex);
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    const int64_t t = static_cast<int64_t>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
+    g_trace.push_back({g_trace_seq++, t, tid, name, std::move(args)});
+}
+
+// {"k1":v1,"k2":v2,...} from integer fields.
+static std::string trace_args(std::initializer_list<std::pair<const char*, int64_t>> kv) {
+    std::string s = "{";
+    for (const auto& p : kv) {
+        if (s.size() > 1) s += ',';
+        s += '"';
+        s += p.first;
+        s += "\":";
+        s += std::to_string(p.second);
+    }
+    s += '}';
+    return s;
+}
+
+static int64_t mono_ns() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<int64_t>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
+}
+
+void trace_enable(bool on) { g_trace_on.store(on); }
+bool trace_enabled() { return trace_on(); }
+
+void trace_event(const std::string& name, const std::string& args_json) {
+    trace_emit(name.c_str(), args_json.empty() ? std::string("{}") : args_json);
+}
+
+int64_t trace_pending() {
+    std::lock_guard<std::mutex> lock(g_trace_mutex);
+    return static_cast<int64_t>(g_trace.size());
+}
+
+std::vector<std::tuple<int64_t, int64_t, int64_t, std::string, std::string>> trace_drain() {
+    std::vector<TraceEvent> evs;
+    {
+        std::lock_guard<std::mutex> lock(g_trace_mutex);
+        evs.swap(g_trace);
+    }
+    std::vector<std::tuple<int64_t, int64_t, int64_t, std::string, std::string>> out;
+    out.reserve(evs.size());
+    for (auto& e : evs) {
+        out.emplace_back(e.seq, e.t_ns, e.tid, std::move(e.name), std::move(e.args));
+    }
+    return out;
 }
 
 static std::unordered_map<int, CUfileHandle_t> g_cufile_handles;
@@ -573,12 +657,18 @@ static int64_t g_gpu_write_next_id = 0;
 
 // Runs every I/O in `ios` (CUFILE_READ or CUFILE_WRITE) through the cuFile
 // batch API, GPU_WRITE_BATCH entries at a time. Shared by GPU writes and gathers.
+// `job` only labels trace events.
 static void gpu_write_run_batches(CUfileHandle_t handle, const std::vector<GpuWriteIo>& ios,
-                                  CUfileOpcode_t opcode) {
+                                  CUfileOpcode_t opcode, int64_t job = -1) {
     if (ios.empty()) return;
     const char* what = opcode == CUFILE_READ ? "read" : "write";
     std::unique_lock<std::mutex> batch_lock(g_cufile_batch_mutex, std::defer_lock);
-    if (gds_direct_mode()) batch_lock.lock();
+    if (gds_direct_mode()) {
+        const int64_t t0 = trace_on() ? mono_ns() : 0;
+        batch_lock.lock();
+        // Time this job waited for other jobs' batches (global batch lock).
+        if (trace_on()) trace_emit("gds.lock", trace_args({{"job", job}, {"wait_ns", mono_ns() - t0}}));
+    }
 
     CUfileBatchHandle_t batch;
     CUfileError_t st = cuFileBatchIOSetUp(&batch, GPU_WRITE_BATCH);
@@ -606,10 +696,17 @@ static void gpu_write_run_batches(CUfileHandle_t handle, const std::vector<GpuWr
             params[i].u.batch.size = static_cast<size_t>(io.size);
         }
 
+        const int64_t batch_no = static_cast<int64_t>(first / GPU_WRITE_BATCH);
         st = cuFileBatchIOSubmit(batch, n, params.data(), 0);
         if (st.err != CU_FILE_SUCCESS) {
             error = "cuFileBatchIOSubmit failed: err=" + std::to_string(static_cast<int>(st.err));
             break;
+        }
+        // I/Os first .. first+n-1 are in flight from here on.
+        if (trace_on()) {
+            trace_emit("gds.batch_submit",
+                       trace_args({{"job", job}, {"batch", batch_no},
+                                   {"first_io", static_cast<int64_t>(first)}, {"n", n}}));
         }
 
         // Wait for every entry of this batch before reusing the batch handle.
@@ -641,6 +738,16 @@ static void gpu_write_run_batches(CUfileHandle_t handle, const std::vector<GpuWr
             for (unsigned i = 0; i < nr; ++i) {
                 const size_t idx = reinterpret_cast<uintptr_t>(events[i].cookie);
                 const GpuWriteIo& io = ios[idx];
+                if (trace_on()) {
+                    // Completion order as cuFile reports it (events of one
+                    // GetStatus call come back together).
+                    trace_emit("gds.io_done",
+                               trace_args({{"job", job}, {"batch", batch_no},
+                                           {"io", static_cast<int64_t>(idx)},
+                                           {"dev_off", io.dev_off}, {"bytes", io.size},
+                                           {"ok", events[i].status == CUFILE_COMPLETE &&
+                                                  events[i].ret == static_cast<size_t>(io.size)}}));
+                }
                 if ((events[i].status != CUFILE_COMPLETE ||
                      events[i].ret != static_cast<size_t>(io.size)) && error.empty()) {
                     error = std::string("cuFile batch ") + what + " failed: dev_off=" + std::to_string(io.dev_off) +
@@ -653,10 +760,45 @@ static void gpu_write_run_batches(CUfileHandle_t handle, const std::vector<GpuWr
             }
             completed += nr;
         }
+        if (trace_on()) {
+            trace_emit("gds.batch_done",
+                       trace_args({{"job", job}, {"batch", batch_no}, {"done", completed}}));
+        }
     }
 
     cuFileBatchIODestroy(batch);
     TORCH_CHECK(error.empty(), error);
+}
+
+// Job ids are taken before the job starts, so its trace events (worker
+// thread) can never be recorded before its gds.submit (caller thread).
+static int64_t new_gpu_job_id() {
+    std::lock_guard<std::mutex> lock(g_gpu_write_mutex);
+    return g_gpu_write_next_id++;
+}
+
+static void start_gpu_job(int64_t id, std::function<void()> body) {
+    auto run = [id, body = std::move(body)]() {
+        try {
+            body();
+        } catch (...) {
+            if (trace_on()) trace_emit("gds.job_end", trace_args({{"job", id}, {"ok", 0}}));
+            throw;
+        }
+        if (trace_on()) trace_emit("gds.job_end", trace_args({{"job", id}, {"ok", 1}}));
+    };
+    std::lock_guard<std::mutex> lock(g_gpu_write_mutex);
+    g_gpu_write_jobs.emplace(id, std::async(std::launch::async, std::move(run)));
+}
+
+// Worker side: wait until the caller's stream reached the job's start point.
+static void wait_ready_event(int64_t id, cudaEvent_t ready) {
+    const int64_t t0 = trace_on() ? mono_ns() : 0;
+    C10_CUDA_CHECK(cudaEventSynchronize(ready));
+    C10_CUDA_CHECK(cudaEventDestroy(ready));
+    if (trace_on()) {
+        trace_emit("gds.job_start", trace_args({{"job", id}, {"ready_wait_ns", mono_ns() - t0}}));
+    }
 }
 
 int64_t gpu_write_async(
@@ -683,10 +825,17 @@ int64_t gpu_write_async(
 
     auto r = runs.to(at::kCPU).contiguous();
 
-    auto job = [handle, device, ready, src, r, sector_size, page_size]() {
+    const int64_t id = new_gpu_job_id();
+    if (trace_on()) {
+        trace_emit("gds.submit",
+                   "{\"job\":" + std::to_string(id) + ",\"op\":\"write\",\"runs\":" +
+                   std::to_string(r.size(0)) + ",\"bytes\":" +
+                   std::to_string(src.numel() * src.element_size()) + "}");
+    }
+
+    auto job = [id, handle, device, ready, src, r, sector_size, page_size]() {
         c10::cuda::CUDAGuard guard(device);
-        C10_CUDA_CHECK(cudaEventSynchronize(ready));
-        C10_CUDA_CHECK(cudaEventDestroy(ready));
+        wait_ready_event(id, ready);
 
         const int64_t* rp = r.data_ptr<int64_t>();
         void* src_raw = src.data_ptr();
@@ -733,12 +882,16 @@ int64_t gpu_write_async(
                         "gpu_write: unaligned I/O dev_off=", io.dev_off, " size=", io.size);
         }
 
-        gpu_write_run_batches(handle, ios, CUFILE_WRITE);   // `tail` stays alive until this returns
+        if (trace_on()) {
+            int64_t bytes = 0;
+            for (const GpuWriteIo& io : ios) bytes += io.size;
+            trace_emit("gds.ios", trace_args({{"job", id}, {"ios", static_cast<int64_t>(ios.size())},
+                                              {"bytes", bytes}, {"tail", tail.defined()}}));
+        }
+        gpu_write_run_batches(handle, ios, CUFILE_WRITE, id);   // `tail` stays alive until this returns
     };
 
-    std::lock_guard<std::mutex> lock(g_gpu_write_mutex);
-    const int64_t id = g_gpu_write_next_id++;
-    g_gpu_write_jobs.emplace(id, std::async(std::launch::async, std::move(job)));
+    start_gpu_job(id, std::move(job));
     return id;
 }
 
@@ -751,6 +904,12 @@ void gpu_write_wait(int64_t id) {
         fut = std::move(it->second);
         g_gpu_write_jobs.erase(it);
     }
+    // Caller blocks on job `id` from wait_begin to wait_end.
+    if (trace_on()) trace_emit("gds.wait_begin", trace_args({{"job", id}}));
+    struct End {
+        int64_t id;
+        ~End() { if (trace_on()) trace_emit("gds.wait_end", trace_args({{"job", id}})); }
+    } end{id};
     fut.get();   // rethrows the worker's error, if any
 }
 
@@ -854,12 +1013,26 @@ int64_t gather_partitions_direct_raw_async(
     C10_CUDA_CHECK(cudaEventCreateWithFlags(&ready, cudaEventDisableTiming));
     C10_CUDA_CHECK(cudaEventRecord(ready, at::cuda::getCurrentCUDAStream(device)));
 
-    auto job = [handle, device, ready, dst, ios = std::move(ios), tails = std::move(tails)]() {
+    const int64_t id = new_gpu_job_id();
+    if (trace_on()) {
+        int64_t bytes = 0;
+        for (const GpuWriteIo& io : ios) bytes += io.size;
+        trace_emit("gds.submit",
+                   "{\"job\":" + std::to_string(id) + ",\"op\":\"read\",\"runs\":" +
+                   std::to_string(r.size(0)) + ",\"ios\":" + std::to_string(ios.size()) +
+                   ",\"bytes\":" + std::to_string(bytes) +
+                   ",\"tail\":" + std::to_string(tails.size()) + "}");
+    }
+
+    auto job = [id, handle, device, ready, dst, ios = std::move(ios), tails = std::move(tails)]() {
         c10::cuda::CUDAGuard guard(device);
-        C10_CUDA_CHECK(cudaEventSynchronize(ready));
-        C10_CUDA_CHECK(cudaEventDestroy(ready));
-        gpu_write_run_batches(handle, ios, CUFILE_READ);   // `dst` held alive until done
+        wait_ready_event(id, ready);
+        gpu_write_run_batches(handle, ios, CUFILE_READ, id);   // `dst` held alive until done
         if (!tails.empty()) {
+            if (trace_on()) {
+                trace_emit("gds.tail_copy",
+                           trace_args({{"job", id}, {"n", static_cast<int64_t>(tails.size())}}));
+            }
             // Valid bytes of the padded last page: scratch -> dst.
             auto stream = c10::cuda::getStreamFromPool(false, device);
             for (const TailCopy& t : tails) {
@@ -871,9 +1044,7 @@ int64_t gather_partitions_direct_raw_async(
         }
     };
 
-    std::lock_guard<std::mutex> lock(g_gpu_write_mutex);
-    const int64_t id = g_gpu_write_next_id++;
-    g_gpu_write_jobs.emplace(id, std::async(std::launch::async, std::move(job)));
+    start_gpu_job(id, std::move(job));
     return id;
 }
 

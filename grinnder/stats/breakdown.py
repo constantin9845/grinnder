@@ -36,6 +36,8 @@ import time
 from collections import defaultdict
 from typing import Dict, List, Optional
 
+from grinnder.stats.trace import trace
+
 # Leaves per top-level category, in report order.
 TREE: Dict[str, tuple] = {
     "ssd": (
@@ -133,12 +135,16 @@ class _Timer:
     def __enter__(self):
         if self._bd.active:
             self._frame = self._bd._push(self._key)
+        if trace.recording:
+            trace.event("begin", key=self._key)
         return self
 
     def __exit__(self, *exc):
         if self._frame is not None:
             self._bd._pop(self._frame)
             self._frame = None
+        if trace.recording:
+            trace.event("end", key=self._key)
         return False
 
 
@@ -194,6 +200,7 @@ class TimeBreakdown:
         self._close_phase(now)
         self._phase = phase
         self._phase_t0 = now
+        trace.event("phase", phase=phase)
 
     def end_epoch(self) -> dict:
         now = time.perf_counter_ns()

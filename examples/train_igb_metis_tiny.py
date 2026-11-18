@@ -19,7 +19,7 @@ import torch
 from grinnder import GAT, GCN, GriNNderConfig, Trainer, build_partitioned_graph, build_partitioned_graph_metis
 from grinnder.data.datasets import load_igb
 from grinnder.utils import fix_seed, get_default_partitioner_threads, report_memory
-from grinnder.stats import stat
+from grinnder.stats import stat, trace
 
 
 def parse_size_gb(text: str) -> float:
@@ -99,6 +99,10 @@ def main():
                         help="Ours only. 1: SSD<->GPU reads/writes via cuFile batch I/O "
                              "(GPUDirect Storage). 0 (default): NVMe passthrough + pinned "
                              "host buffer. Ignored with --io_mode base.")
+    parser.add_argument("--trace", action="store_true",
+                        help="Write a chronological event log of every epoch to "
+                             "<breakdown_json stem>_trace_epoch<N>.jsonl. SSD I/O events "
+                             "(each cuFile batch and I/O completion) only with --gds 1.")
     parser.add_argument("--breakdown_json", type=str, default="time_breakdown.json",
                         help="Where to save the per-epoch time breakdown (SSD / data movement / compute).")
     parser.add_argument("--row_order", type=str, default="original", choices=["original", "grouped"],
@@ -277,6 +281,12 @@ def main():
     epoch_times = []
     t_start = time.time()
 
+    if args.trace:
+        stem = args.breakdown_json[:-5] if args.breakdown_json.endswith(".json") else args.breakdown_json
+        trace.start(f"{stem}_trace_epoch{{}}.jsonl")
+        if not (args.io_mode == "ours" and args.gds):
+            print("[trace] note: no SSD I/O events without --io_mode ours --gds 1")
+
     for epoch in range(1, args.epochs + 1):
         t0 = time.time()
         metrics = trainer.train_epoch(optimizer, criterion)
@@ -285,6 +295,8 @@ def main():
 
         stat.print_timeline()
         stat.breakdown.print_epoch(title=f"epoch {epoch}")
+        if args.trace and trace.paths:
+            print(f"Trace saved to {trace.paths[-1]}")
         print(f"Epoch Time = {t_epoch}")
         
 

@@ -17,7 +17,7 @@ import torch
 from torch import Tensor
 
 from grinnder.utils import ensure_dir
-from grinnder.stats import stat, timed, timed_by
+from grinnder.stats import stat, timed, timed_by, trace
 from grinnder.ftl import FTL
 
 
@@ -172,6 +172,8 @@ class StorageBackend:
         # (or the current stream) has finished.
         with torch.cuda.stream(stream) if stream is not None else contextlib.nullcontext():
             job = ftl.gpu_write(meta, tensor, file_id, async_=async_)
+        if trace.recording and async_ and job is not None:
+            trace.event("job", job=job, what=f"write.{kind}", file=file_id, bytes=nbytes)
         if async_:
             self._pending_gpu_writes[file_id] = (job, f"ssd.write.{kind}.wait")
 
